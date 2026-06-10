@@ -4,7 +4,7 @@
 
 [run]
 project = "ardevo"
-experiment = "xor_topology"
+experiment = "scaffolding_testing"
 clearml = true              # true to track in ClearML; false runs fully offline
 machine = "MonadMetal"       # MonadMetal|MonadCPU|local -> local queue; Lattice* -> remote
 seed = 0

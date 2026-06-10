@@ -38,6 +38,7 @@ class Assessed:
     genome: Genome
     metrics: dict[str, float]
     fitness: float
+    module: GraphNet  # the exact trained network that produced these metrics (for faithful saving)
 
 
 GenerationHook = Callable[[int, Assessed, float], None]
@@ -76,7 +77,7 @@ class Evolver:
             module = adapter.decode(genome)
             genome, module = self.train_op(genome, module, adapter.encoded, rng=rng)
             metrics = adapter.evaluate(module)
-            return Assessed(genome, metrics, self.fitness(genome, metrics))
+            return Assessed(genome, metrics, self.fitness(genome, metrics), module)
 
         assessed = [assess(genome) for genome in population]
         best = max(assessed, key=lambda item: item.fitness)

@@ -8,6 +8,7 @@ executable torch module; the mutation operators grow the graph from a minimal se
 from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from typing import Any
 
 
 class NodeKind(Enum):
@@ -166,3 +167,18 @@ def set_connection(genome: Genome, target: ConnectionGene) -> None:
 
 def with_connection_weight(conn: ConnectionGene, weight: float) -> ConnectionGene:
     return replace(conn, weight=weight)
+
+
+def genome_to_dict(genome: Genome) -> dict[str, Any]:
+    """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
+    return {
+        "nodes": [{"id": node.id, "kind": node.kind.value, "activation": node.activation} for node in genome.nodes.values()],
+        "connections": [{"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation} for conn in genome.connections],
+    }
+
+
+def genome_from_dict(data: dict[str, Any]) -> Genome:
+    """Rebuild a genome from the dict produced by `genome_to_dict`."""
+    nodes = {int(node["id"]): NodeGene(int(node["id"]), NodeKind(node["kind"]), node["activation"]) for node in data["nodes"]}
+    connections = [ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"])) for conn in data["connections"]]
+    return Genome(nodes=nodes, connections=connections)
