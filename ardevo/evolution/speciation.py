@@ -14,8 +14,9 @@ representative genome per species across generations), so the registry returns c
 
 import random
 from dataclasses import dataclass, field
+from typing import Any
 
-from ardevo.evolution.genome import Genome
+from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.registry import Registry
 
 SPECIATION: Registry = Registry("speciation")
@@ -99,6 +100,12 @@ class NoSpeciation:
         size = len(genomes)
         elites = min(elitism, size)
         return [SpeciesPlan(species_id=0, members=list(range(size)), n_elites=elites, n_offspring=pop_size - elites)]
+
+    def state_dict(self) -> dict[str, Any]:
+        return {}
+
+    def load_state_dict(self, data: dict[str, Any]) -> None:
+        return None  # no persistent state
 
 
 @dataclass
@@ -194,3 +201,20 @@ class NeatSpeciation:
         if difference and offspring:
             largest = max(range(len(offspring)), key=lambda i: offspring[i])
             offspring[largest] = max(0, offspring[largest] + difference)
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize the persistent niche state (id counter, threshold, per-species representative).
+
+        Per-generation `members` are not stored: on resume the population is re-assessed and the next
+        call re-partitions it against the saved representatives.
+        """
+        return {
+            "threshold": self.threshold,
+            "next_id": self._next_id,
+            "species": [{"id": species.id, "representative": genome_to_dict(species.representative)} for species in self.species],
+        }
+
+    def load_state_dict(self, data: dict[str, Any]) -> None:
+        self.threshold = float(data["threshold"])
+        self._next_id = int(data["next_id"])
+        self.species = [_Species(id=int(entry["id"]), representative=genome_from_dict(entry["representative"])) for entry in data["species"]]

@@ -31,6 +31,8 @@ uv run app                                       # default config.toml
 uv run app --config configs/rung1_xor.toml       # rung 1: XOR
 uv run app --config configs/rung2_parity.toml    # rung 2: parity (function-fit)
 uv run app --config configs/rung3_two_spirals.toml  # rung 3: two-spirals (generalization; slow)
+uv run app --config configs/continuous_ladder.toml  # ALL rungs interleaved into one growing topology
+uv run app --config configs/continuous_ladder.toml --resume results/<ts>_continuous  # pick up where it left off
 ```
 
 What each rung shows (see `configs/` for tuned, runnable settings):
@@ -48,6 +50,32 @@ split is meaningful. The achievement on parity is growing a minimal topology tha
 Set `[run] clearml = true` to track in ClearML; it degrades gracefully offline. Machine env maps to a queue:
 `MonadMetal`/`MonadCPU`/`local` run locally, `LatticeCPU`/`LatticeCUDA` enqueue remotely.
 
+## One topology across the whole ladder (continuous run)
+
+`configs/continuous_ladder.toml` drives a single continuous run that randomly interleaves tasks across
+many rungs and keeps **one** population alive across the switches, so the topology grows to be good at
+all of them. Every Icarus rung is a differentiable supervised `(input -> output)` task (the
+`INTERACTIVE` flag on rungs 4-5 is provenance, not a separate scoring regime), so the same gradient
+inner loop scores all 18 rungs; the default config starts with the fast rungs 1-5 and `[schedule] rungs`
+is the single knob to widen coverage (set `rungs = "all"` for the full ladder).
+
+The interface is **grown, never pre-allocated** (the minimum-complexity thesis applied to I/O):
+
+- Inputs live in **descriptor-keyed banks** (one per `value_type` + `axes` signature) that widen on
+  demand; a node is never overloaded with semantically different values (a bit and a coordinate never
+  share a node). Each input node is stamped with its raw axis-index `coordinate`.
+- Each task grows its **own disjoint output head** on first encounter, scored via a thin head-slicing
+  wrapper so the shared `GraphNet` decode and the evaluate/train path are unchanged.
+- The shared hidden body persists across switches; the geometry-biased mutators (`add_local_node`,
+  `add_local_connection`, `add_shared_motif`) read the coordinates to grow local receptive fields.
+- A **complexity penalty is mandatory** so the shared body cannot grow unbounded (the trial refuses to
+  run without one).
+
+State is saved every `checkpoint_every` generations into its own `results/<ts>_continuous/gen_<NNNNNN>/`
+(model, stats, net, speciation, plus a resumable `checkpoint.json`); `--resume <run_dir>` continues from
+the latest checkpoint bit-for-bit. `stats.json` records the champion's accuracy on every rung seen so far
+(the "good at all rungs" signal).
+
 ## Lego-block evolution
 
 Every stage of the generational loop is an independent, registered operator selected and tuned from `config.toml`.
@@ -60,9 +88,10 @@ register one new function in the matching registry; the loop itself never change
 | init | `[evolution.init]` | `minimal` |
 | selection | `[evolution.selection]` | `tournament`, `truncation` |
 | crossover | `[evolution.crossover]` | `none`, `neat` |
-| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `perturb_weights` |
+| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_local_node` / `add_local_connection` / `add_shared_motif` (coordinate-aware locality), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `perturb_weights` |
 | train | `[evolution.train]` | `none`, `gradient` (params `steps`, `lr`, `writeback`, `weight_decay`; future: `cmaes` via evosax) |
 | speciation | `[evolution.speciation]` | `none`, `neat` (compatibility threshold auto-targets a species count) |
+| schedule | `[schedule]` | `random`, `round_robin`, `interleave_rungs` (continuous run only; picks the next task) |
 | fitness | `[fitness]` | `support_accuracy`, `query_accuracy`, `negative_support_loss`, `negative_query_loss`, `complexity_penalty` |
 
 Notes from getting this to actually grow useful topologies: `add_rich_node` only widens a layer, so depth-needing
@@ -88,11 +117,16 @@ ardevo/
 │   ├── mutation.py     # structural + weight mutators
 │   ├── train.py        # weight-optimization operators (gradient / none)
 │   ├── fitness.py      # fitness components + weighted aggregator
-│   └── evolver.py      # the thin generational loop
-├── substrate.py        # decode a genome into a torch GraphNet
+│   ├── multitask.py    # grow-the-I/O substrate: descriptor-keyed banks, output heads, head-slicing
+│   ├── schedule.py     # task scheduler operators for the continuous run
+│   └── evolver.py      # the thin generational loop (steppable EvolverState for the continuous run)
+├── substrate.py        # decode a genome into a torch GraphNet (SubstrateModule base)
 ├── evaluation.py       # score a substrate on a Task via the Icarus encoder/loss
+├── checkpoint.py       # serialize/restore the continuous run for --resume
+├── results.py          # per-run local artifacts (stats, model, net, speciation)
 ├── trials/
-│   └── xor_trial.py    # EvolutionTrial(Proctor): runs + logs one rung
+│   ├── xor_trial.py        # EvolutionTrial(Proctor): runs + logs one rung
+│   └── continuous_trial.py # ContinuousTrial(Proctor): one topology across interleaved rungs
 ├── utils/
 │   ├── config.py       # config.toml -> runtime dict
 │   ├── pipelines.py    # ClearML task + machine->queue + trial orchestration

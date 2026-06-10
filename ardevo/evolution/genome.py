@@ -5,6 +5,7 @@ the genes so structure and weights co-evolve. The substrate decoder turns a geno
 executable torch module; the mutation operators grow the graph from a minimal seed.
 """
 
+import math
 from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -23,6 +24,10 @@ class NodeGene:
     id: int
     kind: NodeKind
     activation: str
+    # Axis-normalized position used ONLY by the geometry-biased mutation operators (the substrate
+    # decoder ignores it). None means "no geometry" - the single-task path and the bias node leave it
+    # unset, so locality operators simply skip those nodes.
+    coordinate: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,19 @@ def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
     return False
 
 
+def coordinate_distance(a: tuple[float, ...] | None, b: tuple[float, ...] | None) -> float:
+    """Euclidean distance between two node coordinates, or inf when they are incomparable.
+
+    Coordinates from different banks/axis-signatures have different lengths (or are None); those
+    pairs are incomparable, so geometry operators treat them as infinitely far and never wire them
+    together. This is what keeps a binary bit and a continuous coordinate out of the same receptive
+    field even though they share one growing topology.
+    """
+    if a is None or b is None or len(a) != len(b):
+        return math.inf
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
 def topological_order(genome: Genome) -> list[int]:
     """Kahn's algorithm over enabled edges. Raises ValueError on a cycle."""
     incoming: dict[int, int] = {node_id: 0 for node_id in genome.nodes}
@@ -155,6 +173,20 @@ class InnovationTracker:
             self._next_innovation += 1
         return self._edge_innovations[key]
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the id/innovation counters and the edge->innovation map (for checkpoint/resume)."""
+        return {
+            "next_node_id": self._next_node_id,
+            "next_innovation": self._next_innovation,
+            "edge_innovations": [[in_id, out_id, innovation] for (in_id, out_id), innovation in self._edge_innovations.items()],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "InnovationTracker":
+        tracker = cls(_next_node_id=int(data["next_node_id"]), _next_innovation=int(data["next_innovation"]))
+        tracker._edge_innovations = {(int(in_id), int(out_id)): int(innovation) for in_id, out_id, innovation in data["edge_innovations"]}
+        return tracker
+
 
 def set_connection(genome: Genome, target: ConnectionGene) -> None:
     """Replace the gene for (in_id, out_id) in place, or append it if new."""
@@ -192,13 +224,20 @@ def make_acyclic(genome: Genome) -> Genome:
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
     return {
-        "nodes": [{"id": node.id, "kind": node.kind.value, "activation": node.activation} for node in genome.nodes.values()],
+        "nodes": [
+            {"id": node.id, "kind": node.kind.value, "activation": node.activation, "coordinate": list(node.coordinate) if node.coordinate is not None else None}
+            for node in genome.nodes.values()
+        ],
         "connections": [{"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation} for conn in genome.connections],
     }
 
 
 def genome_from_dict(data: dict[str, Any]) -> Genome:
     """Rebuild a genome from the dict produced by `genome_to_dict`."""
-    nodes = {int(node["id"]): NodeGene(int(node["id"]), NodeKind(node["kind"]), node["activation"]) for node in data["nodes"]}
+    nodes: dict[int, NodeGene] = {}
+    for node in data["nodes"]:
+        node_id = int(node["id"])
+        coordinate = tuple(node["coordinate"]) if node.get("coordinate") is not None else None
+        nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate)
     connections = [ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"])) for conn in data["connections"]]
     return Genome(nodes=nodes, connections=connections)

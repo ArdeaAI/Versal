@@ -51,6 +51,7 @@ class Config:
         substrate = raw.get("substrate", {})
         evolution = raw.get("evolution", {})
         fitness = raw.get("fitness", {})
+        schedule = raw.get("schedule", {})
 
         generations = duration.get("generations", 100)
         pop_size = evolution.get("pop_size", 64)
@@ -77,6 +78,8 @@ class Config:
             "substrate": substrate,
             "evolution": evolution,
             "fitness": fitness,
+            # Present only for a continuous multi-rung run; selects ContinuousTrial in main.
+            "schedule": schedule,
         }
 
         # Flat scalars for ClearML hyperparameter tracking (logging only; not the source of truth).

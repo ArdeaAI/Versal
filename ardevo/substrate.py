@@ -28,7 +28,22 @@ def activation_names() -> list[str]:
     return list(_ACTIVATIONS)
 
 
-class GraphNet(nn.Module):
+class SubstrateModule(nn.Module):
+    """Executable substrate: an nn.Module that also reports edge presence and exports its weights.
+
+    `GraphNet` is the direct form; the multi-task trial wraps it to slice one task's output head.
+    Both subclass this so the evolver / train / eval stages can treat any substrate uniformly.
+    """
+
+    @property
+    def has_edges(self) -> bool:
+        raise NotImplementedError
+
+    def export_weights(self) -> dict[tuple[int, int], float]:
+        raise NotImplementedError
+
+
+class GraphNet(SubstrateModule):
     """Executable form of a genome: a topologically-layered weighted DAG evaluated level by level."""
 
     def __init__(self, genome: Genome, n_inputs: int, n_outputs: int) -> None:

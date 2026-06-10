@@ -16,22 +16,22 @@ from ardevo.dataset.icarus import EncodedTask
 from ardevo.evaluation import support_loss
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
-from ardevo.substrate import GraphNet
+from ardevo.substrate import SubstrateModule
 
-TrainOp = Callable[..., tuple[Genome, GraphNet]]
+TrainOp = Callable[..., tuple[Genome, SubstrateModule]]
 
 TRAIN: Registry[TrainOp] = Registry("train")
 
 
 @TRAIN.register("none")
-def no_train(genome: Genome, module: GraphNet, encoded: EncodedTask, *, rng: random.Random, **_params: object) -> tuple[Genome, GraphNet]:
+def no_train(genome: Genome, module: SubstrateModule, encoded: EncodedTask, *, rng: random.Random, **_params: object) -> tuple[Genome, SubstrateModule]:
     return genome, module
 
 
 @TRAIN.register("gradient")
 def gradient(
     genome: Genome,
-    module: GraphNet,
+    module: SubstrateModule,
     encoded: EncodedTask,
     *,
     rng: random.Random,
@@ -39,7 +39,7 @@ def gradient(
     lr: float = 0.01,
     writeback: bool = True,
     weight_decay: float = 0.0,
-) -> tuple[Genome, GraphNet]:
+) -> tuple[Genome, SubstrateModule]:
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
     if steps <= 0 or not module.has_edges:
@@ -55,7 +55,7 @@ def gradient(
     return genome, module
 
 
-def _writeback(genome: Genome, module: GraphNet) -> Genome:
+def _writeback(genome: Genome, module: SubstrateModule) -> Genome:
     """Copy the module's tuned weights back onto the matching enabled connection genes."""
     tuned = module.export_weights()
     child = genome.clone()
