@@ -6,7 +6,7 @@ runs the stages in order: select -> crossover -> mutate -> train -> evaluate -> 
 """
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
@@ -14,6 +14,7 @@ from ardevo.evaluation import evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
+from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.substrate import GraphNet, decode
 
 
@@ -55,8 +56,11 @@ class Evolver:
     mutation: MutationPipeline
     train_op: Callable[..., tuple[Genome, GraphNet]]
     fitness: FitnessAggregator
+    speciate: Callable[..., list[SpeciesPlan]]
     activations: list[str]
     default_activation: str
+    # Per-generation {species_id: size} snapshots, populated during run() for the speciation chart.
+    species_history: list[dict[int, int]] = field(default_factory=list)
 
     def run(
         self,
@@ -66,6 +70,7 @@ class Evolver:
         stop_at_accuracy: float = 1.0,
     ) -> Assessed:
         rng = random.Random(self.seed)
+        self.species_history = []
         population = [self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng) for _ in range(self.pop_size)]
         ctx = MutationContext(
             innovations=InnovationTracker.from_genomes(population),
@@ -106,16 +111,24 @@ class Evolver:
     ) -> list[Assessed]:
         genomes = [item.genome for item in assessed]
         fitnesses = [item.fitness for item in assessed]
+        plans = self.speciate(genomes, fitnesses, rng=rng, elitism=self.elitism, pop_size=self.pop_size)
+        self.species_history.append({plan.species_id: len(plan.members) for plan in plans})
 
-        ranked = sorted(range(len(assessed)), key=lambda index: fitnesses[index], reverse=True)
-        elites = [genomes[index] for index in ranked[: self.elitism]]
+        next_assessed: list[Assessed] = []
+        for plan in plans:
+            members = sorted((assessed[index] for index in plan.members), key=lambda item: item.fitness, reverse=True)
+            # Champions are carried forward UNCHANGED: re-assessing them would re-run the train
+            # step every generation and overfit them on the support set (champion drift).
+            next_assessed.extend(members[: plan.n_elites])
+            if plan.n_offspring <= 0:
+                continue
 
-        n_offspring = self.pop_size - len(elites)
-        parents = self.selection_op(genomes, fitnesses, rng=rng, count=2 * n_offspring)
-        offspring: list[Genome] = []
-        for k in range(n_offspring):
-            child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=rng)
-            child = self.mutation(child, ctx, rng=rng)
-            offspring.append(child)
+            species_genomes = [item.genome for item in members]
+            species_fitnesses = [item.fitness for item in members]
+            parents = self.selection_op(species_genomes, species_fitnesses, rng=rng, count=2 * plan.n_offspring)
+            for k in range(plan.n_offspring):
+                child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=rng)
+                child = self.mutation(child, ctx, rng=rng)
+                next_assessed.append(assess(child))
 
-        return [assess(genome) for genome in [*elites, *offspring]]
+        return next_assessed

@@ -92,6 +92,31 @@ def add_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: 
     return child
 
 
+@MUTATION.register("add_rich_node")
+def add_rich_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4) -> Genome:
+    """Add a hidden node wired from up to `fan_in` random sources and to every output.
+
+    Unlike `add_node` (a single-edge split, which yields a one-input node that adds no capacity on
+    tasks like parity), this node sees several inputs immediately, so gradient training can make it
+    useful right away. Acyclic by construction: it draws sources from inputs/bias/hidden (never
+    outputs) and feeds only outputs.
+    """
+    if rng.random() >= prob:
+        return genome
+    sources = [*genome.input_ids, *genome.bias_ids, *genome.hidden_ids]
+    outputs = genome.output_ids
+    if not sources or not outputs:
+        return genome
+    child = genome.clone()
+    new_id = ctx.innovations.new_node_id()
+    child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, ctx.default_activation)
+    for source in rng.sample(sources, min(fan_in, len(sources))):
+        child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
+    for output in outputs:
+        child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+    return child
+
+
 @MUTATION.register("mutate_activation")
 def mutate_activation(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
     # Hidden nodes only: outputs stay linear readouts so they emit raw logits.

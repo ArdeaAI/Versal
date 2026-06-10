@@ -1,7 +1,7 @@
 import random
 
 from ardevo.evolution.genome import InnovationTracker, NodeKind, topological_order, would_create_cycle
-from ardevo.evolution.mutation import MutationContext, add_connection, add_node, perturb_weights
+from ardevo.evolution.mutation import MutationContext, add_connection, add_node, add_rich_node, perturb_weights
 
 
 def _context(genome) -> MutationContext:
@@ -22,6 +22,19 @@ def test_add_node_splits_edge_and_disables_original(linear_genome):
     out_of_new = [c for c in child.enabled_connections() if c.in_id == new_id]
     assert len(into_new) == 1 and len(out_of_new) == 1
     assert into_new[0].weight == 1.0, "in -> new edge carries weight 1.0 (NEAT split)"
+
+
+def test_add_rich_node_wires_multiple_inputs(linear_genome):
+    ctx = _context(linear_genome)
+    child = add_rich_node(linear_genome, ctx, rng=random.Random(0), prob=1.0, fan_in=2)
+
+    assert len(child.hidden_ids) == 1
+    hidden_id = child.hidden_ids[0]
+    incoming = [conn for conn in child.enabled_connections() if conn.out_id == hidden_id]
+    outgoing = [conn for conn in child.enabled_connections() if conn.in_id == hidden_id]
+    assert len(incoming) == 2, "the new node is wired from fan_in sources"
+    assert len(outgoing) == len(linear_genome.output_ids), "the new node feeds every output"
+    topological_order(child)  # a clean return proves the graph is still a DAG
 
 
 def test_add_connection_stays_acyclic(solving_genome):

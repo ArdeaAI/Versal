@@ -49,7 +49,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     """Assemble an `Evolver` from the nested `[evolution]`/`[substrate]`/`[fitness]` config tables."""
     # Local imports keep the operator modules (which import Registry from here) free of a cycle,
     # while still triggering their @register side effects.
-    from ardevo.evolution import crossover, fitness, init, mutation, selection, train
+    from ardevo.evolution import crossover, fitness, init, mutation, selection, speciation, train
     from ardevo.evolution.evolver import Evolver
 
     evolution = config.get("evolution", {})
@@ -91,6 +91,11 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     components = [(fitness.FITNESS.get(name), float(fitness_cfg.get(f"w_{name}", 1.0))) for name in fitness_cfg.get("components", [])]
     aggregator = fitness.FitnessAggregator(components)
 
+    # Speciation is stateful (it remembers a representative per species), so its registry entries are
+    # factories: resolve the kind, then build the configured speciator instance.
+    speciation_cfg = evolution.get("speciation", {})
+    speciate = speciation.SPECIATION.get(speciation_cfg.get("kind", "none"))(**{k: v for k, v in speciation_cfg.items() if k != "kind"})
+
     return Evolver(
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
@@ -101,6 +106,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         mutation=mutation_pipeline,
         train_op=train_op,
         fitness=aggregator,
+        speciate=speciate,
         activations=activations,
         default_activation=default_activation,
     )

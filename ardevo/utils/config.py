@@ -72,6 +72,7 @@ class Config:
             "generations": generations,
             "rung": dataset.get("rung", 1),
             "n_samples": dataset.get("n_samples", 8),
+            "support_fraction": dataset.get("support_fraction", 0.8),
             # Operator tables preserved verbatim for build_evolver.
             "substrate": substrate,
             "evolution": evolution,

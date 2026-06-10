@@ -38,6 +38,7 @@ class EvolutionTrial(Proctor):
             rung=int(config["rung"]),
             n_samples=int(config["n_samples"]),
             seed=int(config.get("seed", 0)),
+            support_fraction=float(config.get("support_fraction", 0.8)),
         )
         # Size the encoder to the task's natural input width (no padding/truncation).
         support_input, _support_output = support_loader(self.icarus_task)
@@ -56,6 +57,7 @@ class EvolutionTrial(Proctor):
 
     def _on_generation(self, generation: int, best: Assessed, mean_fitness: float) -> None:
         accuracy = best.metrics["query_accuracy"]
+        support = best.metrics.get("support_accuracy", 0.0)
         edges = len(best.genome.enabled_connections())
         hidden = len(best.genome.hidden_ids)
 
@@ -64,6 +66,7 @@ class EvolutionTrial(Proctor):
                 "generation": generation,
                 "best_fitness": best.fitness,
                 "mean_fitness": mean_fitness,
+                "support_accuracy": support,
                 "query_accuracy": accuracy,
                 "query_loss": best.metrics["query_loss"],
                 "hidden_nodes": hidden,
@@ -79,9 +82,7 @@ class EvolutionTrial(Proctor):
         self.log_scalar("Complexity", "hidden_nodes", hidden, generation)
         if generation % 10 == 0:
             self.log_hardware_stats(generation)
-            console.print(
-                f"[cyan]gen {generation:4d}[/cyan]  fitness={best.fitness:6.3f}  acc={accuracy:4.2f}  loss={best.metrics['query_loss']:6.3f}  hidden={hidden}  edges={edges}"
-            )
+            console.print(f"[cyan]gen {generation:4d}[/cyan]  fit={best.fitness:6.3f}  support_acc={support:4.2f}  query_acc={accuracy:4.2f}  hidden={hidden}  edges={edges}")
 
     def _champion_model(self, best: Assessed) -> dict[str, Any]:
         """The champion genome dict with enabled weights taken from the exact scored network."""
@@ -110,6 +111,8 @@ class EvolutionTrial(Proctor):
             "generations_run": len(self.history),
             "champion": {
                 "fitness": best.fitness,
+                "support_accuracy": best.metrics.get("support_accuracy", 0.0),
+                "support_loss": best.metrics.get("support_loss", 0.0),
                 "query_accuracy": best.metrics["query_accuracy"],
                 "query_loss": best.metrics["query_loss"],
                 "total_nodes": len(genome.nodes),
@@ -120,6 +123,12 @@ class EvolutionTrial(Proctor):
                 "activations": dict(Counter(node.activation for node in genome.nodes.values() if node.kind in (NodeKind.HIDDEN, NodeKind.OUTPUT))),
             },
             "history": self.history,
+            "speciation": {
+                "generations": len(self.evolver.species_history),
+                "max_concurrent_species": max((len(snapshot) for snapshot in self.evolver.species_history), default=0),
+                "total_species_seen": len({species_id for snapshot in self.evolver.species_history for species_id in snapshot}),
+                "history": self.evolver.species_history,
+            },
             "config": {
                 "seed": int(self.config.get("seed", 0)),
                 "generations": self.generations,
@@ -142,11 +151,14 @@ class EvolutionTrial(Proctor):
             f"acc={accuracy:.2f} fit={best.fitness:.3f}  {len(best.genome.hidden_ids)} hidden / {len(best.genome.enabled_connections())} edges"
         )
         net_path = results.render_network(directory, best.genome, title=title)
+        species_title = f"{self.icarus_task.meta.name} (rung {self.icarus_task.meta.rung}) species over {len(self.evolver.species_history)} generations"
+        species_path = results.render_speciation(directory, self.evolver.species_history, title=species_title)
 
         if self.task:
             self.save_artifact("run_stats", str(stats_path))
             self.save_artifact("best_genome", str(model_path))
             self.save_artifact("network_image", str(net_path))
+            self.save_artifact("speciation_image", str(species_path))
 
         console.print(f"[green]Results saved to[/green] {directory}")
         return str(directory)

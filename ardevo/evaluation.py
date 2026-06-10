@@ -45,21 +45,34 @@ def support_loss(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
     return loss_fn(raw, target, descriptor, mask)
 
 
-def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: Level0Encoder) -> dict[str, float]:
-    """Query-set metrics: accuracy via decode() and the dispatched loss."""
-    if encoded.query_input is None or encoded.query_target is None:
-        return {"query_accuracy": 0.0, "query_loss": float("inf")}
+def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: Level0Encoder) -> tuple[float, float]:
+    """Accuracy (via decode) and dispatched loss for one encoded (input, target) split."""
+    x, _descriptor = encoded_input
+    target, mask, descriptor = encoded_target
+    raw = as_logits(module(x), descriptor, target_positions(target))
+    loss = loss_fn(raw, target, descriptor, mask)
+    predictions = encoder.decode(raw, descriptor)
+    correct = predictions == target.to(torch.long)
+    if mask is not None:
+        valid = ~mask
+        accuracy = (correct & valid).sum().float() / valid.sum().clamp_min(1.0)
+    else:
+        accuracy = correct.float().mean()
+    return float(accuracy), float(loss)
 
-    x, _descriptor = encoded.query_input
-    target, mask, descriptor = encoded.query_target
+
+def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: Level0Encoder) -> dict[str, float]:
+    """Support- and query-set metrics. Support fit rewards capacity (structure improves it even when
+    the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization."""
     with torch.no_grad():
-        raw = as_logits(module(x), descriptor, target_positions(target))
-        loss = loss_fn(raw, target, descriptor, mask)
-        predictions = encoder.decode(raw, descriptor)
-        correct = predictions == target.to(torch.long)
-        if mask is not None:
-            valid = ~mask
-            accuracy = (correct & valid).sum().float() / valid.sum().clamp_min(1.0)
+        support_accuracy, support_loss_value = _split_metrics(module, encoded.support_input, encoded.support_target, encoder)
+        if encoded.query_input is not None and encoded.query_target is not None:
+            query_accuracy, query_loss_value = _split_metrics(module, encoded.query_input, encoded.query_target, encoder)
         else:
-            accuracy = correct.float().mean()
-    return {"query_accuracy": float(accuracy), "query_loss": float(loss)}
+            query_accuracy, query_loss_value = 0.0, float("inf")
+    return {
+        "support_accuracy": support_accuracy,
+        "support_loss": support_loss_value,
+        "query_accuracy": query_accuracy,
+        "query_loss": query_loss_value,
+    }

@@ -32,6 +32,18 @@ def negative_query_loss(genome: Genome, metrics: dict[str, float]) -> float:
     return -float(metrics.get("query_loss", 0.0))
 
 
+@FITNESS.register("support_accuracy")
+def support_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
+    # Rewards fitting the training set, which structure (hidden nodes) can improve even when the
+    # held-out query is too small to generalize to. Use this to drive topology growth.
+    return float(metrics.get("support_accuracy", 0.0))
+
+
+@FITNESS.register("negative_support_loss")
+def negative_support_loss(genome: Genome, metrics: dict[str, float]) -> float:
+    return -float(metrics.get("support_loss", 0.0))
+
+
 @dataclass
 class FitnessAggregator:
     """Weighted sum of fitness components."""

@@ -86,3 +86,37 @@ def render_network(directory: Path, genome: Genome, *, title: str) -> Path:
     figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
     plt.close(figure)
     return path
+
+
+def render_speciation(directory: Path, species_history: list[dict[int, int]], *, title: str) -> Path:
+    """Stacked-area chart of each species' population over generations (births and deaths over time)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path = directory / "speciation.png"
+    figure, axis = plt.subplots(figsize=(11, 6))
+    figure.patch.set_facecolor("#e8e8e8")
+    axis.set_facecolor("#e8e8e8")
+
+    if species_history:
+        generations = list(range(len(species_history)))
+        species_ids = sorted({species_id for snapshot in species_history for species_id in snapshot})
+        # One band per species, in birth order, zero where the species is absent (before birth / after death).
+        bands = [[snapshot.get(species_id, 0) for snapshot in species_history] for species_id in species_ids]
+        cmap = plt.get_cmap("viridis")
+        colors = [cmap(index / max(len(species_ids) - 1, 1)) for index in range(len(species_ids))]
+        axis.stackplot(generations, *bands, colors=colors, edgecolor="#e8e8e8", linewidth=0.2)
+        axis.set_xlim(0, max(generations))
+        axis.set_xlabel("generation")
+        axis.set_ylabel("population by species")
+    else:
+        axis.text(0.5, 0.5, "no speciation history", ha="center", va="center")
+        axis.axis("off")
+
+    axis.set_title(title, fontsize=11)
+    figure.tight_layout()
+    figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
+    plt.close(figure)
+    return path

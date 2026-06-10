@@ -14,8 +14,9 @@ def test_linear_genome_cannot_solve_xor(linear_genome, xor_adapter):
     assert metrics["query_accuracy"] <= 0.75 + 1e-6
 
 
-def test_evaluate_reports_accuracy_and_loss(solving_genome, xor_adapter):
+def test_evaluate_reports_support_and_query_metrics(solving_genome, xor_adapter):
     module = xor_adapter.decode(solving_genome)
     metrics = xor_adapter.evaluate(module)
-    assert set(metrics) == {"query_accuracy", "query_loss"}
+    assert set(metrics) == {"support_accuracy", "support_loss", "query_accuracy", "query_loss"}
     assert metrics["query_accuracy"] == 1.0
+    assert metrics["support_accuracy"] == 1.0
