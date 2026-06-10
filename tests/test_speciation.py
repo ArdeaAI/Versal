@@ -47,6 +47,21 @@ def test_neat_species_ids_persist_and_birth(linear_genome, solving_genome):
     assert len(ids) >= 2, "the distinct topology is born as a new species"
 
 
+def test_neat_threshold_targets_species_count():
+    speciator = NeatSpeciation(threshold=1.0, c_excess=1.0, c_disjoint=1.0, c_weight=0.5, target_species=5, threshold_adjust=0.3, min_threshold=0.3)
+    speciator._adjust_threshold(20)  # too many species -> loosen (raise threshold)
+    assert speciator.threshold == 1.3
+    speciator._adjust_threshold(2)  # too few -> tighten (lower threshold)
+    assert abs(speciator.threshold - 1.0) < 1e-9
+    speciator.threshold = 0.4
+    speciator._adjust_threshold(1)  # would drop below the floor
+    assert speciator.threshold == 0.3
+
+    fixed = NeatSpeciation(threshold=1.0, c_excess=1.0, c_disjoint=1.0, c_weight=0.5, target_species=0)
+    fixed._adjust_threshold(100)  # disabled -> unchanged
+    assert fixed.threshold == 1.0
+
+
 def test_neat_speciation_plans_fill_population(solving_genome):
     speciator = NeatSpeciation(threshold=1.5, c_excess=1.0, c_disjoint=1.0, c_weight=0.5)
     genomes = [solving_genome.clone() for _ in range(20)]

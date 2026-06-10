@@ -38,10 +38,13 @@ def gradient(
     steps: int = 20,
     lr: float = 0.01,
     writeback: bool = True,
+    weight_decay: float = 0.0,
 ) -> tuple[Genome, GraphNet]:
-    if steps <= 0 or module.weights.numel() == 0:
+    # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
+    # generalization gap on tasks that can generalize (and is harmless when set to 0).
+    if steps <= 0 or not module.has_edges:
         return genome, module
-    optimizer = torch.optim.Adam(module.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(module.parameters(), lr=lr, weight_decay=weight_decay)
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss(module, encoded)

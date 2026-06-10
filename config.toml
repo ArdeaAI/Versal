@@ -49,43 +49,59 @@ elitism = 2                       # champions carried forward untouched (used wh
 
   [evolution.mutation]
   # Ordered, independently swappable mutators. Available:
-  #   perturb_weights   (params: perturb_weights_prob, perturb_weights_sigma)
+  #   add_rich_node     (params: add_rich_node_prob, add_rich_node_fan_in) -- new hidden node wired from
+  #                       `fan_in` sources to ALL outputs; widens a layer (adds capacity immediately)
+  #   add_deep_node     (params: add_deep_node_prob, add_deep_node_fan_in, add_deep_node_fan_out) -- new
+  #                       hidden node that also feeds other hidden nodes, building DEPTH (needed for
+  #                       tasks like two-spirals; width alone tops out)
   #   add_connection    (param:  add_connection_prob)
-  #   add_rich_node     (params: add_rich_node_prob, add_rich_node_fan_in) -- grows a hidden node wired
-  #                       from `fan_in` random sources to all outputs (adds capacity immediately)
-  #   add_node          (param:  add_node_prob)          -- canonical NEAT single-edge split; yields a
-  #                       one-input node that adds no capacity until add_connection wires it up (slow)
-  #   mutate_activation (param:  mutate_activation_prob) -- changes a hidden node's activation
-  #   toggle_connection (param:  toggle_connection_prob) -- enable/disable an edge (default off)
-  operators = ["perturb_weights", "add_connection", "add_rich_node", "mutate_activation"]
-  perturb_weights_prob = 0.8
-  perturb_weights_sigma = 0.5
-  add_connection_prob = 0.20
-  add_rich_node_prob = 0.12
+  #   toggle_connection (param:  toggle_connection_prob) -- enable/disable an edge; the only way to PRUNE,
+  #                       so a complexity penalty can simplify (re-enabling is cycle-checked)
+  #   add_node          (param:  add_node_prob)          -- canonical NEAT single-edge split (one-input
+  #                       node; slow to become useful)
+  #   mutate_activation (param:  mutate_activation_prob)
+  #   perturb_weights   (params: perturb_weights_prob, perturb_weights_sigma) -- random weight noise.
+  #                       Only for pure-NEAT (train="none"); with gradient training it FIGHTS the
+  #                       optimizer (scrambles tuned weights each generation), so it is omitted here.
+  # With gradient training, evolution searches STRUCTURE and gradient owns the WEIGHTS.
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection"]
+  add_rich_node_prob = 0.14
   add_rich_node_fan_in = 6
-  mutate_activation_prob = 0.05
+  add_deep_node_prob = 0.16
+  add_deep_node_fan_in = 6
+  add_deep_node_fan_out = 3
+  add_connection_prob = 0.18
+  toggle_connection_prob = 0.06
 
   [evolution.train]
   # Per-candidate weight optimization before scoring. options:
-  #   "none"     -- weights are purely co-evolved (will stall on non-trivial tasks)
+  #   "none"     -- weights are purely co-evolved (pair with perturb_weights; classic NEAT)
   #   "gradient" -- backprop on the support set (params: steps, lr, writeback); future: "cmaes" (evosax)
   # steps must be high enough to tune a freshly-grown candidate so its capacity shows BEFORE it
-  # competes (champions are not re-trained across generations, so this is its one shot).
+  # competes (champions are not re-trained across generations, so this is its one shot). Training also
+  # accumulates across a surviving lineage, so harder tasks (two-spirals) want more steps AND more gens.
   kind = "gradient"
-  steps = 120
-  lr = 0.05
+  steps = 150
+  lr = 0.03
   writeback = true            # Lamarckian: copy tuned weights back into the genome
+  weight_decay = 0.0          # L2 regularization; raise (e.g. 2e-4) to make fits GENERALIZE (closes the
+                              # support->query gap). Crucial on real generalization tasks like two-spirals.
 
   [evolution.speciation]
   # Protects new structure by making genomes compete mostly within their own niche. options:
   #   "none" -- one global population (uses [evolution].elitism)
   #   "neat" -- compatibility-distance niching + fitness sharing; one champion per species.
-  #             params: threshold (lower = more, finer species), c_excess, c_disjoint, c_weight
+  # The threshold AUTO-ADJUSTS toward `target_species` each generation (a fixed threshold lets the
+  # population fracture into singletons, which starves reproduction). `threshold` is just the start.
+  # Set target_species = 0 to disable auto-adjust and hold `threshold` fixed.
   kind = "neat"
-  threshold = 0.8
-  c_excess = 1.0
-  c_disjoint = 1.0
-  c_weight = 0.5
+  threshold = 1.5            # initial compatibility distance; auto-tuned from here
+  target_species = 12        # aim for ~this many species (keeps a healthy offspring budget)
+  threshold_adjust = 0.3     # step size for the auto-adjustment
+  min_threshold = 0.3        # floor so the threshold never collapses to zero
+  c_excess = 1.0             # weight on excess genes in the distance
+  c_disjoint = 1.0           # weight on disjoint genes
+  c_weight = 0.5             # weight on mean matching-connection weight difference
 
 [fitness]
 # Weighted sum of registered components (higher is better). Available:
@@ -97,6 +113,13 @@ elitism = 2                       # champions carried forward untouched (used wh
 #                          a task has enough data to generalize)
 #   complexity_penalty   (weight w_complexity_penalty)    -- penalizes enabled edges + hidden nodes
 #   negative_query_loss  (weight w_negative_query_loss)   -- continuous version of query accuracy
-components = ["support_accuracy", "complexity_penalty"]
-w_support_accuracy = 1.0
-w_complexity_penalty = 0.002
+#
+# NOTE on parity.n4.b0: it has only 16 examples, so the held-out query CANNOT generalize -- query_acc
+# is essentially fixed noise (e.g. 2/3 of 3 points), and rewarding query LOSS actively fights structure
+# because a hidden net must overfit the 13 support points (its query loss then balloons). So here we
+# drive growth with support fit and prune with a modest complexity penalty. To study generalization,
+# move to a data-rich rung/task where the query split is large enough to mean something.
+components = ["support_accuracy", "query_accuracy", "complexity_penalty"]
+w_support_accuracy = 0.6
+w_query_accuracy = 0.4
+w_complexity_penalty = 0.02

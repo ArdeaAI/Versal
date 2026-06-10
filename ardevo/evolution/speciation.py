@@ -76,9 +76,20 @@ def _build_neat(
     c_excess: float = 1.0,
     c_disjoint: float = 1.0,
     c_weight: float = 0.5,
+    target_species: int = 12,
+    threshold_adjust: float = 0.3,
+    min_threshold: float = 0.3,
     **_params: object,
 ) -> "NeatSpeciation":
-    return NeatSpeciation(threshold=threshold, c_excess=c_excess, c_disjoint=c_disjoint, c_weight=c_weight)
+    return NeatSpeciation(
+        threshold=threshold,
+        c_excess=c_excess,
+        c_disjoint=c_disjoint,
+        c_weight=c_weight,
+        target_species=target_species,
+        threshold_adjust=threshold_adjust,
+        min_threshold=min_threshold,
+    )
 
 
 class NoSpeciation:
@@ -106,12 +117,20 @@ class NeatSpeciation:
 
     Species persist across generations (each keeps its representative and stable id); a species with
     no members in a generation dies, and a genome compatible with none starts a new species.
+
+    The compatibility `threshold` auto-adjusts toward `target_species` each generation (the standard
+    NEAT remedy): a fixed threshold is brittle, and operators like `add_rich_node` make genomes
+    diverge fast enough that a too-low threshold fractures the whole population into singletons,
+    which starves reproduction. Set `target_species = 0` to disable and keep `threshold` fixed.
     """
 
     threshold: float
     c_excess: float
     c_disjoint: float
     c_weight: float
+    target_species: int = 0
+    threshold_adjust: float = 0.3
+    min_threshold: float = 0.3
     species: list[_Species] = field(default_factory=list)
     _next_id: int = 0
 
@@ -138,23 +157,35 @@ class NeatSpeciation:
         self._partition(genomes, rng)
         groups = self.species
 
-        # More species than slots: keep the best one champion each, breed nothing (rare; raise threshold).
         if len(groups) >= pop_size:
+            # Safety net (should not happen once the threshold is targeting): too many species to give
+            # each a champion AND breed, so keep the fittest pop_size champions and breed nothing.
             groups = sorted(groups, key=lambda s: max(fitnesses[i] for i in s.members), reverse=True)[:pop_size]
             self.species = groups
-            return [SpeciesPlan(species_id=s.id, members=s.members, n_elites=1, n_offspring=0) for s in groups]
+            plans = [SpeciesPlan(species_id=s.id, members=s.members, n_elites=1, n_offspring=0) for s in groups]
+        else:
+            # Fitness sharing: a species' share is its MEAN fitness (sum of f_i / size), shifted positive.
+            means = [sum(fitnesses[i] for i in s.members) / len(s.members) for s in groups]
+            shift = min(means)
+            shares = [mean - shift + 1e-6 for mean in means]
+            total_share = sum(shares)
 
-        # Fitness sharing: a species' share is its MEAN fitness (sum of f_i / size), shifted positive.
-        means = [sum(fitnesses[i] for i in s.members) / len(s.members) for s in groups]
-        shift = min(means)
-        shares = [mean - shift + 1e-6 for mean in means]
-        total_share = sum(shares)
+            offspring_budget = pop_size - len(groups)  # one champion reserved per species
+            offspring = [int(round(offspring_budget * share / total_share)) for share in shares]
+            self._reconcile(offspring, offspring_budget)
+            plans = [SpeciesPlan(species_id=s.id, members=s.members, n_elites=1, n_offspring=count) for s, count in zip(groups, offspring)]
 
-        offspring_budget = pop_size - len(groups)  # one champion reserved per species
-        offspring = [int(round(offspring_budget * share / total_share)) for share in shares]
-        self._reconcile(offspring, offspring_budget)
+        self._adjust_threshold(len(groups))
+        return plans
 
-        return [SpeciesPlan(species_id=s.id, members=s.members, n_elites=1, n_offspring=count) for s, count in zip(groups, offspring)]
+    def _adjust_threshold(self, n_species: int) -> None:
+        """Nudge the compatibility threshold toward keeping the species count near `target_species`."""
+        if self.target_species <= 0:
+            return
+        if n_species > self.target_species:
+            self.threshold += self.threshold_adjust
+        elif n_species < self.target_species:
+            self.threshold = max(self.min_threshold, self.threshold - self.threshold_adjust)
 
     @staticmethod
     def _reconcile(offspring: list[int], budget: int) -> None:

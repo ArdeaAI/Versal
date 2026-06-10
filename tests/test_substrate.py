@@ -13,7 +13,8 @@ def test_decode_forward_shape(linear_genome):
 def test_weights_are_trainable_parameters(solving_genome):
     module = decode(solving_genome, n_inputs=2, n_outputs=1)
     assert module.weights.requires_grad
-    assert module.weights.numel() == len(solving_genome.enabled_connections())
+    assert module.has_edges
+    assert int(module.mask.sum()) == len(solving_genome.enabled_connections())
 
 
 def test_hand_built_genome_solves_xor(solving_genome, xor_adapter):

@@ -12,7 +12,7 @@ from typing import Callable
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.fitness import FitnessAggregator
-from ardevo.evolution.genome import Genome, InnovationTracker
+from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.substrate import GraphNet, decode
@@ -79,7 +79,12 @@ class Evolver:
         )
 
         def assess(genome: Genome) -> Assessed:
-            module = adapter.decode(genome)
+            try:
+                module = adapter.decode(genome)
+            except ValueError:
+                # Recombination/toggling can produce a cyclic genome; repair to feedforward and retry.
+                genome = make_acyclic(genome)
+                module = adapter.decode(genome)
             genome, module = self.train_op(genome, module, adapter.encoded, rng=rng)
             metrics = adapter.evaluate(module)
             return Assessed(genome, metrics, self.fitness(genome, metrics), module)

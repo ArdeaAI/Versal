@@ -1,7 +1,7 @@
 import random
 
-from ardevo.evolution.genome import InnovationTracker, NodeKind, topological_order, would_create_cycle
-from ardevo.evolution.mutation import MutationContext, add_connection, add_node, add_rich_node, perturb_weights
+from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, make_acyclic, topological_order, would_create_cycle
+from ardevo.evolution.mutation import MutationContext, add_connection, add_deep_node, add_node, add_rich_node, perturb_weights
 
 
 def _context(genome) -> MutationContext:
@@ -35,6 +35,41 @@ def test_add_rich_node_wires_multiple_inputs(linear_genome):
     assert len(incoming) == 2, "the new node is wired from fan_in sources"
     assert len(outgoing) == len(linear_genome.output_ids), "the new node feeds every output"
     topological_order(child)  # a clean return proves the graph is still a DAG
+
+
+def test_add_deep_node_feeds_outputs_and_stays_acyclic(solving_genome):
+    ctx = _context(solving_genome)
+    child = add_deep_node(solving_genome, ctx, rng=random.Random(0), prob=1.0, fan_in=2, fan_out=2)
+
+    new_hidden = [node_id for node_id in child.hidden_ids if node_id not in solving_genome.hidden_ids]
+    assert len(new_hidden) == 1
+    node_id = new_hidden[0]
+    out_targets = {conn.out_id for conn in child.enabled_connections() if conn.in_id == node_id}
+    assert set(solving_genome.output_ids).issubset(out_targets), "new node provides a readout to every output"
+    in_count = sum(1 for conn in child.enabled_connections() if conn.out_id == node_id)
+    assert in_count == 2
+    topological_order(child)  # a clean return proves the graph is still a DAG
+
+
+def test_make_acyclic_breaks_cycles():
+    # Two hidden nodes wired into a 2-cycle (3 <-> 4); make_acyclic must disable one edge.
+    nodes = {
+        0: NodeGene(0, NodeKind.INPUT, "identity"),
+        1: NodeGene(1, NodeKind.BIAS, "identity"),
+        2: NodeGene(2, NodeKind.OUTPUT, "identity"),
+        3: NodeGene(3, NodeKind.HIDDEN, "tanh"),
+        4: NodeGene(4, NodeKind.HIDDEN, "tanh"),
+    }
+    connections = [
+        ConnectionGene(0, 3, 1.0, True, 0),
+        ConnectionGene(3, 4, 1.0, True, 1),
+        ConnectionGene(4, 3, 1.0, True, 2),  # closes a cycle
+        ConnectionGene(4, 2, 1.0, True, 3),
+    ]
+    cyclic = Genome(nodes=nodes, connections=connections)
+    repaired = make_acyclic(cyclic)
+    assert len(repaired.enabled_connections()) == 3, "exactly the cycle-closing edge is disabled"
+    topological_order(repaired)  # no longer raises
 
 
 def test_add_connection_stays_acyclic(solving_genome):

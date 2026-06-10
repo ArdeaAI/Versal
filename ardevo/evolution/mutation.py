@@ -117,6 +117,41 @@ def add_rich_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
     return child
 
 
+@MUTATION.register("add_deep_node")
+def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4, fan_out: int = 3) -> Genome:
+    """Add a hidden node that feeds OTHER hidden nodes (plus the outputs), building depth.
+
+    `add_rich_node` only wires new nodes to the outputs, so it can only widen a single hidden layer.
+    Tasks like two-spirals need depth (hidden -> hidden). This node draws from `fan_in` sources and
+    feeds every output (a guaranteed readout) plus up to `fan_out` existing hidden nodes, skipping any
+    target that would create a cycle.
+    """
+    if rng.random() >= prob:
+        return genome
+    sources = [*genome.input_ids, *genome.bias_ids, *genome.hidden_ids]
+    outputs = genome.output_ids
+    if not sources or not outputs:
+        return genome
+    child = genome.clone()
+    new_id = ctx.innovations.new_node_id()
+    child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, ctx.default_activation)
+    for source in rng.sample(sources, min(fan_in, len(sources))):
+        child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
+    for output in outputs:
+        child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+    hidden_targets = [node_id for node_id in child.hidden_ids if node_id != new_id]
+    rng.shuffle(hidden_targets)
+    added = 0
+    for target in hidden_targets:
+        if added >= fan_out:
+            break
+        if child.has_connection(new_id, target) or would_create_cycle(child, new_id, target):
+            continue
+        child.connections.append(ConnectionGene(new_id, target, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, target)))
+        added += 1
+    return child
+
+
 @MUTATION.register("mutate_activation")
 def mutate_activation(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
     # Hidden nodes only: outputs stay linear readouts so they emit raw logits.
@@ -136,5 +171,9 @@ def toggle_connection(genome: Genome, ctx: MutationContext, *, rng: random.Rando
     child = genome.clone()
     index = rng.randrange(len(child.connections))
     conn = child.connections[index]
-    child.connections[index] = replace(conn, enabled=not conn.enabled)
+    if conn.enabled:
+        child.connections[index] = replace(conn, enabled=False)
+    elif not would_create_cycle(child, conn.in_id, conn.out_id):
+        # Only re-enable a disabled edge when doing so keeps the graph feedforward.
+        child.connections[index] = replace(conn, enabled=True)
     return child

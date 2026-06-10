@@ -17,46 +17,58 @@ To start out with, keep this small. For phase 1, get the modular structure set u
 
 We want to use ClearML for this as well as much as we can make use of it. I already have my config set up for that.
 
-## Phase 1: XOR (current)
+## Growing topologies across the Icarus rungs
 
-Phase 1 evolves a network *topology* from nothing to solve the rung-1 XOR task. We deliberately do **not** use
-evosax/JAX in the loop here: evosax is a fixed-vector optimizer, while growing a graph from minimal complexity is a
-structural (NEAT-style) search that we own directly in PyTorch. evosax stays installed and is slated to return later
-as a pluggable weight optimizer (the `train` stage) for the non-differentiable higher rungs (rungs 4-5 are interactive
-policy rollouts).
-
-A candidate starts as inputs + a bias wired straight to a linear output. Structural mutations add nodes and
-connections; a per-generation `train` step tunes each candidate's weights by backprop before scoring. Because XOR is
-not linearly separable, a winning run must *grow* at least one hidden node to break 75% and reach 100% query accuracy.
+The search grows a network *topology* from nothing (inputs + bias wired straight to a linear output) and lets
+structural mutations add nodes/edges. A per-generation `train` step tunes each candidate's weights by gradient before
+scoring, so **evolution searches structure and the gradient owns the weights** (pure weight-evolution stalls even on
+XOR; and random weight mutation *fights* the gradient, so it is left out when training is on). We do not use
+evosax/JAX in the loop; it stays installed for a future `cmaes` train operator on the non-differentiable higher rungs.
 
 ```bash
 uv sync --group dev
-uv run app                       # evolve on rung-1 XOR (offline by default)
-uv run app --config config.toml  # explicit config path
+uv run app                                       # default config.toml
+uv run app --config configs/rung1_xor.toml       # rung 1: XOR
+uv run app --config configs/rung2_parity.toml    # rung 2: parity (function-fit)
+uv run app --config configs/rung3_two_spirals.toml  # rung 3: two-spirals (generalization; slow)
 ```
 
-Set `[run] clearml = true` in `config.toml` to track fitness / accuracy / complexity in ClearML; it degrades
-gracefully offline. Machine env maps to a queue: `MonadMetal`/`MonadCPU`/`local` run locally, `LatticeCPU`/
-`LatticeCUDA` enqueue remotely (push to GitHub first, since the agent clones the repo).
+What each rung shows (see `configs/` for tuned, runnable settings):
+
+| Rung | Task | Data | What "solve" means | Result |
+|---|---|---|---|---|
+| 1 | `xor` | 4/4 (full table) | 100% on all 4 (needs >=1 hidden node) | **query 1.0**, grows 1 hidden node |
+| 2 | `parity.n4` | 13/3 of 16 | fit the function (support 1.0) | **support 1.0**, grows hidden; query is noise* |
+| 3 | `two_spirals` | 194/192 | held-out generalization (query) | **query 1.0**, grows 0 -> ~23 hidden nodes (~gen 100) |
+
+*Parity is the canonical anti-generalization function: fitting the 13 support points tells you nothing about the 3
+held-out points (even a perfect hand-built net scores ~0.0-0.33 on that query), so query is judged only where the
+split is meaningful. The achievement on parity is growing a minimal topology that *fits the function*.
+
+Set `[run] clearml = true` to track in ClearML; it degrades gracefully offline. Machine env maps to a queue:
+`MonadMetal`/`MonadCPU`/`local` run locally, `LatticeCPU`/`LatticeCUDA` enqueue remotely.
 
 ## Lego-block evolution
 
 Every stage of the generational loop is an independent, registered operator selected and tuned from `config.toml`.
-The loop runs: **select → crossover → mutate → train → evaluate → fitness → replace**. To experiment, change a
-`kind`, reorder `[evolution.mutation].operators`, retune a weight, or register one new function in the matching
-registry; the loop itself never changes.
+The loop runs: **select → crossover → mutate → train → evaluate → fitness → replace**, with speciation shaping how
+offspring are allocated. To experiment, change a `kind`, reorder `[evolution.mutation].operators`, retune a weight, or
+register one new function in the matching registry; the loop itself never changes.
 
-| Stage | Config section | Registered options (phase 1) |
+| Stage | Config section | Registered options |
 |---|---|---|
 | init | `[evolution.init]` | `minimal` |
 | selection | `[evolution.selection]` | `tournament`, `truncation` |
 | crossover | `[evolution.crossover]` | `none`, `neat` |
-| mutation | `[evolution.mutation]` | `perturb_weights`, `add_connection`, `add_node`, `mutate_activation`, `toggle_connection` |
-| train | `[evolution.train]` | `none`, `gradient` (future: `cmaes` via evosax) |
-| fitness | `[fitness]` | `query_accuracy`, `complexity_penalty`, `negative_query_loss` |
+| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `perturb_weights` |
+| train | `[evolution.train]` | `none`, `gradient` (params `steps`, `lr`, `writeback`, `weight_decay`; future: `cmaes` via evosax) |
+| speciation | `[evolution.speciation]` | `none`, `neat` (compatibility threshold auto-targets a species count) |
+| fitness | `[fitness]` | `support_accuracy`, `query_accuracy`, `negative_support_loss`, `negative_query_loss`, `complexity_penalty` |
 
-The `train` stage defaults to `gradient`: tuning a fresh topology's weights before scoring lets structural growth
-pay off immediately, which stands in for the speciation that would otherwise protect new innovations (deferred).
+Notes from getting this to actually grow useful topologies: `add_rich_node` only widens a layer, so depth-needing
+tasks (two-spirals) require `add_deep_node`; `toggle_connection` is the only operator that prunes, so a complexity
+penalty needs it to simplify; and `neat` speciation auto-adjusts its threshold (a fixed one fractures the population
+into singletons and starves reproduction). The torch substrate is vectorized (level-wise matmuls) for speed.
 
 ## Project structure
 

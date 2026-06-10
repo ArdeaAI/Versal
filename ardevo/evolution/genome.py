@@ -169,6 +169,26 @@ def with_connection_weight(conn: ConnectionGene, weight: float) -> ConnectionGen
     return replace(conn, weight=weight)
 
 
+def make_acyclic(genome: Genome) -> Genome:
+    """Return a copy whose enabled graph is a DAG, disabling any edge that would close a cycle.
+
+    Recombination (innovation-aligned crossover) and re-enabling edges can introduce cycles into an
+    otherwise feedforward genome; this repair keeps the substrate decodable. Edges are considered in
+    order, so earlier (typically older) genes are preferred when a conflict arises.
+    """
+    kept = Genome(nodes=dict(genome.nodes), connections=[])
+    repaired: list[ConnectionGene] = []
+    for conn in genome.connections:
+        if not conn.enabled:
+            repaired.append(conn)
+        elif conn.in_id == conn.out_id or would_create_cycle(kept, conn.in_id, conn.out_id):
+            repaired.append(replace(conn, enabled=False))
+        else:
+            kept.connections.append(conn)
+            repaired.append(conn)
+    return Genome(nodes=dict(genome.nodes), connections=repaired)
+
+
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
     return {
