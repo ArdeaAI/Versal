@@ -23,7 +23,7 @@ log_level = "INFO"
 output_uri = false
 repo = "https://github.com/ArdeaAI/ardevo.git"
   [run.duration]
-  generations = 800          # total generation budget across all task switches (a continuous run)
+  generations = 8000          # total generation budget across all task switches (a continuous run)
 
 [dataset]
 source = "Ardea/Icarus-dataset"
@@ -35,11 +35,11 @@ support_fraction = 0.8
 #   "random"           (param: avoid_repeat) -- uniform random next task, optionally never twice running
 #   "round_robin"      -- walk the pool in order
 #   "interleave_rungs" -- one task per rung per cycle (round-robin across rungs)
-kind = "random"
-avoid_repeat = true
+kind = "interleave_rungs"
+avoid_repeat = false
 generations_per_task = 40   # generations on one task before switching to the next
 checkpoint_every = 100      # write a gen_<NNNNNN>/ checkpoint (model, stats, net, speciation) this often
-rungs = [1, 2, 3, 4, 5]     # the interleaved rungs; set to "all" for the full 18-rung ladder
+rungs = "all"     # the interleaved rungs; set to "all" for the full 18-rung ladder
 tasks_per_rung = 100        # cap on tasks drawn per rung (capped at what the repo actually has)
 shuffle = true              # seeded shuffle of which tasks are drawn / their pool order
 
@@ -93,10 +93,18 @@ elitism = 2
   c_disjoint = 1.0
   c_weight = 0.5
 
-# complexity_penalty is REQUIRED here (the trial refuses to run without it): the shared body is reused
-# across every rung and would otherwise grow without bound. support + query drive growth and fit.
+# A complexity/hidden penalty is REQUIRED here (the trial refuses to run without one) so the shared
+# body, reused across every rung, cannot grow unbounded. Use `hidden_penalty` (bounds hidden-node
+# count) NOT `complexity_penalty` (total edges): with high-D I/O the dense readout is hundreds of edges,
+# so an edge penalty swamps the fitting signal and punishes all growth.
+#
+# negative_support_loss is the PRIMARY driver: it is value-type-correct for every rung (MSE for the
+# continuous pole rungs, BCE for binary, CE for categorical), so it rewards fitting where accuracy is
+# degenerate (regression accuracy is a within-tolerance fraction, useful to read but a poor gradient).
+# query terms are omitted: held-out loss is anti-generalization on parity, and weight_decay (in the
+# train stage) is what delivers generalization on the data-rich rungs.
 [fitness]
-components = ["support_accuracy", "query_accuracy", "complexity_penalty"]
-w_support_accuracy = 0.4
-w_query_accuracy = 0.6
-w_complexity_penalty = 0.02
+components = ["negative_support_loss", "support_accuracy", "hidden_penalty"]
+w_negative_support_loss = 2.0
+w_support_accuracy = 1.0
+w_hidden_penalty = 0.05

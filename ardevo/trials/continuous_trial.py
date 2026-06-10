@@ -44,8 +44,8 @@ class ContinuousTrial(Proctor):
         self.total_generations = int(config.get("generations", 800))
         self.weight_scale = float(config.get("evolution", {}).get("init", {}).get("weight_scale", 1.0))
 
-        if "complexity_penalty" not in config.get("fitness", {}).get("components", []):
-            raise ValueError("continuous run requires a 'complexity_penalty' fitness component so the shared topology cannot grow unbounded")
+        if not any(component.endswith("_penalty") for component in config.get("fitness", {}).get("components", [])):
+            raise ValueError("continuous run requires a complexity/hidden penalty fitness component so the shared topology cannot grow unbounded")
 
         self.pool: list[TaskEntry] = build_pool(
             source=config["dataset"],
@@ -164,19 +164,22 @@ class ContinuousTrial(Proctor):
                 "mean_fitness": mean,
                 "query_accuracy": best.metrics["query_accuracy"],
                 "support_accuracy": best.metrics.get("support_accuracy", 0.0),
+                "support_loss": best.metrics.get("support_loss", 0.0),
                 "hidden_nodes": hidden,
                 "enabled_edges": edges,
             }
         )
         self.log_scalar("Fitness", "best", best.fitness, state.generation)
-        self.log_scalar("Accuracy", "query", best.metrics["query_accuracy"], state.generation)
+        self.log_scalar("Accuracy", "support", best.metrics.get("support_accuracy", 0.0), state.generation)
+        self.log_scalar("Loss", "support", best.metrics.get("support_loss", 0.0), state.generation)
         self.log_scalar("Complexity", "hidden_nodes", hidden, state.generation)
         self.log_scalar("Complexity", "enabled_edges", edges, state.generation)
         if state.generation % 10 == 0:
             self.log_hardware_stats(state.generation)
             console.print(
-                f"[cyan]gen {state.generation:5d}[/cyan] rung {entry.rung} {entry.name[:18]:<18} "
-                f"fit={best.fitness:6.3f} q_acc={best.metrics['query_accuracy']:4.2f} hidden={hidden} edges={edges} io={self.substrate.n_inputs}->{self.substrate.n_outputs}"
+                f"[cyan]gen {state.generation:5d}[/cyan] rung {entry.rung} {entry.name[:16]:<16} "
+                f"fit={best.fitness:6.3f} s_acc={best.metrics.get('support_accuracy', 0.0):4.2f} s_loss={best.metrics.get('support_loss', 0.0):6.3f} "
+                f"hidden={hidden} edges={edges} io={self.substrate.n_inputs}->{self.substrate.n_outputs}"
             )
 
     def _checkpoint(self, state: EvolverState, active_index: int) -> None:
@@ -209,7 +212,12 @@ class ContinuousTrial(Proctor):
             if entry.name not in self.substrate.heads:
                 continue
             metrics = self.evolver.evaluate_only(champion.genome, self.substrate.adapter(entry)).metrics
-            per_rung[entry.name] = {"rung": float(entry.rung), "query_accuracy": metrics["query_accuracy"], "support_accuracy": metrics["support_accuracy"]}
+            per_rung[entry.name] = {
+                "rung": float(entry.rung),
+                "query_accuracy": metrics["query_accuracy"],
+                "support_accuracy": metrics["support_accuracy"],
+                "support_loss": metrics["support_loss"],
+            }
         return per_rung
 
     @staticmethod

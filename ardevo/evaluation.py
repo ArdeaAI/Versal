@@ -12,12 +12,18 @@ from ardevo.dataset.icarus import (
     EncodedTask,
     Level0Encoder,
     Task,
+    ValueType,
     as_logits,
     encode_task,
     loss_fn,
     model_output_features,
     target_positions,
 )
+
+# Regression "correct" tolerance: an output counts as correct if it lands within this fraction of the
+# target's spread. Exact float equality (the class path) is always wrong for CONTINUOUS targets, which
+# would leave continuous rungs (pole/double_pole) with a flat-zero accuracy and no fitness signal.
+_CONTINUOUS_TOLERANCE = 0.1
 
 
 def encode(task: Task, encoder: Level0Encoder) -> EncodedTask:
@@ -51,8 +57,13 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
     target, mask, descriptor = encoded_target
     raw = as_logits(module(x), descriptor, target_positions(target))
     loss = loss_fn(raw, target, descriptor, mask)
-    predictions = encoder.decode(raw, descriptor)
-    correct = predictions == target.to(torch.long)
+    if descriptor.value_type is ValueType.CONTINUOUS:
+        # Compare in the same (normalized) space the loss uses: within-tolerance fraction, not exact match.
+        spread = (target.max() - target.min()).clamp_min(1e-6)
+        correct = (raw - target).abs() <= _CONTINUOUS_TOLERANCE * spread
+    else:
+        predictions = encoder.decode(raw, descriptor)
+        correct = predictions == target.to(torch.long)
     if mask is not None:
         valid = ~mask
         accuracy = (correct & valid).sum().float() / valid.sum().clamp_min(1.0)
