@@ -1,0 +1,62 @@
+# ArdEVO runtime configuration: the single source of truth for a run.
+# Every evolutionary stage below is a registered, swappable operator: change a
+# `kind`, reorder `operators`, or retune a weight to reconfigure a run with no code.
+
+[run]
+project = "ardevo"
+experiment = "xor_topology"
+clearml = true              # true to track in ClearML; false runs fully offline
+machine = "MonadMetal"       # MonadMetal|MonadCPU|local -> local queue; Lattice* -> remote
+seed = 0
+log_level = "INFO"
+output_uri = false           # false keeps artifacts local; set a storage URI to upload
+repo = "https://github.com/ArdeaAI/ardevo.git"
+
+  [run.duration]
+  generations = 150
+
+[dataset]
+source = "Ardea/Icarus-dataset"   # hyphen form is the live Hub id
+rung = 2
+n_samples = 16
+
+[substrate]
+available_activations = ["tanh", "relu", "sigmoid", "identity"]
+default_activation = "tanh"
+
+[evolution]
+pop_size = 64
+elitism = 2
+
+  [evolution.init]
+  kind = "minimal"           # inputs + bias wired directly to outputs (grow from nothing)
+
+  [evolution.selection]
+  kind = "tournament"
+  tournament_size = 3
+
+  [evolution.crossover]
+  kind = "neat"              # "none" (asexual) | "neat" (innovation-aligned)
+  rate = 0.0
+
+  [evolution.mutation]
+  operators = ["perturb_weights", "add_connection", "add_node", "mutate_activation"]
+  perturb_weights_prob = 0.8
+  perturb_weights_sigma = 0.5
+  add_connection_prob = 0.10
+  add_node_prob = 0.03
+  mutate_activation_prob = 0.05
+
+  [evolution.train]
+  # "gradient" tunes each candidate's weights before scoring so a freshly-grown topology
+  # pays off immediately (it stands in for the deferred speciation that would otherwise
+  # protect new structure). Set "none" for pure weight co-evolution (will stall on XOR).
+  kind = "gradient"          # "none" | "gradient" | future: "cmaes"
+  steps = 40
+  lr = 0.05
+  writeback = true           # Lamarckian: copy tuned weights back into the genome
+
+[fitness]
+components = ["query_accuracy", "complexity_penalty"]
+w_query_accuracy = 1.0
+w_complexity_penalty = 0.01

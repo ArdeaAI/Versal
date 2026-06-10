@@ -9,140 +9,95 @@ search algorithm that seems to be able to generalize over the different rungs of
 in minimum complexity needed as we go up each difficulty rung until we find at least an ideal algorithm, potentially
 modified by me to something novel, that can be used across every rung and produce a significant score.
 
-You can see an example of how to get tasks from the dataset in `ardevo/main.py` and the dataset is from: `https://huggingface.co/datasets/Ardea/Icarus-dataset`
+You can see an example of how to get tasks from the dataset in `ardevo/dataset/loader.py` and the dataset is from: `https://huggingface.co/datasets/Ardea/Icarus-dataset`
 
 I want to explore what we can do with `https://github.com/RobertTLange/evosax`, though I think we might have to come up with how to use that for topologies themselves instead of weights/hyperparameters. I also want to look into the different things mentioned in `https://github.com/rtu715/NAS-Bench-360`
 
-To start out with, keep this small. For phase 1, let's just get the modular structure set up with the filesystem and an algorithm from evosax working on the first rung, which is just XOR.
+To start out with, keep this small. For phase 1, get the modular structure set up and a topology-evolution algorithm working on the first rung, which is just XOR.
 
 We want to use ClearML for this as well as much as we can make use of it. I already have my config set up for that.
 
-We want to modularize each part of this. I am not saying to use THIS file structure exactly, just giving an example of how to split things up into modules:
+## Phase 1: XOR (current)
+
+Phase 1 evolves a network *topology* from nothing to solve the rung-1 XOR task. We deliberately do **not** use
+evosax/JAX in the loop here: evosax is a fixed-vector optimizer, while growing a graph from minimal complexity is a
+structural (NEAT-style) search that we own directly in PyTorch. evosax stays installed and is slated to return later
+as a pluggable weight optimizer (the `train` stage) for the non-differentiable higher rungs (rungs 4-5 are interactive
+policy rollouts).
+
+A candidate starts as inputs + a bias wired straight to a linear output. Structural mutations add nodes and
+connections; a per-generation `train` step tunes each candidate's weights by backprop before scoring. Because XOR is
+not linearly separable, a winning run must *grow* at least one hidden node to break 75% and reach 100% query accuracy.
+
+```bash
+uv sync --group dev
+uv run app                       # evolve on rung-1 XOR (offline by default)
+uv run app --config config.toml  # explicit config path
 ```
-.
-├── datasets
-│   └── NexusDatasetSubsample -> /Users/sinjhin/WS/A/subworkdir/Experiments/datasets/NexusDatasetSubsample
-├── docs
-│   └── index.md
-├── jupyter
-├── models
-│   ├── checkpoints
-│   ├── evolved_substrates
-│   └── sgd_substrates
-├── nexus
-│   ├── ablations
-│   │   ├── configs.py
-│   │   └── runner.py
-│   ├── analysis
-│   │   ├── cluster_analysis.py
-│   │   ├── cross_modal.py
-│   │   ├── metrics.py
-│   │   ├── monitoring.py
-│   │   └── visualization.py
-│   ├── baselines
-│   │   └── gradient_trainer.py
-│   ├── core
-│   │   ├── concepts.py
-│   │   ├── levels.py
-│   │   ├── nexus_core.py
-│   │   └── relations.py
-│   ├── evolution
-│   │   ├── evolver.py
-│   │   ├── results.py
-│   │   └── strategies.py
-│   ├── model
-│   │   ├── blocks
-│   │   └── model.py
-│   ├── trials
-│   │   └── nexus_trial.py
-│   ├── tui
-│   │   ├── bg_text
-│   │   ├── app.py
-│   │   ├── art.py
-│   │   ├── background.py
-│   │   ├── components.py
-│   │   ├── screens.py
-│   │   └── theme.py
-│   ├── types
-│   │   └── nexus_types.py
-│   ├── utils
-│   │   ├── collater.py
-│   │   ├── config.py
-│   │   ├── dataloader.py
-│   │   ├── logging.py
-│   │   ├── pipelines.py
-│   │   └── proctor.py
-│   └── main.py
-├── notes
-│   ├── archived_results
-│   │   ├── concept_membership_report.md
-│   │   ├── nexus_trial_20260529_232522.json
-│   │   ├── nexus_trial_20260530_001901.json
-│   │   ├── nexus_trial_20260530_001942.json
-│   │   ├── nexus_trial_20260530_003039.json
-│   │   ├── nexus_trial_20260530_003138.json
-│   │   ├── nexus_trial_20260530_004036.json
-│   │   ├── nexus_trial_20260530_004052.json
-│   │   ├── nexus_trial_20260530_004124.json
-│   │   ├── nexus_trial_20260530_004221.json
-│   │   ├── nexus_trial_20260530_035704.json
-│   │   ├── nexus_trial_20260530_035800.json
-│   │   ├── nexus_trial_20260530_050412.json
-│   │   ├── nexus_trial_20260530_062629.json
-│   │   ├── nexus_trial_20260530_063519.json
-│   │   ├── nexus_trial_20260530_121607.json
-│   │   └── temporal_hierarchy_report.md
-│   ├── 20251211_GPT_Chat.md
-│   ├── 20251212_first_instructions.md
-│   ├── ardea-vision.md
-│   ├── conversation_before_project.md
-│   ├── Initial_DeepResearch01-Opus.md
-│   ├── initial_paper_idea.md
-│   ├── NEXUS Notes.md
-│   ├── notes.md
-│   ├── project_structure.md
-│   ├── roadmap.md
-│   └── synopsis.md
-├── paper
-│   ├── drafts
-│   │   ├── 20251201-NEXUS_PAPER
-│   │   ├── 20250817-paper.md
-│   │   └── nexus-position.md
-│   ├── literature
-│   │   ├── Integrated information theory - Wikipedia.pdf
-│   │   └── Questioning Representational Optimism in Deep Learning.pdf
-│   ├── neurips2025_style
-│   │   ├── neurips_2025.pdf
-│   │   ├── neurips_2025.sty
-│   │   └── neurips_2025.tex
-│   ├── results
-│   │   ├── comparisons
-│   │   ├── figures
-│   │   └── metrics
-│   └── submission
-├── results
-│   ├── nexus_trial_20260530_125305.json
-│   └── nexus_trial_20260530_135532.json
-├── scripts
-│   ├── blind_eval.py
-│   ├── distill_into_llm.py
-│   ├── evaluate.py
-│   ├── generate_figures.py
-│   └── train.py
-├── tests
-│   ├── unit
-│   │   └── core
-│   └── conftest.py
-├── tools
-│   ├── config.smoke.toml
-│   ├── format.py
-│   ├── lint.py
-│   ├── lintfix.py
-│   └── test.py
-├── CLAUDE.md
-├── config.toml
-├── LICENSE.md
-├── pyproject.toml
-├── README.md
-└── uv.lock
+
+Set `[run] clearml = true` in `config.toml` to track fitness / accuracy / complexity in ClearML; it degrades
+gracefully offline. Machine env maps to a queue: `MonadMetal`/`MonadCPU`/`local` run locally, `LatticeCPU`/
+`LatticeCUDA` enqueue remotely (push to GitHub first, since the agent clones the repo).
+
+## Lego-block evolution
+
+Every stage of the generational loop is an independent, registered operator selected and tuned from `config.toml`.
+The loop runs: **select → crossover → mutate → train → evaluate → fitness → replace**. To experiment, change a
+`kind`, reorder `[evolution.mutation].operators`, retune a weight, or register one new function in the matching
+registry; the loop itself never changes.
+
+| Stage | Config section | Registered options (phase 1) |
+|---|---|---|
+| init | `[evolution.init]` | `minimal` |
+| selection | `[evolution.selection]` | `tournament`, `truncation` |
+| crossover | `[evolution.crossover]` | `none`, `neat` |
+| mutation | `[evolution.mutation]` | `perturb_weights`, `add_connection`, `add_node`, `mutate_activation`, `toggle_connection` |
+| train | `[evolution.train]` | `none`, `gradient` (future: `cmaes` via evosax) |
+| fitness | `[fitness]` | `query_accuracy`, `complexity_penalty`, `negative_query_loss` |
+
+The `train` stage defaults to `gradient`: tuning a fresh topology's weights before scoring lets structural growth
+pay off immediately, which stands in for the speciation that would otherwise protect new innovations (deferred).
+
+## Project structure
+
+Built in phase 1:
+
+```
+ardevo/
+├── dataset/
+│   ├── icarus.py       # vendored Icarus runtime (generated; edit upstream, not here)
+│   └── loader.py       # load one rung's Task from the Hub
+├── evolution/
+│   ├── genome.py       # NEAT-style Genome (node/connection genes) + DAG helpers
+│   ├── registry.py     # Registry + build_evolver factory
+│   ├── init.py         # population-seeding operators
+│   ├── selection.py    # parent-selection operators
+│   ├── crossover.py    # recombination operators
+│   ├── mutation.py     # structural + weight mutators
+│   ├── train.py        # weight-optimization operators (gradient / none)
+│   ├── fitness.py      # fitness components + weighted aggregator
+│   └── evolver.py      # the thin generational loop
+├── substrate.py        # decode a genome into a torch GraphNet
+├── evaluation.py       # score a substrate on a Task via the Icarus encoder/loss
+├── trials/
+│   └── xor_trial.py    # EvolutionTrial(Proctor): runs + logs one rung
+├── utils/
+│   ├── config.py       # config.toml -> runtime dict
+│   ├── pipelines.py    # ClearML task + machine->queue + trial orchestration
+│   ├── proctor.py      # base trial: logging, device, artifacts
+│   └── logging.py      # Rich logger / console
+└── main.py             # Config -> Pipeline -> add_trial -> run_task
+```
+
+Planned for later phases (documented here, not built yet): `models/` (checkpoints, evolved/sgd substrates),
+`analysis/` (cross-modal metrics, visualization), `baselines/` (gradient-only trainer), `scripts/` (evaluate,
+figures), `paper/`, additional per-rung trials, an evosax-backed `cmaes` train operator, speciation / fitness
+sharing, recurrent topologies, and richer crossover.
+
+## Development
+
+```bash
+uv run ruff check . && uv run ruff format --check .   # lint + format (line length 180)
+uv run ty check                                       # type check (Astral 'ty', not mypy)
+uv run pytest tests/ -v                               # tests (offline; synthetic XOR fixture)
 ```
