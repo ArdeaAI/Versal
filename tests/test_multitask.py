@@ -13,6 +13,7 @@ import torch
 
 from ardevo import checkpoint
 from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from ardevo.evolution import multitask
 from ardevo.evolution.evolver import EvolverState
 from ardevo.evolution.genome import InnovationTracker, genome_from_dict
 from ardevo.evolution.multitask import MultiTaskSubstrate, task_entry
@@ -63,6 +64,31 @@ def test_task_entry_describes_interface() -> None:
     assert entry.input_signature.startswith("BINARY")
     assert entry.input_width == 3
     assert entry.output_width == 1
+
+
+def test_build_pool_closes_backend_datasets(monkeypatch) -> None:
+    closed: list[int] = []
+
+    class FakeIcarusDataset:
+        def __init__(self, *, rungs, **_kwargs) -> None:
+            self.rung = int(rungs[0])
+            self.tasks = [_binary_task(f"task{self.rung}", 2, rung=self.rung)]
+
+        def __len__(self) -> int:
+            return len(self.tasks)
+
+        def __getitem__(self, index: int) -> Task:
+            return self.tasks[index]
+
+        def close(self) -> None:
+            closed.append(self.rung)
+
+    monkeypatch.setattr(multitask, "IcarusDataset", FakeIcarusDataset)
+
+    pool = multitask.build_pool("unused", [1, 2], n_samples=4, support_fraction=0.8, tasks_per_rung=1, shuffle=False, seed=0)
+
+    assert [entry.rung for entry in pool] == [1, 2]
+    assert closed == [1, 2]
 
 
 def test_seed_builds_one_bank_and_head() -> None:

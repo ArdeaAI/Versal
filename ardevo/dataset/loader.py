@@ -14,6 +14,9 @@ def load_rung_task(source: str, rung: int, n_samples: int, seed: int = 0, suppor
     It is ignored for fixed-split tasks like XOR.
     """
     dataset = IcarusDataset(rungs=(rung,), n_tasks=1, n_samples=n_samples, support_fraction=support_fraction, hf_repo=source, seed=seed)
-    if len(dataset) == 0:
-        raise RuntimeError(f"no tasks found for rung {rung} in {source!r}")
-    return dataset[0]
+    try:
+        if len(dataset) == 0:
+            raise RuntimeError(f"no tasks found for rung {rung} in {source!r}")
+        return dataset[0]
+    finally:
+        dataset.close()

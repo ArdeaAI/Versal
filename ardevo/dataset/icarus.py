@@ -18,14 +18,16 @@ This software is based on work originally developed by Ardea AI Corp.
 import glob
 import os
 import random
-import torch
-import torch.nn.functional as F
 import zlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datasets import Dataset, Features, Sequence, Value, load_dataset
 from enum import Enum
 from typing import Any
+
+import torch
+import torch.nn.functional as F
+from datasets import Dataset, Features, Sequence, Value, load_dataset
+
 
 # ===== icarus/types.py =====
 class Axis(Enum):
@@ -433,6 +435,10 @@ class IcarusDataset(torch.utils.data.Dataset[Task]):
 
     def __len__(self) -> int:
         return len(self._plans)
+
+    def close(self) -> None:
+        """Release loaded backend datasets after callers have materialized the tasks they need."""
+        self._datasets.clear()
 
     def __getitem__(self, index: int) -> Task:
         config, row_index = self._plans[index]

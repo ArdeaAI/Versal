@@ -17,6 +17,7 @@ population deterministically, allocating shared node ids / innovations so genes 
 crossover. The layout (banks, heads, bias) serializes for checkpoint/resume.
 """
 
+import gc
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,14 +79,19 @@ def build_pool(source: str, rungs: list[int], n_samples: int, support_fraction: 
     """
     entries: list[TaskEntry] = []
     for rung in rungs:
+        dataset: IcarusDataset | None = None
         try:
             dataset = IcarusDataset(
                 rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source
             )
+            entries.extend(task_entry(dataset[index]) for index in range(len(dataset)))
         except Exception as error:  # broad: many failure modes (arrow overflow, network, missing config); skip the rung and continue
             logger.warning("skipping rung %s: could not load it (%s: %s)", rung, type(error).__name__, error)
             continue
-        entries.extend(task_entry(dataset[index]) for index in range(len(dataset)))
+        finally:
+            if dataset is not None:
+                dataset.close()
+                gc.collect()
     return entries
 
 

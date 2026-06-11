@@ -18,7 +18,7 @@
 project = "ardevo"
 experiment = "orchestrated_ladder"
 clearml = true
-machine = "local"
+machine = "LatticeCPU"
 seed = 0
 log_level = "INFO"
 output_uri = false
@@ -33,12 +33,12 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       # widen to "all" once the fast rungs populate the library
+rungs = "all" # [1, 2, 3, 4, 5]       # widen to "all" once the fast rungs populate the library
 tasks_per_rung = 100
 shuffle = true
 
 [orchestrator]
-tasks = 40                    # how many scheduled tasks this run attempts
+tasks = 400                    # how many scheduled tasks this run attempts
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
