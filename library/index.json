@@ -18,7 +18,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 1013,
+      "use_count": 1019,
       "max_attributed_fitness": 1.0246153914608385
     }
   },
@@ -41,7 +41,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 547,
+      "use_count": 549,
       "max_attributed_fitness": 1.001537630255384
     }
   },
@@ -64,7 +64,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 534,
+      "use_count": 538,
       "max_attributed_fitness": 1.0015341446170531
     }
   },
@@ -87,7 +87,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 1024,
+      "use_count": 1030,
       "max_attributed_fitness": 1.001487706464686
     }
   }
