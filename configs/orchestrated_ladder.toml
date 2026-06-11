@@ -41,8 +41,8 @@ shuffle = true
 tasks = 40                    # how many scheduled tasks this run attempts
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
-floor = 0.55                  # below this at half budget = early stall
-stall_generations = 15
+floor = 0.35                  # below this at half budget = early stall
+stall_generations = 25
 stall_epsilon = 0.005
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5

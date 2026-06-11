@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from ardevo.evaluation import support_loss
 from ardevo.evolution.composition import (
     AssemblyContext,
     CompEdgeGene,
@@ -187,6 +188,20 @@ def test_add_and_toggle_comp_edges() -> None:
     assert grown == comp  # input->output already saturated, nothing to add
     toggled = toggle_comp_edge(comp, ctx, rng=random.Random(0), prob=1.0)
     assert sum(1 for e in toggled.edges if e.enabled) == len(comp.edges) - 1
+
+
+def test_gradient_skips_composition_with_disconnected_output(solving_genome: Genome, xor_adapter) -> None:
+    comp = _module_comp("live:7")
+    comp.edges = [comp.edges[0], CompEdgeGene(1, 2, False, 1, comp.edges[1].glue)]
+    net = assemble(comp, _ctx(solving_genome), n_inputs=2)
+
+    before_loss = float(support_loss(net, xor_adapter.encoded).detach())
+    before_glue = {key: value.detach().clone() for key, value in net.glue.items()}
+
+    gradient(comp, net, xor_adapter.encoded, rng=random.Random(0), steps=5, lr=0.05, writeback=False)
+
+    assert float(support_loss(net, xor_adapter.encoded).detach()) == before_loss
+    assert all(torch.equal(net.glue[key].detach(), value) for key, value in before_glue.items())
 
 
 def test_writeback_composition_copies_trained_glue() -> None:

@@ -18,8 +18,8 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 166,
-      "max_attributed_fitness": 0.9495881071873009
+      "use_count": 338,
+      "max_attributed_fitness": 0.9630956318999113
     }
   },
   {
@@ -41,8 +41,8 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 159,
-      "max_attributed_fitness": 0.9406896147708773
+      "use_count": 385,
+      "max_attributed_fitness": 0.9741157697327435
     }
   },
   {
@@ -64,7 +64,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.38461539149284363,
     "stats": {
-      "use_count": 145,
+      "use_count": 325,
       "max_attributed_fitness": 0.9580639694456476
     }
   },
@@ -87,8 +87,31 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 170,
-      "max_attributed_fitness": 0.9583228234248236
+      "use_count": 405,
+      "max_attributed_fitness": 0.9943305578629952
+    }
+  },
+  {
+    "key": "c2_6bb3d3c2f5a0",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 0.9750000238418579,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 181,
+      "max_attributed_fitness": 0.9937434375309385
     }
   },
   {
@@ -110,8 +133,31 @@
     "accepted_metric": 0.9750000238418579,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 110,
-      "max_attributed_fitness": 0.9503642538180344
+      "use_count": 326,
+      "max_attributed_fitness": 1.0014204873051493
+    }
+  },
+  {
+    "key": "c2_a3b2ef054f97",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 36,
+      "max_attributed_fitness": 0.926029064245522
     }
   },
   {
@@ -133,7 +179,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.38461539149284363,
     "stats": {
-      "use_count": 190,
+      "use_count": 375,
       "max_attributed_fitness": 0.9637444959580899
     }
   },
@@ -156,7 +202,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 241,
+      "use_count": 483,
       "max_attributed_fitness": 0.9990672256797553
     }
   },
@@ -179,8 +225,8 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.38461539149284363,
     "stats": {
-      "use_count": 238,
-      "max_attributed_fitness": 0.9680656421883032
+      "use_count": 474,
+      "max_attributed_fitness": 0.9808334205928259
     }
   },
   {
@@ -202,7 +248,7 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.38461539149284363,
     "stats": {
-      "use_count": 172,
+      "use_count": 411,
       "max_attributed_fitness": 1.0348339674063027
     }
   }

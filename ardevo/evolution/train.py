@@ -39,6 +39,10 @@ TRAIN_POPULATION: Registry[PopulationTrainOp] = Registry("train_population")
 last_batch_stats: dict[str, float] = {}
 
 
+def _trainable_parameters(module: torch.nn.Module) -> list[torch.nn.Parameter]:
+    return [parameter for parameter in module.parameters() if parameter.requires_grad]
+
+
 @TRAIN.register("none")
 def no_train(genome: Genome, module: SubstrateModule, encoded: EncodedTask, *, rng: random.Random, **_params: object) -> tuple[Genome, SubstrateModule]:
     return genome, module
@@ -58,12 +62,15 @@ def gradient(
 ) -> tuple[Genome, SubstrateModule]:
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
-    if steps <= 0 or not module.has_edges:
+    parameters = _trainable_parameters(module)
+    if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
-    optimizer = torch.optim.Adam(module.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss(module, encoded)
+        if not loss.requires_grad:
+            break
         loss.backward()
         optimizer.step()
     if writeback:
@@ -131,6 +138,8 @@ def gradient_batched(
             # The P multiplier turns the folded MEAN into the SUM of per-candidate losses: each
             # candidate's gradient (and Adam update) is exactly what the sequential path computes.
             loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
+            if not loss.requires_grad:
+                break
             loss.backward()
             optimizer.step()
         batched.unstack_into(nets)
