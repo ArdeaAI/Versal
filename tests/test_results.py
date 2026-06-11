@@ -1,7 +1,9 @@
 import json
+import random
 
-from ardevo.evolution.genome import genome_from_dict, genome_to_dict
-from ardevo.results import render_network, render_speciation, run_directory, write_model, write_stats
+from ardevo.evolution.composition import minimal_composition
+from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
+from ardevo.results import render_composition_network, render_network, render_speciation, run_directory, write_model, write_stats
 from ardevo.substrate import decode
 
 
@@ -28,6 +30,13 @@ def test_write_stats_and_model(tmp_path):
 def test_render_network_writes_png(tmp_path, solving_genome):
     directory = run_directory("20260609_000001", 1.0, 1.0, 0.0, root=str(tmp_path))
     image_path = render_network(directory, solving_genome, title="test")
+    assert image_path.exists() and image_path.stat().st_size > 0
+
+
+def test_render_composition_network_writes_png(tmp_path):
+    directory = run_directory("20260609_000001", 1.0, 1.0, 0.0, root=str(tmp_path))
+    comp = minimal_composition([("BINARY|K", 2)], "head", 1, InnovationTracker(_next_node_id=0), random.Random(0))
+    image_path = render_composition_network(directory, comp, title="composition")
     assert image_path.exists() and image_path.stat().st_size > 0
 
 

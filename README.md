@@ -99,9 +99,10 @@ an escalation ladder per task:
 
 Recursion comes from the library, not from new types: an entry can itself be a composition, so
 level 1 is mini-models, level 2 is compositions of them, level 3+ is compositions of compositions.
-The library survives across runs (delete `library/` to start the search space cold). The attempts
-ledger, per-task checkpoints (`task_<NNNN>/`), library growth, and module-pool stats all land in
-stats.json and ClearML (`Orchestrator/*`, `Modules/*`, `Fitness/comp_*`, `Robustness/*`).
+The library survives across runs (delete `library/` to start the search space cold). When a task
+admits novel library entries, its checkpoint (`task_<NNNN>/`), net image, speciation chart, attempts
+ledger, library growth, and module-pool stats land in stats.json and ClearML (`Orchestrator/*`,
+`Modules/*`, `Fitness/comp_*`, `Robustness/*`).
 
 New substrate primitives make layered complexity EXPRESSIBLE while staying grown-from-minimal:
 `aggregation = "product"` nodes (multiplicative gating, second-order interactions) and true

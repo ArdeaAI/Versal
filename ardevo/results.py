@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ardevo.evolution.composition import CompNodeKind, CompositionGenome, comp_topological_order
 from ardevo.evolution.genome import Genome, topological_order
 
 DEFAULT_ROOT = "results"
@@ -91,6 +92,55 @@ def render_network(directory: Path, genome: Genome, *, title: str) -> Path:
     return path
 
 
+def _composition_node_layers(comp: CompositionGenome) -> dict[int, int]:
+    incoming: dict[int, list[int]] = {}
+    for edge in comp.enabled_edges():
+        incoming.setdefault(edge.out_id, []).append(edge.in_id)
+    layer: dict[int, int] = {}
+    for node_id in comp_topological_order(comp):
+        predecessors = incoming.get(node_id, [])
+        layer[node_id] = 0 if not predecessors else 1 + max(layer[pred] for pred in predecessors)
+    return layer
+
+
+def render_composition_network(directory: Path, comp: CompositionGenome, *, title: str) -> Path:
+    """Render an admitted composition graph to `net.png`."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import networkx as nx
+
+    layers = _composition_node_layers(comp)
+    graph: nx.DiGraph = nx.DiGraph()
+    for node_id, node in comp.nodes.items():
+        graph.add_node(node_id, layer=layers.get(node_id, 0), kind=node.kind.value)
+    for edge in comp.enabled_edges():
+        strength = max((abs(value) for value in edge.glue), default=0.0)
+        graph.add_edge(edge.in_id, edge.out_id, weight=strength)
+
+    position = nx.multipartite_layout(graph, subset_key="layer")
+    degrees = dict(graph.degree())
+    color_by_kind = {CompNodeKind.INPUT.value: "#4c78a8", CompNodeKind.MODULE.value: "#59a14f", CompNodeKind.OUTPUT.value: "#e15759"}
+    node_sizes = [180 + 260 * degrees.get(node_id, 0) for node_id in graph.nodes()]
+    node_colors = [color_by_kind.get(graph.nodes[node_id]["kind"], "#777777") for node_id in graph.nodes()]
+    edge_widths = [0.6 + 2.4 * min(data["weight"], 3.0) / 3.0 for _u, _v, data in graph.edges(data=True)]
+
+    figure, axis = plt.subplots(figsize=(10, 7))
+    figure.patch.set_facecolor("#e8e8e8")
+    axis.set_facecolor("#e8e8e8")
+    nx.draw_networkx_edges(graph, position, ax=axis, edge_color="black", width=edge_widths, alpha=0.5, arrows=False)
+    nx.draw_networkx_nodes(graph, position, ax=axis, node_size=node_sizes, node_color=node_colors, linewidths=0.0)
+    axis.set_title(title, fontsize=11)
+    axis.axis("off")
+    figure.tight_layout()
+
+    path = directory / "net.png"
+    figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
+    plt.close(figure)
+    return path
+
+
 def render_speciation(directory: Path, species_history: list[dict[int, int]], *, title: str) -> Path:
     """Stacked-area chart of each species' population over generations (births and deaths over time)."""
     import matplotlib
@@ -111,7 +161,7 @@ def render_speciation(directory: Path, species_history: list[dict[int, int]], *,
         cmap = plt.get_cmap("viridis")
         colors = [cmap(index / max(len(species_ids) - 1, 1)) for index in range(len(species_ids))]
         axis.stackplot(generations, *bands, colors=colors, edgecolor="#e8e8e8", linewidth=0.2)
-        axis.set_xlim(0, max(generations))
+        axis.set_xlim((0, max(generations)) if max(generations) > 0 else (-0.5, 0.5))
         axis.set_xlabel("generation")
         axis.set_ylabel("population by species")
     else:

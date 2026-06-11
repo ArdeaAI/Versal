@@ -42,7 +42,7 @@ tasks = 40                    # how many scheduled tasks this run attempts
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
-stall_generations = 25
+stall_generations = 80
 stall_epsilon = 0.005
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
@@ -52,9 +52,9 @@ output_slices_n_groups = 2
 input_subsets_n_subsets = 2
 time_windows_n_windows = 2
   [orchestrator.budgets]      # evolve generations per recursion depth
-  depth0 = 60
-  depth1 = 30
-  depth2 = 15
+  depth0 = 1000
+  depth1 = 800
+  depth2 = 400
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]

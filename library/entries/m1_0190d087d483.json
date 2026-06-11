@@ -213,7 +213,7 @@
     "weight_robustness": 0.5
   },
   "stats": {
-    "use_count": 483,
-    "max_attributed_fitness": 0.9990672256797553
+    "use_count": 1024,
+    "max_attributed_fitness": 1.001487706464686
   }
 }

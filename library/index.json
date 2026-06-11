@@ -18,12 +18,12 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 338,
-      "max_attributed_fitness": 0.9630956318999113
+      "use_count": 1013,
+      "max_attributed_fitness": 1.0246153914608385
     }
   },
   {
-    "key": "c2_1cb59538d161",
+    "key": "c2_b2e58686b1fe",
     "entry_type": "composition",
     "level": 2,
     "io": {
@@ -41,35 +41,12 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 385,
-      "max_attributed_fitness": 0.9741157697327435
+      "use_count": 547,
+      "max_attributed_fitness": 1.001537630255384
     }
   },
   {
-    "key": "c2_2be01da499a3",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.38461539149284363,
-    "stats": {
-      "use_count": 325,
-      "max_attributed_fitness": 0.9580639694456476
-    }
-  },
-  {
-    "key": "c2_3c2149301946",
+    "key": "c2_eaecdbb68d99",
     "entry_type": "composition",
     "level": 2,
     "io": {
@@ -87,100 +64,8 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 405,
-      "max_attributed_fitness": 0.9943305578629952
-    }
-  },
-  {
-    "key": "c2_6bb3d3c2f5a0",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 32
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 4
-      }
-    },
-    "accepted_metric": 0.9750000238418579,
-    "weight_robustness": 0.0,
-    "stats": {
-      "use_count": 181,
-      "max_attributed_fitness": 0.9937434375309385
-    }
-  },
-  {
-    "key": "c2_7abaf2414223",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 32
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 2
-      }
-    },
-    "accepted_metric": 0.9750000238418579,
-    "weight_robustness": 0.0,
-    "stats": {
-      "use_count": 326,
-      "max_attributed_fitness": 1.0014204873051493
-    }
-  },
-  {
-    "key": "c2_a3b2ef054f97",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 32
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 4
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.0,
-    "stats": {
-      "use_count": 36,
-      "max_attributed_fitness": 0.926029064245522
-    }
-  },
-  {
-    "key": "c2_dff48b98e517",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.38461539149284363,
-    "stats": {
-      "use_count": 375,
-      "max_attributed_fitness": 0.9637444959580899
+      "use_count": 534,
+      "max_attributed_fitness": 1.0015341446170531
     }
   },
   {
@@ -202,54 +87,8 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 483,
-      "max_attributed_fitness": 0.9990672256797553
-    }
-  },
-  {
-    "key": "m1_2c5caa27d0ed",
-    "entry_type": "module",
-    "level": 1,
-    "io": {
-      "inputs": [
-        {
-          "signature": "ANY",
-          "width": 4
-        }
-      ],
-      "output": {
-        "signature": "ANY",
-        "width": 2
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.38461539149284363,
-    "stats": {
-      "use_count": 474,
-      "max_attributed_fitness": 0.9808334205928259
-    }
-  },
-  {
-    "key": "m1_989829fb575e",
-    "entry_type": "module",
-    "level": 1,
-    "io": {
-      "inputs": [
-        {
-          "signature": "ANY",
-          "width": 4
-        }
-      ],
-      "output": {
-        "signature": "ANY",
-        "width": 2
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.38461539149284363,
-    "stats": {
-      "use_count": 411,
-      "max_attributed_fitness": 1.0348339674063027
+      "use_count": 1024,
+      "max_attributed_fitness": 1.001487706464686
     }
   }
 ]

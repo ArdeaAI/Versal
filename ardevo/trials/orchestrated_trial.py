@@ -4,8 +4,7 @@ Consumes the same `[schedule]` task stream as the continuous trial, but each tas
 orchestrator's escalation ladder (library lookup -> evolve -> decompose/recurse -> admit) instead of
 sharing one mutable champion. Durable cross-task state is the LIBRARY (file-persistent), the live
 module population, and the scheduler cursors; recursion within a task is synchronous and depth
-capped, so checkpoints land BETWEEN tasks (`task_<NNNN>/`) and a killed run restarts its in-flight
-task from the lookup step.
+capped, so checkpoints are written only when a task admits novel library entries.
 """
 
 import datetime
@@ -16,12 +15,14 @@ from typing import Any, cast
 import torch
 
 from ardevo import checkpoint, results
+from ardevo.evolution.composition import comp_from_dict
+from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_from_dict, state_to_dict
 from ardevo.evolution.multitask import TaskEntry, build_pool
 from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
-from ardevo.library import ModuleLibrary
-from ardevo.orchestrator import Orchestrator, attempts_from_dicts, attempts_to_dicts
+from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
+from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
 
@@ -93,13 +94,16 @@ class OrchestratedTrial(Proctor):
             index = self.scheduler.next_index(self.pool, state.rng)
             entry = self.pool[index]
             console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
+            library_keys_before = set(self.library.keys())
             solution = orchestrator.solve(entry.task)
             task_cursor += 1
+            new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
             outcome = orchestrator.attempts[-1].outcome if orchestrator.attempts else "unknown"
             label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
             console.print(f"  -> {label} (library size {len(self.library)})")
             self._log_task(orchestrator, state, task_cursor)
-            self._checkpoint(orchestrator, state, task_cursor)
+            if new_library_keys:
+                self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
 
         self.results = {
             "tasks_attempted": task_cursor,
@@ -135,10 +139,12 @@ class OrchestratedTrial(Proctor):
         self.log_scalar("Modules", "species", len(state.species_champions), task_cursor)
         self.log_hardware_stats(task_cursor)
 
-    def _checkpoint(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
+    def _checkpoint(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, new_library_keys: list[str], solution: Solution | None) -> None:
         directory = self.run_dir / f"task_{task_cursor:04d}"
         directory.mkdir(parents=True, exist_ok=True)
-        results.write_stats(directory, self._stats(orchestrator, state, task_cursor))
+        net_key = self._net_artifact_key(new_library_keys, solution.key if solution is not None else None)
+        results.write_stats(directory, self._stats(orchestrator, state, task_cursor, new_library_keys, net_key))
+        self._render_net_artifact(directory, net_key, task_cursor)
         checkpoint.write_checkpoint(
             directory,
             checkpoint.build_orchestrated_payload(
@@ -153,10 +159,30 @@ class OrchestratedTrial(Proctor):
         )
         results.render_speciation(directory, state.module_species_history, title=f"module species through task {task_cursor}")
         if self.task:
-            for name in ("stats.json", "checkpoint.json", "speciation.png"):
-                self.save_artifact(f"task{task_cursor:04d}_{name}", str(directory / name))
+            for name in ("stats.json", "checkpoint.json", "speciation.png", "net.png"):
+                path = directory / name
+                if path.exists():
+                    self.save_artifact(f"task{task_cursor:04d}_{name}", str(path))
 
-    def _stats(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> dict[str, Any]:
+    def _net_artifact_key(self, new_library_keys: list[str], solution_key: str | None) -> str:
+        if solution_key in new_library_keys:
+            return str(solution_key)
+        entries = [self.library.load(key) for key in new_library_keys]
+        compositions = [entry for entry in entries if entry.entry_type == COMPOSITION]
+        chosen = max(compositions or entries, key=lambda entry: entry.level)
+        return chosen.key
+
+    def _render_net_artifact(self, directory: Path, key: str, task_cursor: int) -> None:
+        entry = self.library.load(key)
+        title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
+        if entry.entry_type == MODULE:
+            results.render_network(directory, genome_from_dict(entry.payload), title=title)
+        elif entry.entry_type == COMPOSITION:
+            results.render_composition_network(directory, comp_from_dict(entry.payload), title=title)
+        else:
+            raise ValueError(f"unknown library entry type {entry.entry_type!r}")
+
+    def _stats(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, new_library_keys: list[str], net_key: str) -> dict[str, Any]:
         return {
             "task_cursor": task_cursor,
             "generations_run": state.generation,
@@ -164,7 +190,7 @@ class OrchestratedTrial(Proctor):
                 "counters": dict(orchestrator.counters),
                 "attempts": attempts_to_dicts(orchestrator.attempts),
             },
-            "library": {"size": len(self.library), "keys": self.library.keys(), "path": str(self.library.root)},
+            "library": {"size": len(self.library), "keys": self.library.keys(), "path": str(self.library.root), "new_keys": new_library_keys, "net_key": net_key},
             "modules": {
                 "pool_size": len(state.modules),
                 "species": len(state.species_champions),

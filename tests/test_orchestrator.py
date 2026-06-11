@@ -14,6 +14,7 @@ from ardevo.evolution.loop import AssessedComposition, state_from_dict, state_to
 from ardevo.evolution.registry import build_loop
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
 from ardevo.orchestrator import Orchestrator, StallDetector, attempts_from_dicts, attempts_to_dicts, comp_task_spec
+from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from tests.test_hierarchical_loop import _config as _loop_config
 
 
@@ -182,6 +183,36 @@ def test_admission_detaches_live_refs(tmp_path: Path, xor_task: Task) -> None:
     entry = orchestrator.library.load(solution.key)
     comp = comp_from_dict(entry.payload)
     assert all(ref.startswith("library:") for ref in comp.refs())
+
+
+def test_orchestrated_checkpoint_writes_artifacts_only_for_new_library_entries(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.0, "decompose": [], "budgets": {"depth0": 1}})
+    before = set(orchestrator.library.keys())
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None
+    new_keys = [key for key in orchestrator.library.keys() if key not in before]
+    assert new_keys
+
+    trial = object.__new__(OrchestratedTrial)
+    trial.config = {"orchestrator": {}, "schedule": {}, "evolution": {}, "fitness": {}, "dataset": "synthetic"}
+    trial.library = orchestrator.library
+    trial.loop = orchestrator.loop
+    trial.scheduler = type("Scheduler", (), {"state_dict": lambda self: {"last": 0}})()
+    trial.run_dir = tmp_path / "run"
+    trial.task = None
+
+    trial._checkpoint(orchestrator, orchestrator.state, 1, new_keys, solution)
+    directory = trial.run_dir / "task_0001"
+    assert (directory / "stats.json").exists()
+    assert (directory / "checkpoint.json").exists()
+    assert (directory / "speciation.png").exists()
+    assert (directory / "net.png").exists()
+
+    before_hit = set(orchestrator.library.keys())
+    hit = orchestrator.solve(xor_task)
+    assert hit is not None
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert [key for key in orchestrator.library.keys() if key not in before_hit] == []
 
 
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:
