@@ -45,11 +45,19 @@ def _bind_prefixed(table: dict[str, Any], name: str) -> dict[str, Any]:
     return {key[len(prefix) :]: value for key, value in table.items() if key.startswith(prefix)}
 
 
+def build_loop(config: dict[str, Any]) -> Any:
+    """Resolve the configured top-level loop strategy (`[evolution] loop = "flat" | "hierarchical"`)."""
+    from ardevo.evolution import loop
+
+    kind = config.get("evolution", {}).get("loop", "flat")
+    return loop.LOOP.get(kind)(config)
+
+
 def build_evolver(config: dict[str, Any]) -> "Evolver":
     """Assemble an `Evolver` from the nested `[evolution]`/`[substrate]`/`[fitness]` config tables."""
     # Local imports keep the operator modules (which import Registry from here) free of a cycle,
     # while still triggering their @register side effects.
-    from ardevo.evolution import crossover, fitness, init, mutation, selection, speciation, train
+    from ardevo.evolution import crossover, evaluate, fitness, init, mutation, selection, speciation, train
     from ardevo.evolution.evolver import Evolver
 
     evolution = config.get("evolution", {})
@@ -83,9 +91,24 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     mutation_pipeline = mutation.MutationPipeline(mutators)
 
     train_cfg = evolution.get("train", {})
-    train_op = partial(
-        train.TRAIN.get(train_cfg.get("kind", "none")),
-        **{k: v for k, v in train_cfg.items() if k != "kind"},
+    train_kind = train_cfg.get("kind", "none")
+    train_population_op = None
+    if train_kind in train.TRAIN_POPULATION.names():
+        # Population trainers batch a whole generation; single-candidate calls (resume re-scoring,
+        # task switches) still need a sequential op, so bind `gradient` with the shared params.
+        train_population_op = partial(train.TRAIN_POPULATION.get(train_kind), **{k: v for k, v in train_cfg.items() if k != "kind"})
+        sequential = {k: v for k, v in train_cfg.items() if k in ("steps", "lr", "writeback", "weight_decay")}
+        train_op = partial(train.TRAIN.get("gradient"), **sequential)
+    else:
+        train_op = partial(
+            train.TRAIN.get(train_kind),
+            **{k: v for k, v in train_cfg.items() if k != "kind"},
+        )
+
+    evaluate_cfg = evolution.get("evaluate", {})
+    evaluate_op = partial(
+        evaluate.EVALUATE.get(evaluate_cfg.get("kind", "standard")),
+        **{k: v for k, v in evaluate_cfg.items() if k != "kind"},
     )
 
     components = [(fitness.FITNESS.get(name), float(fitness_cfg.get(f"w_{name}", 1.0))) for name in fitness_cfg.get("components", [])]
@@ -105,7 +128,9 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         crossover_op=crossover_op,
         mutation=mutation_pipeline,
         train_op=train_op,
+        train_population_op=train_population_op,
         fitness=aggregator,
+        evaluate_op=evaluate_op,
         speciate=speciate,
         activations=activations,
         default_activation=default_activation,

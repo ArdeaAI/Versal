@@ -89,7 +89,7 @@ class EvolutionTrial(Proctor):
         tuned = best.module.export_weights()
         genome = genome_to_dict(best.genome)
         for connection in genome["connections"]:
-            edge = (connection["in"], connection["out"])
+            edge = (connection["in"], connection["out"], connection.get("recurrent", False))
             if connection["enabled"] and edge in tuned:
                 connection["weight"] = tuned[edge]
         return {

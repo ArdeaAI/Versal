@@ -65,6 +65,30 @@ def latest_checkpoint_dir(run_directory: Path) -> Path | None:
     return None
 
 
+def build_orchestrated_payload(
+    *, task_cursor: int, rng: random.Random, scheduler: Any, speciator: Any, loop_state: dict[str, Any], attempts: list[dict[str, Any]], counters: dict[str, int]
+) -> dict[str, Any]:
+    """The orchestrated run's between-task resumable state. The library is file-persistent and
+    append-only, so it checkpoints itself; an in-flight task simply restarts from its lookup step."""
+    return {
+        "task_cursor": task_cursor,
+        "rng": serialize_rng(rng),
+        "schedule": scheduler.state_dict(),
+        "speciation": speciator.state_dict(),
+        "loop_state": loop_state,
+        "attempts": attempts,
+        "counters": counters,
+    }
+
+
+def latest_task_checkpoint_dir(run_directory: Path) -> Path | None:
+    """The most recent `task_*/` under an orchestrated run dir holding a checkpoint, or None."""
+    for candidate in sorted(run_directory.glob("task_*"), reverse=True):
+        if (candidate / "checkpoint.json").exists():
+            return candidate
+    return None
+
+
 def restored_species_history(data: dict[str, Any]) -> list[dict[int, int]]:
     """JSON turns the species-id keys into strings; turn them back into ints."""
     return [{int(species_id): size for species_id, size in snapshot.items()} for snapshot in data["species_history"]]

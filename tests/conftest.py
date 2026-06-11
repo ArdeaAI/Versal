@@ -1,4 +1,6 @@
-"""Shared fixtures: a synthetic XOR task and hand-built genomes (no network access)."""
+"""Shared fixtures: synthetic XOR / temporal / decomposable tasks and hand-built genomes (no network access)."""
+
+import random
 
 import pytest
 import torch
@@ -31,6 +33,70 @@ def xor_encoder() -> Level0Encoder:
 def xor_adapter(xor_task: Task, xor_encoder: Level0Encoder) -> TaskAdapter:
     encoded = encode(xor_task, xor_encoder)
     return TaskAdapter(encoded, xor_encoder, input_width(encoded), output_features(encoded))
+
+
+def _bit_patterns(n_bits: int, count: int, seed: int) -> list[list[float]]:
+    rng = random.Random(seed)
+    chosen = rng.sample(range(2**n_bits), count)
+    return [[float((value >> bit) & 1) for bit in range(n_bits)] for value in chosen]
+
+
+def _running_parity(bits: list[float]) -> list[float]:
+    out: list[float] = []
+    acc = 0
+    for bit in bits:
+        acc ^= int(bit)
+        out.append(float(acc))
+    return out
+
+
+def _temporal_pairs(patterns: list[list[float]], seq_to_seq: bool) -> list[tuple[Field, Field]]:
+    pairs: list[tuple[Field, Field]] = []
+    for bits in patterns:
+        x = Field(torch.tensor(bits, dtype=torch.float32), (Axis.TIME,), ValueType.BINARY, None, None, None)
+        parity = _running_parity(bits)
+        if seq_to_seq:
+            y = Field(torch.tensor(parity, dtype=torch.float32), (Axis.TIME,), ValueType.BINARY, None, None, None)
+        else:
+            y = Field(torch.tensor([parity[-1]], dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
+        pairs.append((x, y))
+    return pairs
+
+
+@pytest.fixture
+def temporal_task() -> Task:
+    """Seq-to-one running parity over T=8 binary steps: solvable only with state across time."""
+    patterns = _bit_patterns(8, 16, seed=7)
+    pairs = _temporal_pairs(patterns, seq_to_seq=False)
+    meta = TaskMeta(rung=0, kind=TaskKind.MAP, name="running_parity", fixed_split=True)
+    return Task(meta=meta, support=pairs[:12], query=pairs[12:])
+
+
+@pytest.fixture
+def temporal_seq_task() -> Task:
+    """Seq-to-seq variant: the running parity AT EVERY step (target carries the TIME axis)."""
+    patterns = _bit_patterns(8, 16, seed=7)
+    pairs = _temporal_pairs(patterns, seq_to_seq=True)
+    meta = TaskMeta(rung=0, kind=TaskKind.MAP, name="running_parity_seq", fixed_split=True)
+    return Task(meta=meta, support=pairs[:12], query=pairs[12:])
+
+
+@pytest.fixture
+def decomposable_task() -> Task:
+    """8-bit input -> 2-bit output where out[g] = parity(input half g).
+
+    Splits cleanly under output_slices (per output bit) AND input_subsets (per input half), so it is
+    the canonical fixture for decomposition and orchestrator tests.
+    """
+    patterns = _bit_patterns(8, 64, seed=11)
+    pairs: list[tuple[Field, Field]] = []
+    for bits in patterns:
+        x = Field(torch.tensor(bits, dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
+        y_values = [float(int(sum(bits[:4])) % 2), float(int(sum(bits[4:])) % 2)]
+        y = Field(torch.tensor(y_values, dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
+        pairs.append((x, y))
+    meta = TaskMeta(rung=0, kind=TaskKind.MAP, name="half_parity", fixed_split=True)
+    return Task(meta=meta, support=pairs[:48], query=pairs[48:])
 
 
 @pytest.fixture

@@ -1,0 +1,219 @@
+{
+  "key": "m1_0190d087d483",
+  "entry_type": "module",
+  "level": 1,
+  "io": {
+    "inputs": [
+      {
+        "signature": "ANY",
+        "width": 4
+      }
+    ],
+    "output": {
+      "signature": "ANY",
+      "width": 2
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 0,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 1,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 3,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 4,
+        "kind": "bias",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 5,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 6,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 9,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": null,
+        "aggregation": "sum"
+      }
+    ],
+    "connections": [
+      {
+        "in": 0,
+        "out": 5,
+        "weight": -0.3516312837600708,
+        "enabled": true,
+        "innovation": 0,
+        "recurrent": false
+      },
+      {
+        "in": 0,
+        "out": 6,
+        "weight": -1.5792219638824463,
+        "enabled": true,
+        "innovation": 1,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 5,
+        "weight": -0.4088674783706665,
+        "enabled": true,
+        "innovation": 2,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 6,
+        "weight": 1.7457911968231201,
+        "enabled": true,
+        "innovation": 3,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 5,
+        "weight": -0.12347479164600372,
+        "enabled": true,
+        "innovation": 4,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 6,
+        "weight": -0.3427482545375824,
+        "enabled": true,
+        "innovation": 5,
+        "recurrent": false
+      },
+      {
+        "in": 3,
+        "out": 5,
+        "weight": -0.02443036623299122,
+        "enabled": true,
+        "innovation": 6,
+        "recurrent": false
+      },
+      {
+        "in": 3,
+        "out": 6,
+        "weight": -0.6707266569137573,
+        "enabled": true,
+        "innovation": 7,
+        "recurrent": false
+      },
+      {
+        "in": 4,
+        "out": 5,
+        "weight": -0.05447210371494293,
+        "enabled": true,
+        "innovation": 8,
+        "recurrent": false
+      },
+      {
+        "in": 4,
+        "out": 6,
+        "weight": -0.12965063750743866,
+        "enabled": true,
+        "innovation": 9,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 9,
+        "weight": 1.3367507457733154,
+        "enabled": true,
+        "innovation": 22,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 9,
+        "weight": -0.3502473831176758,
+        "enabled": true,
+        "innovation": 23,
+        "recurrent": false
+      },
+      {
+        "in": 0,
+        "out": 9,
+        "weight": -1.4946467876434326,
+        "enabled": true,
+        "innovation": 24,
+        "recurrent": false
+      },
+      {
+        "in": 4,
+        "out": 9,
+        "weight": -0.07717867195606232,
+        "enabled": true,
+        "innovation": 25,
+        "recurrent": false
+      },
+      {
+        "in": 9,
+        "out": 5,
+        "weight": -2.6280360221862793,
+        "enabled": true,
+        "innovation": 26,
+        "recurrent": false
+      },
+      {
+        "in": 9,
+        "out": 6,
+        "weight": -3.6381008625030518,
+        "enabled": true,
+        "innovation": 27,
+        "recurrent": false
+      }
+    ]
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "xor",
+    "rung": 1,
+    "depth": 0,
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5
+  },
+  "stats": {
+    "use_count": 241,
+    "max_attributed_fitness": 0.9990672256797553
+  }
+}

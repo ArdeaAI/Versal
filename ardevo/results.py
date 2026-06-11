@@ -40,9 +40,12 @@ def write_model(directory: Path, model: dict[str, Any]) -> Path:
 
 
 def _node_layers(genome: Genome) -> dict[int, int]:
-    """Longest-path topological depth per node (inputs/bias at 0). Used for layout + color."""
+    """Longest-path topological depth per node (inputs/bias at 0). Used for layout + color.
+
+    Layering follows FORWARD edges only; recurrent edges are time-delayed and would otherwise make
+    the depth recurrence circular."""
     incoming: dict[int, list[int]] = {}
-    for conn in genome.enabled_connections():
+    for conn in genome.forward_connections():
         incoming.setdefault(conn.out_id, []).append(conn.in_id)
     layer: dict[int, int] = {}
     for node_id in topological_order(genome):

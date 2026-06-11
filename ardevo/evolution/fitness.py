@@ -6,12 +6,14 @@ purely from config.
 """
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
 
-FitnessComponent = Callable[[Genome, dict[str, float]], float]
+# Components receive either a flat `Genome` or a `CompositionGenome`; both expose the structural
+# surface the components read (`hidden_ids`, `complexity()`), so the alias stays duck-typed.
+FitnessComponent = Callable[[Any, dict[str, float]], float]
 
 FITNESS: Registry[FitnessComponent] = Registry("fitness")
 
@@ -53,11 +55,37 @@ def negative_support_loss(genome: Genome, metrics: dict[str, float]) -> float:
     return -float(metrics.get("support_loss", 0.0))
 
 
+# --- weight-robustness components (metrics produced by the weight_samples / hybrid evaluate ops) ---
+# All default to 0.0 when the metric is absent so a misconfigured combo degrades instead of crashing.
+
+
+@FITNESS.register("mean_sample_accuracy")
+def mean_sample_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
+    return float(metrics.get("mean_sample_accuracy", 0.0))
+
+
+@FITNESS.register("max_sample_accuracy")
+def max_sample_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
+    return float(metrics.get("max_sample_accuracy", 0.0))
+
+
+@FITNESS.register("weight_robustness")
+def weight_robustness(genome: Genome, metrics: dict[str, float]) -> float:
+    # mean minus std over the shared-weight samples: rewards topologies whose function survives
+    # weight perturbation, the signal that predicts a module will compose and transfer well.
+    return float(metrics.get("weight_robustness", 0.0))
+
+
+@FITNESS.register("negative_mean_sample_loss")
+def negative_mean_sample_loss(genome: Genome, metrics: dict[str, float]) -> float:
+    return -float(metrics.get("mean_sample_loss", 0.0))
+
+
 @dataclass
 class FitnessAggregator:
     """Weighted sum of fitness components."""
 
     components: list[tuple[FitnessComponent, float]]
 
-    def __call__(self, genome: Genome, metrics: dict[str, float]) -> float:
+    def __call__(self, genome: Any, metrics: dict[str, float]) -> float:
         return sum(weight * component(genome, metrics) for component, weight in self.components)

@@ -16,6 +16,7 @@ from typing import Callable, Protocol
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
 from ardevo.evaluation import evaluate
+from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
@@ -94,9 +95,14 @@ class Evolver:
     speciate: Callable[..., list[SpeciesPlan]]
     activations: list[str]
     default_activation: str
-    # Mirror of the active state's species history, kept so single-task callers can read
-    # evolver.species_history after run() (the continuous trial reads it off the state instead).
+    # Metrics production is its own stage so weight-robustness scoring composes with any train op.
+    evaluate_op: Callable[..., dict[str, float]] = standard_evaluate
+    # Optional population-level trainer (e.g. gradient_batched): assess_many routes a whole
+    # generation through one tensor program instead of candidate-by-candidate training.
+    train_population_op: Callable[..., list[tuple[Genome, SubstrateModule]]] | None = None
+    # Mirror of the species history and of the latest batched-training stats, for trial logging.
     species_history: list[dict[int, int]] = field(default_factory=list)
+    assess_stats: dict[str, float] = field(default_factory=dict)
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation)
@@ -105,14 +111,31 @@ class Evolver:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""
         module = self._decode(genome, adapter)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
-        metrics = adapter.evaluate(module)
+        metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self.fitness(genome, metrics), module)
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
         module = self._decode(genome, adapter)
-        metrics = adapter.evaluate(module)
+        metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+
+    def assess_many(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
+        """Assess a batch of genomes, training them all in one tensor program when a population
+        trainer is configured. Order-preserving, and rng-equivalent to the sequential path because
+        train ops never draw from the shared rng (the contract documented in train.py)."""
+        if self.train_population_op is None:
+            return [self.assess(genome, adapter, state) for genome in genomes]
+        modules = [self._decode(genome, adapter) for genome in genomes]
+        pairs = self.train_population_op(genomes, modules, adapter.encoded, rng=state.rng)
+        from ardevo.evolution import train as train_stage
+
+        self.assess_stats = dict(train_stage.last_batch_stats)
+        assessed = []
+        for genome, module in pairs:
+            metrics = self.evaluate_op(genome, module, adapter)
+            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), module))
+        return assessed
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -126,7 +149,7 @@ class Evolver:
         """Build the initial population for `adapter`, score it, and return a fresh run state."""
         genomes = [self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng) for _ in range(self.pop_size)]
         state = EvolverState(population=[], innovations=InnovationTracker.from_genomes(genomes), rng=rng)
-        state.population = [self.assess(genome, adapter, state) for genome in genomes]
+        state.population = self.assess_many(genomes, adapter, state)
         state.best = max(state.population, key=lambda item: item.fitness)
         self.species_history = state.species_history
         return state
@@ -173,11 +196,15 @@ class Evolver:
         plans = self.speciate(genomes, fitnesses, rng=state.rng, elitism=self.elitism, pop_size=self.pop_size)
         state.species_history.append({plan.species_id: len(plan.members) for plan in plans})
 
-        next_assessed: list[Assessed] = []
+        # Elites are carried forward UNCHANGED (re-training champions every generation overfits the
+        # support set: champion drift); offspring genomes are collected first so a configured
+        # population trainer can assess the whole brood in one batch. Deferring is rng-safe: the
+        # select/crossover/mutate draws all happen here, and train ops never touch the rng.
+        next_assessed: list[Assessed | None] = []
+        children: list[Genome] = []
+        child_slots: list[int] = []
         for plan in plans:
             members = sorted((assessed[index] for index in plan.members), key=lambda item: item.fitness, reverse=True)
-            # Champions are carried forward UNCHANGED: re-assessing them would re-run the train
-            # step every generation and overfit them on the support set (champion drift).
             next_assessed.extend(members[: plan.n_elites])
             if plan.n_offspring <= 0:
                 continue
@@ -188,6 +215,10 @@ class Evolver:
             for k in range(plan.n_offspring):
                 child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
                 child = self.mutation(child, ctx, rng=state.rng)
-                next_assessed.append(self.assess(child, adapter, state))
+                child_slots.append(len(next_assessed))
+                next_assessed.append(None)
+                children.append(child)
 
-        return next_assessed
+        for slot, item in zip(child_slots, self.assess_many(children, adapter, state)):
+            next_assessed[slot] = item
+        return [item for item in next_assessed if item is not None]

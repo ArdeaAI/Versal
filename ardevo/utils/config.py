@@ -80,6 +80,8 @@ class Config:
             "fitness": fitness,
             # Present only for a continuous multi-rung run; selects ContinuousTrial in main.
             "schedule": schedule,
+            # Present only for an orchestrated run; selects OrchestratedTrial in main.
+            "orchestrator": raw.get("orchestrator", {}),
         }
 
         # Flat scalars for ClearML hyperparameter tracking (logging only; not the source of truth).

@@ -1,0 +1,148 @@
+# THE ORCHESTRATED LADDER: the recursive hierarchical orchestrated evolver on interleaved rungs.
+#
+# Each scheduled task goes through the orchestrator's escalation ladder:
+#   1 LOOKUP     query the library by structural I/O signature; accept a stored solution that still
+#                clears the bar (a solved task stays solved: the anti-forgetting property)
+#   2 EVOLVE     hierarchical loop: per-task COMPOSITIONS (glue over reusable parts) co-evolve with
+#                a SHARED live module population; fitness flows down as attribution
+#   3 DECOMPOSE  on a stall, split the task into valid subtasks, RECURSE on each, admit the parts,
+#                then re-evolve the parent seeded with the port-wired composition over them
+#   4 ADMIT      winners persist into the library (live module refs are snapshotted frozen), so the
+#                library accumulates mini-models (level 1), compositions (level 2), and compositions
+#                of compositions (level 3+) across tasks AND across runs
+#
+#   uv run app --config configs/orchestrated_ladder.toml
+#   uv run app --config configs/orchestrated_ladder.toml --resume results/<ts>_orchestrated
+
+[run]
+project = "ardevo"
+experiment = "orchestrated_ladder"
+clearml = true
+machine = "local"
+seed = 0
+log_level = "INFO"
+output_uri = false
+repo = "https://github.com/ArdeaAI/ardevo.git"
+  [run.duration]
+  generations = 1000          # informational; the orchestrated run is bounded by [orchestrator] tasks
+
+[dataset]
+source = "Ardea/Icarus-dataset"
+n_samples = 1000
+support_fraction = 0.8
+
+[schedule]
+kind = "interleave_rungs"
+rungs = [1, 2, 3, 4, 5]       # widen to "all" once the fast rungs populate the library
+tasks_per_rung = 100
+shuffle = true
+
+[orchestrator]
+tasks = 40                    # how many scheduled tasks this run attempts
+accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
+accept_threshold = 0.95
+floor = 0.55                  # below this at half budget = early stall
+stall_generations = 15
+stall_epsilon = 0.005
+max_depth = 2                 # recursion cap for decomposition
+quick_eval_top_k = 5
+library_dir = "library"       # persistent across runs: delete it to start the search space cold
+decompose = ["output_slices", "input_subsets", "time_windows"]
+output_slices_n_groups = 2
+input_subsets_n_subsets = 2
+time_windows_n_windows = 2
+  [orchestrator.budgets]      # evolve generations per recursion depth
+  depth0 = 60
+  depth1 = 30
+  depth2 = 15
+
+[substrate]
+available_activations = ["tanh", "relu", "sigmoid", "identity"]
+default_activation = "tanh"
+recurrent = true              # permits recurrent genes (inert under the flat decode; the stepped
+                              # substrate uses them on TIME-axis subtask evolution)
+
+[evolution]
+loop = "hierarchical"
+pop_size = 24                 # module population fallback (overridden by [evolution.modules].pop_size)
+elitism = 1
+  [evolution.init]
+  kind = "minimal"
+  weight_scale = 1.0
+  [evolution.selection]
+  kind = "tournament"
+  tournament_size = 3
+  [evolution.crossover]
+  kind = "neat"
+  rate = 0.2
+  [evolution.mutation]        # the MODULE population's operators (the proven phase-1 recipe plus
+                              # the new primitives: product gating, recurrence)
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection"]
+  add_rich_node_prob = 0.12
+  add_rich_node_fan_in = 4
+  add_deep_node_prob = 0.12
+  add_deep_node_fan_in = 4
+  add_deep_node_fan_out = 2
+  add_connection_prob = 0.12
+  toggle_connection_prob = 0.05
+  mutate_activation_prob = 0.06
+  mutate_aggregation_prob = 0.05
+  mutate_aggregation_max_fan_in = 4
+  add_recurrent_connection_prob = 0.04
+  [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
+  kind = "gradient"
+  steps = 60
+  lr = 0.03
+  writeback = true            # flat-loop semantics; the hierarchical loop routes writeback itself
+  weight_decay = 0.0002
+  [evolution.evaluate]        # hybrid = trained metrics PLUS weight-robustness (library admission currency)
+  kind = "hybrid"
+  samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+  [evolution.speciation]      # module species are the blueprint targets the compositions reference
+  kind = "neat"
+  threshold = 1.5
+  target_species = 6
+  threshold_adjust = 0.3
+  min_threshold = 0.3
+  c_excess = 1.0
+  c_disjoint = 1.0
+  c_weight = 0.5
+
+  [evolution.composition]     # the per-task composition population (level 2+)
+  pop_size = 12
+  elitism = 2
+  max_inline_depth = 4
+    [evolution.composition.selection]
+    kind = "tournament"
+    tournament_size = 2
+    [evolution.composition.crossover]
+    kind = "comp_neat"
+    rate = 0.3
+    [evolution.composition.mutation]
+    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
+    add_module_node_prob = 0.3
+    switch_ref_prob = 0.12
+    add_comp_edge_prob = 0.15
+    toggle_comp_edge_prob = 0.05
+    perturb_glue_prob = 0.6
+    perturb_glue_sigma = 0.3
+
+  [evolution.modules]         # the shared live module population (level 1)
+  pop_size = 24
+  elitism = 1
+  in_ports = 4
+  out_ports = 2
+  advance_every = 3           # module generations per composition generation
+  writeback = "champion"      # only the best composition writes module weights back
+  attribution = "max"         # a module is as good as the BEST composition using it
+  decay = 0.95
+  offspring_discount = 0.9
+  seed_fraction = 0.25        # fraction of the module pool grafted from the library at run start
+
+[fitness]
+components = ["negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
+w_negative_support_loss = 2.0
+w_support_accuracy = 1.0
+w_weight_robustness = 0.3
+w_hidden_penalty = 0.05
+w_complexity_penalty = 0.01

@@ -1,6 +1,7 @@
 import argparse
 
 from ardevo.trials.continuous_trial import ContinuousTrial
+from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from ardevo.trials.xor_trial import EvolutionTrial
 from ardevo.utils.config import Config
 from ardevo.utils.logging import Logger
@@ -21,8 +22,14 @@ def main() -> None:
     pipe = Pipeline(config.current, load_data=False)
     logger.info("pipeline: %s", pipe.get_pipeline_info())
 
-    # A populated [schedule] table selects the continuous multi-rung trial; otherwise a single-rung run.
-    trial = ContinuousTrial if config.current.get("schedule") else EvolutionTrial
+    # A populated [orchestrator] table selects the orchestrated recursive trial; [schedule] alone
+    # selects the continuous multi-rung trial; otherwise a single-rung run.
+    if config.current.get("orchestrator"):
+        trial = OrchestratedTrial
+    elif config.current.get("schedule"):
+        trial = ContinuousTrial
+    else:
+        trial = EvolutionTrial
     pipe.add_trial(trial)
     pipe.run_task()
 

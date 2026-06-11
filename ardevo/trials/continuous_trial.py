@@ -119,7 +119,7 @@ class ContinuousTrial(Proctor):
         genomes = self.substrate.seed(entry, tracker, rng, self.evolver.pop_size, self.weight_scale)
         state = EvolverState(population=[], innovations=tracker, rng=rng)
         adapter = self.substrate.adapter(entry)
-        state.population = [self.evolver.assess(genome, adapter, state) for genome in genomes]
+        state.population = self.evolver.assess_many(genomes, adapter, state)
         return state, active_index, adapter
 
     def _restore(self) -> tuple[EvolverState, int, MultiTaskAdapter]:
@@ -149,7 +149,7 @@ class ContinuousTrial(Proctor):
         """Grow the interface for `entry` and re-assess (re-train) the carried population on it."""
         grown = self.substrate.expand(entry, [item.genome for item in state.population], state.innovations, state.rng)
         adapter = self.substrate.adapter(entry)
-        state.population = [self.evolver.assess(genome, adapter, state) for genome in grown]
+        state.population = self.evolver.assess_many(grown, adapter, state)
         return adapter
 
     def _log_generation(self, state: EvolverState, entry: TaskEntry) -> None:
@@ -176,6 +176,8 @@ class ContinuousTrial(Proctor):
         self.log_scalar("Loss", "support", best.metrics.get("support_loss", 0.0), state.generation)
         self.log_scalar("Complexity", "hidden_nodes", hidden, state.generation)
         self.log_scalar("Complexity", "enabled_edges", edges, state.generation)
+        for series, value in self.evolver.assess_stats.items():
+            self.log_scalar("Timing", series, value, state.generation)
         if state.generation % 10 == 0:
             self.log_hardware_stats(state.generation)
             console.print(
@@ -233,7 +235,7 @@ class ContinuousTrial(Proctor):
         tuned = champion.module.export_weights()
         genome = genome_to_dict(champion.genome)
         for connection in genome["connections"]:
-            edge = (connection["in"], connection["out"])
+            edge = (connection["in"], connection["out"], connection.get("recurrent", False))
             if connection["enabled"] and edge in tuned:
                 connection["weight"] = tuned[edge]
         return {

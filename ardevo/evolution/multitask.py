@@ -140,8 +140,12 @@ class HeadSlicedNet(SubstrateModule):
     def has_edges(self) -> bool:
         return self.inner.has_edges
 
-    def export_weights(self) -> dict[tuple[int, int], float]:
+    def export_weights(self) -> dict[tuple[int, int, bool], float]:
         return self.inner.export_weights()
+
+    def core(self) -> tuple[GraphNet | None, torch.Tensor | None]:
+        inner, _columns = self.inner.core()
+        return (inner, self.head_columns) if inner is not None else (None, None)
 
 
 @dataclass

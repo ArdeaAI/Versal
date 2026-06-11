@@ -6,10 +6,13 @@ tensors. Dispatch on `value_type` lives entirely in the Icarus `loss_fn`/`Level0
 nothing here special-cases a rung.
 """
 
+from typing import Protocol
+
 import torch
 
 from ardevo.dataset.icarus import (
     EncodedTask,
+    FieldDescriptor,
     Level0Encoder,
     Task,
     ValueType,
@@ -19,6 +22,16 @@ from ardevo.dataset.icarus import (
     model_output_features,
     target_positions,
 )
+
+
+class DecodingEncoder(Protocol):
+    """The only encoder surface evaluation needs: prediction -> labels/values for accuracy.
+
+    `Level0Encoder` and the temporal encoder both satisfy it, so the same scoring path serves the
+    flat and the stepped substrates."""
+
+    def decode(self, prediction: torch.Tensor, descriptor: FieldDescriptor) -> torch.Tensor: ...
+
 
 # Regression "correct" tolerance: an output counts as correct if it lands within this fraction of the
 # target's spread. Exact float equality (the class path) is always wrong for CONTINUOUS targets, which
@@ -51,7 +64,7 @@ def support_loss(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
     return loss_fn(raw, target, descriptor, mask)
 
 
-def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: Level0Encoder) -> tuple[float, float]:
+def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: DecodingEncoder) -> tuple[float, float]:
     """Accuracy (via decode) and dispatched loss for one encoded (input, target) split."""
     x, _descriptor = encoded_input
     target, mask, descriptor = encoded_target
@@ -72,7 +85,7 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
     return float(accuracy), float(loss)
 
 
-def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: Level0Encoder) -> dict[str, float]:
+def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder) -> dict[str, float]:
     """Support- and query-set metrics. Support fit rewards capacity (structure improves it even when
     the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization."""
     with torch.no_grad():

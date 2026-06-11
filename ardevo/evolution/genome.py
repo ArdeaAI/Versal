@@ -28,6 +28,9 @@ class NodeGene:
     # decoder ignores it). None means "no geometry" - the single-task path and the bias node leave it
     # unset, so locality operators simply skip those nodes.
     coordinate: tuple[float, ...] | None = None
+    # How incoming edges combine before the activation: "sum" (the classic neuron) or "product"
+    # (multiplicative unit). Product nodes make gating and second-order interactions evolvable.
+    aggregation: str = "sum"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +40,9 @@ class ConnectionGene:
     weight: float
     enabled: bool
     innovation: int
+    # Recurrent edges are TIME-DELAYED: they read the previous step's value, so they are exempt from
+    # the acyclicity rules (the forward graph stays a DAG) and are inert under the plain GraphNet.
+    recurrent: bool = False
 
 
 @dataclass
@@ -72,8 +78,15 @@ class Genome:
     def enabled_connections(self) -> list[ConnectionGene]:
         return [conn for conn in self.connections if conn.enabled]
 
-    def has_connection(self, in_id: int, out_id: int) -> bool:
-        return any(conn.in_id == in_id and conn.out_id == out_id for conn in self.connections)
+    def forward_connections(self) -> list[ConnectionGene]:
+        """Enabled non-recurrent edges: the DAG the substrate levels and cycle checks operate on."""
+        return [conn for conn in self.connections if conn.enabled and not conn.recurrent]
+
+    def recurrent_connections(self) -> list[ConnectionGene]:
+        return [conn for conn in self.connections if conn.enabled and conn.recurrent]
+
+    def has_connection(self, in_id: int, out_id: int, recurrent: bool = False) -> bool:
+        return any(conn.in_id == in_id and conn.out_id == out_id and conn.recurrent == recurrent for conn in self.connections)
 
     def complexity(self) -> int:
         """Structural cost: enabled edges plus hidden nodes. Drives the complexity penalty."""
@@ -84,14 +97,15 @@ class Genome:
 
 
 def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
-    """True if adding `in_id -> out_id` would make the enabled graph cyclic.
+    """True if adding a FORWARD edge `in_id -> out_id` would make the forward graph cyclic.
 
-    A cycle appears iff `out_id` can already reach `in_id` along enabled edges (or they are equal).
+    A cycle appears iff `out_id` can already reach `in_id` along enabled forward edges (or they are
+    equal). Recurrent edges are time-delayed and never participate.
     """
     if in_id == out_id:
         return True
     adjacency: dict[int, list[int]] = {}
-    for conn in genome.enabled_connections():
+    for conn in genome.forward_connections():
         adjacency.setdefault(conn.in_id, []).append(conn.out_id)
 
     queue = deque([out_id])
@@ -121,10 +135,11 @@ def coordinate_distance(a: tuple[float, ...] | None, b: tuple[float, ...] | None
 
 
 def topological_order(genome: Genome) -> list[int]:
-    """Kahn's algorithm over enabled edges. Raises ValueError on a cycle."""
+    """Kahn's algorithm over enabled FORWARD edges (recurrent edges are time-delayed, not graph
+    order). Raises ValueError on a cycle."""
     incoming: dict[int, int] = {node_id: 0 for node_id in genome.nodes}
     adjacency: dict[int, list[int]] = {}
-    for conn in genome.enabled_connections():
+    for conn in genome.forward_connections():
         adjacency.setdefault(conn.in_id, []).append(conn.out_id)
         incoming[conn.out_id] += 1
 
@@ -149,7 +164,7 @@ class InnovationTracker:
 
     _next_node_id: int
     _next_innovation: int = 0
-    _edge_innovations: dict[tuple[int, int], int] = field(default_factory=dict)
+    _edge_innovations: dict[tuple[int, int, bool], int] = field(default_factory=dict)
 
     @classmethod
     def from_genomes(cls, genomes: list[Genome]) -> "InnovationTracker":
@@ -165,9 +180,10 @@ class InnovationTracker:
         self._next_node_id += 1
         return node_id
 
-    def innovation(self, in_id: int, out_id: int) -> int:
-        """Same edge -> same innovation number, so crossover can align genes across genomes."""
-        key = (in_id, out_id)
+    def innovation(self, in_id: int, out_id: int, recurrent: bool = False) -> int:
+        """Same edge -> same innovation number, so crossover can align genes across genomes. A forward
+        and a recurrent edge between the same pair are DIFFERENT edges and get distinct numbers."""
+        key = (in_id, out_id, recurrent)
         if key not in self._edge_innovations:
             self._edge_innovations[key] = self._next_innovation
             self._next_innovation += 1
@@ -178,13 +194,21 @@ class InnovationTracker:
         return {
             "next_node_id": self._next_node_id,
             "next_innovation": self._next_innovation,
-            "edge_innovations": [[in_id, out_id, innovation] for (in_id, out_id), innovation in self._edge_innovations.items()],
+            "edge_innovations": [[in_id, out_id, recurrent, innovation] for (in_id, out_id, recurrent), innovation in self._edge_innovations.items()],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "InnovationTracker":
         tracker = cls(_next_node_id=int(data["next_node_id"]), _next_innovation=int(data["next_innovation"]))
-        tracker._edge_innovations = {(int(in_id), int(out_id)): int(innovation) for in_id, out_id, innovation in data["edge_innovations"]}
+        edges: dict[tuple[int, int, bool], int] = {}
+        for item in data["edge_innovations"]:
+            if len(item) == 3:  # legacy checkpoints predate recurrence; their edges are all forward
+                in_id, out_id, innovation = item
+                recurrent = False
+            else:
+                in_id, out_id, recurrent, innovation = item
+            edges[(int(in_id), int(out_id), bool(recurrent))] = int(innovation)
+        tracker._edge_innovations = edges
         return tracker
 
 
@@ -211,7 +235,8 @@ def make_acyclic(genome: Genome) -> Genome:
     kept = Genome(nodes=dict(genome.nodes), connections=[])
     repaired: list[ConnectionGene] = []
     for conn in genome.connections:
-        if not conn.enabled:
+        if not conn.enabled or conn.recurrent:
+            # Recurrent edges are time-delayed: cycles through them are legal, so they pass through.
             repaired.append(conn)
         elif conn.in_id == conn.out_id or would_create_cycle(kept, conn.in_id, conn.out_id):
             repaired.append(replace(conn, enabled=False))
@@ -225,10 +250,19 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
     return {
         "nodes": [
-            {"id": node.id, "kind": node.kind.value, "activation": node.activation, "coordinate": list(node.coordinate) if node.coordinate is not None else None}
+            {
+                "id": node.id,
+                "kind": node.kind.value,
+                "activation": node.activation,
+                "coordinate": list(node.coordinate) if node.coordinate is not None else None,
+                "aggregation": node.aggregation,
+            }
             for node in genome.nodes.values()
         ],
-        "connections": [{"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation} for conn in genome.connections],
+        "connections": [
+            {"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation, "recurrent": conn.recurrent}
+            for conn in genome.connections
+        ],
     }
 
 
@@ -238,6 +272,9 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
     for node in data["nodes"]:
         node_id = int(node["id"])
         coordinate = tuple(node["coordinate"]) if node.get("coordinate") is not None else None
-        nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate)
-    connections = [ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"])) for conn in data["connections"]]
+        nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate, node.get("aggregation", "sum"))
+    connections = [
+        ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"]), bool(conn.get("recurrent", False)))
+        for conn in data["connections"]
+    ]
     return Genome(nodes=nodes, connections=connections)

@@ -166,6 +166,53 @@ def mutate_activation(genome: Genome, ctx: MutationContext, *, rng: random.Rando
     return child
 
 
+@MUTATION.register("add_recurrent_connection")
+def add_recurrent_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, self_loop_bias: float = 0.5) -> Genome:
+    """Add a TIME-DELAYED edge reading the previous step's value. Self-loops are the memory
+    primitive (an accumulator), so they are sampled with their own bias. No cycle check: recurrent
+    edges are exempt by definition. Inert under the plain GraphNet, so the operator stays pure even
+    on non-temporal runs."""
+    if rng.random() >= prob:
+        return genome
+    stateful = [*genome.hidden_ids, *genome.output_ids]
+    if not stateful:
+        return genome
+    child = genome.clone()
+    if rng.random() < self_loop_bias and child.hidden_ids:
+        source = target = rng.choice(child.hidden_ids)
+    else:
+        source = rng.choice(stateful)
+        target = rng.choice([*child.hidden_ids, *child.output_ids])
+    if child.has_connection(source, target, recurrent=True):
+        return child
+    innovation = ctx.innovations.innovation(source, target, recurrent=True)
+    child.connections.append(ConnectionGene(source, target, rng.gauss(0.0, 1.0), True, innovation, recurrent=True))
+    return child
+
+
+@MUTATION.register("mutate_aggregation")
+def mutate_aggregation(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, max_fan_in: int = 4) -> Genome:
+    """Flip a hidden node between sum and product aggregation.
+
+    Sum -> product only for nodes with 2..max_fan_in enabled incoming edges (a one-input product is
+    just scaling, and high fan-in products explode numerically). Product -> sum is always allowed so
+    a product node that lost edges can recover. Outputs stay sum so they remain linear readouts.
+    """
+    if rng.random() >= prob:
+        return genome
+    fan_in: dict[int, int] = {}
+    for conn in genome.enabled_connections():
+        fan_in[conn.out_id] = fan_in.get(conn.out_id, 0) + 1
+    candidates = [node_id for node_id in genome.hidden_ids if genome.nodes[node_id].aggregation == "product" or 2 <= fan_in.get(node_id, 0) <= max_fan_in]
+    if not candidates:
+        return genome
+    child = genome.clone()
+    node_id = rng.choice(candidates)
+    node = child.nodes[node_id]
+    child.nodes[node_id] = replace(node, aggregation="sum" if node.aggregation == "product" else "product")
+    return child
+
+
 @MUTATION.register("toggle_connection")
 def toggle_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.0) -> Genome:
     if rng.random() >= prob or not genome.connections:
@@ -175,9 +222,77 @@ def toggle_connection(genome: Genome, ctx: MutationContext, *, rng: random.Rando
     conn = child.connections[index]
     if conn.enabled:
         child.connections[index] = replace(conn, enabled=False)
-    elif not would_create_cycle(child, conn.in_id, conn.out_id):
-        # Only re-enable a disabled edge when doing so keeps the graph feedforward.
+    elif conn.recurrent or not would_create_cycle(child, conn.in_id, conn.out_id):
+        # Re-enable freely for recurrent edges (time-delayed, cycle-exempt); forward edges only when
+        # doing so keeps the graph feedforward.
         child.connections[index] = replace(conn, enabled=True)
+    return child
+
+
+_LIBRARY_CACHE: dict[str, object] = {}
+
+
+def _cached_library(path: str) -> "object":
+    # Imported lazily and cached per path: the mutation fires every generation and must not re-read
+    # the index from disk each time. ardevo.library imports nothing from this module, so this is safe.
+    if path not in _LIBRARY_CACHE:
+        from ardevo.library import ModuleLibrary
+
+        _LIBRARY_CACHE[path] = ModuleLibrary(path)
+    return _LIBRARY_CACHE[path]
+
+
+@MUTATION.register("add_library_module")
+def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, path: str = "library") -> Genome:
+    """Inline a stored library module into the host genome as evolved structure.
+
+    Ports become HIDDEN identity pass-throughs (each in-port reads one random host source at weight
+    1.0 so the module initially sees a raw signal; out-ports read out to every host output with small
+    random weights), the module's bias edges remap onto the host bias node, and internal weights /
+    activations / aggregations / recurrence arrive intact. Acyclic by construction: hosts feed ports,
+    ports feed module internals, out-ports feed only host outputs.
+    """
+    if rng.random() >= prob:
+        return genome
+    from ardevo.library import MODULE as MODULE_ENTRY
+    from ardevo.library import ModuleLibrary
+
+    library = _cached_library(path)
+    assert isinstance(library, ModuleLibrary)
+    entries = library.query(entry_type=MODULE_ENTRY)
+    if not entries:
+        return genome
+    entry = entries[rng.randrange(len(entries))]
+
+    from ardevo.evolution.genome import genome_from_dict
+
+    source = genome_from_dict(entry.payload)
+    child = genome.clone()
+    host_sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
+    host_outputs = child.output_ids
+    host_bias = child.bias_ids[0] if child.bias_ids else None
+    if not host_sources or not host_outputs:
+        return genome
+
+    id_map: dict[int, int] = {}
+    for node in source.nodes.values():
+        if node.kind is NodeKind.BIAS and host_bias is not None:
+            id_map[node.id] = host_bias
+            continue
+        new_id = ctx.innovations.new_node_id()
+        id_map[node.id] = new_id
+        activation = node.activation if node.kind is NodeKind.HIDDEN else "identity"
+        child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, activation, None, node.aggregation)
+    for conn in source.connections:
+        in_id, out_id = id_map[conn.in_id], id_map[conn.out_id]
+        child.connections.append(ConnectionGene(in_id, out_id, conn.weight, conn.enabled, ctx.innovations.innovation(in_id, out_id, conn.recurrent), conn.recurrent))
+
+    for port in (id_map[node_id] for node_id in source.input_ids):
+        source_node = rng.choice(host_sources)
+        child.connections.append(ConnectionGene(source_node, port, 1.0, True, ctx.innovations.innovation(source_node, port)))
+    for port in (id_map[node_id] for node_id in source.output_ids):
+        for output in host_outputs:
+            child.connections.append(ConnectionGene(port, output, rng.gauss(0.0, 0.3), True, ctx.innovations.innovation(port, output)))
     return child
 
 

@@ -1,0 +1,209 @@
+[
+  {
+    "key": "c2_059da108eed7",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "stats": {
+      "use_count": 166,
+      "max_attributed_fitness": 0.9495881071873009
+    }
+  },
+  {
+    "key": "c2_1cb59538d161",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 159,
+      "max_attributed_fitness": 0.9406896147708773
+    }
+  },
+  {
+    "key": "c2_2be01da499a3",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "stats": {
+      "use_count": 145,
+      "max_attributed_fitness": 0.9580639694456476
+    }
+  },
+  {
+    "key": "c2_3c2149301946",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 170,
+      "max_attributed_fitness": 0.9583228234248236
+    }
+  },
+  {
+    "key": "c2_7abaf2414223",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 2
+      }
+    },
+    "accepted_metric": 0.9750000238418579,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 110,
+      "max_attributed_fitness": 0.9503642538180344
+    }
+  },
+  {
+    "key": "c2_dff48b98e517",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "stats": {
+      "use_count": 190,
+      "max_attributed_fitness": 0.9637444959580899
+    }
+  },
+  {
+    "key": "m1_0190d087d483",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "stats": {
+      "use_count": 241,
+      "max_attributed_fitness": 0.9990672256797553
+    }
+  },
+  {
+    "key": "m1_2c5caa27d0ed",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "stats": {
+      "use_count": 238,
+      "max_attributed_fitness": 0.9680656421883032
+    }
+  },
+  {
+    "key": "m1_989829fb575e",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "stats": {
+      "use_count": 172,
+      "max_attributed_fitness": 1.0348339674063027
+    }
+  }
+]
