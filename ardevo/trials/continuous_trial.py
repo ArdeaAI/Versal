@@ -58,6 +58,8 @@ class ContinuousTrial(Proctor):
         )
         if not self.pool:
             raise RuntimeError(f"no tasks found for rungs {self.rungs} in {config['dataset']!r}")
+        loaded_rungs = sorted({entry.rung for entry in self.pool})
+        logger.info("task pool: %d tasks across rungs %s (of configured %s)", len(self.pool), loaded_rungs, self.rungs)
 
         self.evolver: Evolver = build_evolver(config)
         self.scheduler = build_schedule(schedule_cfg)

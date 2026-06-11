@@ -27,6 +27,9 @@ from ardevo.dataset.icarus import EncodedTask, IcarusDataset, Level0Encoder, Tas
 from ardevo.evaluation import evaluate, output_features
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
 from ardevo.substrate import GraphNet, SubstrateModule, decode
+from ardevo.utils.logging import Logger
+
+logger = Logger.get_logger()
 
 
 @dataclass(frozen=True)
@@ -66,21 +69,24 @@ def task_entry(task: Task) -> TaskEntry:
 
 
 def build_pool(source: str, rungs: list[int], n_samples: int, support_fraction: float, tasks_per_rung: int, shuffle: bool, seed: int) -> list[TaskEntry]:
-    """Load every task across the configured rungs (via `IcarusDataset`) as schedulable entries.
+    """Load every task across the configured rungs as schedulable entries, RUNG BY RUNG.
 
-    `source` is passed as `hf_repo` (hyphen form) per the loader's note. Rungs absent from the repo
-    are silently skipped by `IcarusDataset`, so the pool spans only what is actually available.
+    Each rung is loaded in its own `IcarusDataset` so one unloadable rung does not kill the whole run:
+    a missing config, a network error, or a heavy modality whose binary payload overflows the arrow
+    loader's 2 GB chunk limit is skipped with a warning instead of raising. (`source` is the hyphen
+    `hf_repo`.) The schedule stage owns task ordering, so a flat concatenation here is enough.
     """
-    dataset = IcarusDataset(
-        rungs=tuple(rungs),
-        n_tasks=tasks_per_rung,
-        n_samples=n_samples,
-        support_fraction=support_fraction,
-        shuffle_within=shuffle,
-        seed=seed,
-        hf_repo=source,
-    )
-    return [task_entry(dataset[index]) for index in range(len(dataset))]
+    entries: list[TaskEntry] = []
+    for rung in rungs:
+        try:
+            dataset = IcarusDataset(
+                rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source
+            )
+        except Exception as error:  # broad: many failure modes (arrow overflow, network, missing config); skip the rung and continue
+            logger.warning("skipping rung %s: could not load it (%s: %s)", rung, type(error).__name__, error)
+            continue
+        entries.extend(task_entry(dataset[index]) for index in range(len(dataset)))
+    return entries
 
 
 def _coordinates(shape: tuple[int, ...]) -> list[tuple[float, ...]]:

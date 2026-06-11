@@ -16,14 +16,14 @@
 [run]
 project = "ardevo"
 experiment = "continuous_ladder"
-clearml = false
+clearml = true
 machine = "local"
 seed = 0
 log_level = "INFO"
 output_uri = false
 repo = "https://github.com/ArdeaAI/ardevo.git"
   [run.duration]
-  generations = 8000          # total generation budget across all task switches (a continuous run)
+  generations = 1000          # total generation budget across all task switches (a continuous run)
 
 [dataset]
 source = "Ardea/Icarus-dataset"
@@ -36,10 +36,12 @@ support_fraction = 0.8
 #   "round_robin"      -- walk the pool in order
 #   "interleave_rungs" -- one task per rung per cycle (round-robin across rungs)
 kind = "interleave_rungs"
-avoid_repeat = false
+avoid_repeat = true
 generations_per_task = 40   # generations on one task before switching to the next
 checkpoint_every = 100      # write a gen_<NNNNNN>/ checkpoint (model, stats, net, speciation) this often
-rungs = "all"     # the interleaved rungs; set to "all" for the full 18-rung ladder
+rungs = "all"     # interleaved rungs: a list like [1,2,3,4,5], or "all" for the 18-rung ladder. Rungs
+                  # too heavy for the HF/arrow loader (some NB360 modalities overflow its 2 GB chunk
+                  # limit) are skipped with a warning rather than crashing the run.
 tasks_per_rung = 100        # cap on tasks drawn per rung (capped at what the repo actually has)
 shuffle = true              # seeded shuffle of which tasks are drawn / their pool order
 
@@ -104,7 +106,8 @@ elitism = 2
 # query terms are omitted: held-out loss is anti-generalization on parity, and weight_decay (in the
 # train stage) is what delivers generalization on the data-rich rungs.
 [fitness]
-components = ["negative_support_loss", "support_accuracy", "hidden_penalty"]
+components = ["negative_support_loss", "support_accuracy", "hidden_penalty", "complexity_penalty"]
 w_negative_support_loss = 2.0
 w_support_accuracy = 1.0
 w_hidden_penalty = 0.05
+w_complexity_penalty = 0.01
