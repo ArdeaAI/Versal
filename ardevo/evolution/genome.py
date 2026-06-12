@@ -45,16 +45,33 @@ class ConnectionGene:
     recurrent: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class MacroGene:
+    """A whole library network as a single opaque unit inside a flat genome (the LSTM-cell idea).
+
+    The inner network is resolved at decode time from `ref` and runs FROZEN: its k ordered inputs
+    read `input_node_ids` and its m outputs land on `output_node_ids`, which are real HIDDEN
+    identity NodeGenes so all downstream wiring/serialization/rendering works unchanged. One
+    `innovation` marker makes the placement an atomic unit for crossover and speciation."""
+
+    ref: str  # "library:<key>" only; live refs would dangle the moment the run ends
+    input_node_ids: tuple[int, ...]  # ordered, length k = inner input count
+    output_node_ids: tuple[int, ...]  # length m = inner output count; fresh HIDDEN ids owned by this macro
+    innovation: int
+    trainable: bool = False  # reserved; v1 macros are always frozen
+
+
 @dataclass
 class Genome:
     """A topology candidate. Node genes are keyed by id; connection genes are an ordered list."""
 
     nodes: dict[int, NodeGene] = field(default_factory=dict)
     connections: list[ConnectionGene] = field(default_factory=list)
+    macros: list[MacroGene] = field(default_factory=list)
 
     def clone(self) -> "Genome":
-        # NodeGene/ConnectionGene are frozen, so a shallow copy of the containers is a deep copy.
-        return Genome(nodes=dict(self.nodes), connections=list(self.connections))
+        # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
+        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros))
 
     def ids_of(self, kind: NodeKind) -> list[int]:
         return sorted(node.id for node in self.nodes.values() if node.kind is kind)
@@ -88,9 +105,14 @@ class Genome:
     def has_connection(self, in_id: int, out_id: int, recurrent: bool = False) -> bool:
         return any(conn.in_id == in_id and conn.out_id == out_id and conn.recurrent == recurrent for conn in self.connections)
 
+    @property
+    def macro_output_ids(self) -> frozenset[int]:
+        return frozenset(node_id for macro in self.macros for node_id in macro.output_node_ids)
+
     def complexity(self) -> int:
-        """Structural cost: enabled edges plus hidden nodes. Drives the complexity penalty."""
-        return len(self.enabled_connections()) + len(self.hidden_ids)
+        """Structural cost: enabled edges plus hidden nodes plus macro placements. The m macro
+        output stubs already count as hidden nodes; the +1 per macro prices the placement itself."""
+        return len(self.enabled_connections()) + len(self.hidden_ids) + len(self.macros)
 
     def max_node_id(self) -> int:
         return max(self.nodes) if self.nodes else -1
@@ -107,6 +129,8 @@ def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
     adjacency: dict[int, list[int]] = {}
     for conn in genome.forward_connections():
         adjacency.setdefault(conn.in_id, []).append(conn.out_id)
+    for source, target in macro_implied_edges(genome):
+        adjacency.setdefault(source, []).append(target)
 
     queue = deque([out_id])
     seen = {out_id}
@@ -119,6 +143,13 @@ def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
                 seen.add(nxt)
                 queue.append(nxt)
     return False
+
+
+def macro_implied_edges(genome: Genome) -> list[tuple[int, int]]:
+    """The dataflow edges a macro placement implies (every input feeds every output), so the DAG
+    helpers see macros as connectivity. Implied-only cycles cannot exist (output ids are freshly
+    allocated at mutation time); only regular connections can close a cycle through a macro."""
+    return [(source, target) for macro in genome.macros for source in macro.input_node_ids for target in macro.output_node_ids]
 
 
 def coordinate_distance(a: tuple[float, ...] | None, b: tuple[float, ...] | None) -> float:
@@ -142,6 +173,9 @@ def topological_order(genome: Genome) -> list[int]:
     for conn in genome.forward_connections():
         adjacency.setdefault(conn.in_id, []).append(conn.out_id)
         incoming[conn.out_id] += 1
+    for source, target in macro_implied_edges(genome):
+        adjacency.setdefault(source, []).append(target)
+        incoming[target] += 1
 
     ready = deque(sorted(node_id for node_id, count in incoming.items() if count == 0))
     order: list[int] = []
@@ -180,6 +214,13 @@ class InnovationTracker:
         self._next_node_id += 1
         return node_id
 
+    def new_marker(self) -> int:
+        """A fresh one-off innovation number for unit genes (macro placements): allocated once at
+        the mutation event, never looked up again, so the serialized edge map stays untouched."""
+        marker = self._next_innovation
+        self._next_innovation += 1
+        return marker
+
     def innovation(self, in_id: int, out_id: int, recurrent: bool = False) -> int:
         """Same edge -> same innovation number, so crossover can align genes across genomes. A forward
         and a recurrent edge between the same pair are DIFFERENT edges and get distinct numbers."""
@@ -213,9 +254,13 @@ class InnovationTracker:
 
 
 def set_connection(genome: Genome, target: ConnectionGene) -> None:
-    """Replace the gene for (in_id, out_id) in place, or append it if new."""
+    """Replace the gene for (in_id, out_id, recurrent) in place, or append it if new.
+
+    The recurrent flag is part of the edge identity (matching `InnovationTracker.innovation` and
+    `export_weights` keys): a forward and a recurrent gene on the same node pair are DIFFERENT
+    genes and must never clobber each other."""
     for index, conn in enumerate(genome.connections):
-        if conn.in_id == target.in_id and conn.out_id == target.out_id:
+        if conn.in_id == target.in_id and conn.out_id == target.out_id and conn.recurrent == target.recurrent:
             genome.connections[index] = target
             return
     genome.connections.append(target)
@@ -232,7 +277,7 @@ def make_acyclic(genome: Genome) -> Genome:
     otherwise feedforward genome; this repair keeps the substrate decodable. Edges are considered in
     order, so earlier (typically older) genes are preferred when a conflict arises.
     """
-    kept = Genome(nodes=dict(genome.nodes), connections=[])
+    kept = Genome(nodes=dict(genome.nodes), connections=[], macros=list(genome.macros))
     repaired: list[ConnectionGene] = []
     for conn in genome.connections:
         if not conn.enabled or conn.recurrent:
@@ -243,7 +288,7 @@ def make_acyclic(genome: Genome) -> Genome:
         else:
             kept.connections.append(conn)
             repaired.append(conn)
-    return Genome(nodes=dict(genome.nodes), connections=repaired)
+    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros))
 
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
@@ -263,6 +308,10 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
             {"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation, "recurrent": conn.recurrent}
             for conn in genome.connections
         ],
+        "macros": [
+            {"ref": macro.ref, "inputs": list(macro.input_node_ids), "outputs": list(macro.output_node_ids), "innovation": macro.innovation, "trainable": macro.trainable}
+            for macro in genome.macros
+        ],
     }
 
 
@@ -277,4 +326,14 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"]), bool(conn.get("recurrent", False)))
         for conn in data["connections"]
     ]
-    return Genome(nodes=nodes, connections=connections)
+    macros = [
+        MacroGene(
+            ref=item["ref"],
+            input_node_ids=tuple(int(node_id) for node_id in item["inputs"]),
+            output_node_ids=tuple(int(node_id) for node_id in item["outputs"]),
+            innovation=int(item["innovation"]),
+            trainable=bool(item.get("trainable", False)),
+        )
+        for item in data.get("macros", [])
+    ]
+    return Genome(nodes=nodes, connections=connections, macros=macros)

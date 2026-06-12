@@ -36,11 +36,16 @@ class SpeciesPlan:
     n_offspring: int
 
 
-def compatibility_distance(a: Genome, b: Genome, *, c_excess: float, c_disjoint: float, c_weight: float) -> float:
+def compatibility_distance(a: Genome, b: Genome, *, c_excess: float, c_disjoint: float, c_weight: float, c_node: float = 0.0, c_macro: float = 1.0) -> float:
     """NEAT compatibility distance: excess/disjoint gene counts plus mean matching-weight difference.
 
     Genes are aligned by innovation number. Excess genes lie beyond the other genome's last
     innovation; disjoint genes are interior mismatches. Normalized by the larger gene count.
+
+    `c_node` weights NODE-gene divergence: shared node ids whose (aggregation, activation) differ.
+    Without it, two genomes identical in connections but differing in sum-vs-product or activation
+    are distance zero, making those mutations invisible to speciation. Default 0.0 preserves the
+    historical distance for direct callers; the neat builder enables a small weight.
     """
     genes_a = {conn.innovation: conn for conn in a.connections}
     genes_b = {conn.innovation: conn for conn in b.connections}
@@ -62,7 +67,17 @@ def compatibility_distance(a: Genome, b: Genome, *, c_excess: float, c_disjoint:
 
     normalizer = max(len(genes_a), len(genes_b), 1)
     average_weight = weight_difference / matching if matching else 0.0
-    return c_excess * excess / normalizer + c_disjoint * disjoint / normalizer + c_weight * average_weight
+    distance = c_excess * excess / normalizer + c_disjoint * disjoint / normalizer + c_weight * average_weight
+    if c_node > 0.0:
+        shared = set(a.nodes) & set(b.nodes)
+        mismatched = sum(1 for node_id in shared if (a.nodes[node_id].aggregation, a.nodes[node_id].activation) != (b.nodes[node_id].aggregation, b.nodes[node_id].activation))
+        distance += c_node * mismatched / max(len(a.nodes), len(b.nodes), 1)
+    markers_a = {macro.innovation for macro in a.macros}
+    markers_b = {macro.innovation for macro in b.macros}
+    if c_macro > 0.0 and (markers_a or markers_b):
+        macro_normalizer = max(len(genes_a) + len(markers_a), len(genes_b) + len(markers_b), 1)
+        distance += c_macro * len(markers_a ^ markers_b) / macro_normalizer
+    return distance
 
 
 @SPECIATION.register("none")
@@ -77,6 +92,8 @@ def _build_neat(
     c_excess: float = 1.0,
     c_disjoint: float = 1.0,
     c_weight: float = 0.5,
+    c_node: float = 0.25,
+    c_macro: float = 1.0,
     target_species: int = 12,
     threshold_adjust: float = 0.3,
     min_threshold: float = 0.3,
@@ -87,6 +104,8 @@ def _build_neat(
         c_excess=c_excess,
         c_disjoint=c_disjoint,
         c_weight=c_weight,
+        c_node=c_node,
+        c_macro=c_macro,
         target_species=target_species,
         threshold_adjust=threshold_adjust,
         min_threshold=min_threshold,
@@ -135,6 +154,8 @@ class NeatSpeciation:
     c_excess: float
     c_disjoint: float
     c_weight: float
+    c_node: float = 0.25
+    c_macro: float = 1.0
     target_species: int = 0
     threshold_adjust: float = 0.3
     min_threshold: float = 0.3
@@ -142,7 +163,7 @@ class NeatSpeciation:
     _next_id: int = 0
 
     def _distance(self, a: Genome, b: Genome) -> float:
-        return compatibility_distance(a, b, c_excess=self.c_excess, c_disjoint=self.c_disjoint, c_weight=self.c_weight)
+        return compatibility_distance(a, b, c_excess=self.c_excess, c_disjoint=self.c_disjoint, c_weight=self.c_weight, c_node=self.c_node, c_macro=self.c_macro)
 
     def _partition(self, genomes: list[Genome], rng: random.Random) -> None:
         """Assign each genome to a persistent species; retire empty species; refresh representatives."""

@@ -100,6 +100,10 @@ class Evolver:
     # Optional population-level trainer (e.g. gradient_batched): assess_many routes a whole
     # generation through one tensor program instead of candidate-by-candidate training.
     train_population_op: Callable[..., list[tuple[Genome, SubstrateModule]]] | None = None
+    # N > 1 runs per-candidate assessment on a thread pool (only the sequential branch; the
+    # population trainer is already batched). Candidates are independent and assessment never
+    # draws from the shared rng, so results are order-preserving and stream-identical.
+    parallel_assess: int = 0
     # Mirror of the species history and of the latest batched-training stats, for trial logging.
     species_history: list[dict[int, int]] = field(default_factory=list)
     assess_stats: dict[str, float] = field(default_factory=dict)
@@ -125,7 +129,12 @@ class Evolver:
         trainer is configured. Order-preserving, and rng-equivalent to the sequential path because
         train ops never draw from the shared rng (the contract documented in train.py)."""
         if self.train_population_op is None:
-            return [self.assess(genome, adapter, state) for genome in genomes]
+            if self.parallel_assess <= 1 or len(genomes) <= 1:
+                return [self.assess(genome, adapter, state) for genome in genomes]
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
+                return list(pool.map(lambda genome: self.assess(genome, adapter, state), genomes))
         modules = [self._decode(genome, adapter) for genome in genomes]
         pairs = self.train_population_op(genomes, modules, adapter.encoded, rng=state.rng)
         from ardevo.evolution import train as train_stage

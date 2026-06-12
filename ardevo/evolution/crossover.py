@@ -35,4 +35,7 @@ def neat(parent_a: Genome, parent_b: Genome, *, rng: random.Random) -> Genome:
         for node_id in (conn.in_id, conn.out_id):
             if node_id not in nodes:
                 nodes[node_id] = parent_b.nodes[node_id]
-    return Genome(nodes=nodes, connections=child_connections)
+    # Macro placements are atomic unit genes: a matching marker in parent_b IS the same immutable
+    # gene, so parent_a's list carries everything inheritable; disjoint macros from b drop exactly
+    # like disjoint connections do.
+    return Genome(nodes=nodes, connections=child_connections, macros=list(parent_a.macros))

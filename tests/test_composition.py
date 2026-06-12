@@ -237,6 +237,93 @@ def test_writeback_composition_copies_trained_glue() -> None:
         assert all(abs(b + 1.0 - a) < 1e-6 for b, a in zip(before.glue, after.glue))
 
 
+def test_factored_glue_matches_dense_equivalent() -> None:
+    """A rank-r edge whose U @ V equals a dense matrix must compute identically."""
+    import torch as torch_module
+
+    rng = random.Random(5)
+    in_width, out_width, rank = 4, 3, 2
+    u = [[rng.gauss(0.0, 0.5) for _ in range(rank)] for _ in range(in_width)]
+    v = [[rng.gauss(0.0, 0.5) for _ in range(out_width)] for _ in range(rank)]
+    dense_matrix = (torch_module.tensor(u) @ torch_module.tensor(v)).reshape(-1)
+    nodes = {
+        0: CompNodeGene(0, CompNodeKind.INPUT, _BANK, 0, in_width),
+        1: CompNodeGene(1, CompNodeKind.OUTPUT, "head", out_width, 0),
+    }
+    dense_comp = CompositionGenome(nodes=dict(nodes), edges=[CompEdgeGene(0, 1, True, 0, tuple(float(x) for x in dense_matrix.tolist()))])
+    factored_glue = tuple(value for row in u for value in row) + tuple(value for row in v for value in row)
+    factored_comp = CompositionGenome(nodes=dict(nodes), edges=[CompEdgeGene(0, 1, True, 0, factored_glue, glue_rank=rank)])
+    ctx = AssemblyContext(bank_columns={_BANK: list(range(in_width))})
+    x = torch_module.randn(5, in_width)
+    assert torch_module.allclose(
+        assemble(dense_comp, ctx, in_width)(x), assemble(factored_comp, AssemblyContext(bank_columns={_BANK: list(range(in_width))}), in_width)(x), atol=1e-6
+    )
+
+
+def test_factored_glue_writeback_round_trip() -> None:
+    from ardevo.evolution.composition import _glue_for
+
+    rng = random.Random(0)
+    glue, rank = _glue_for(6, 5, rng, glue_rank=2, glue_rank_threshold=10)
+    assert rank == 2 and len(glue) == 6 * 2 + 2 * 5
+    nodes = {
+        0: CompNodeGene(0, CompNodeKind.INPUT, _BANK, 0, 6),
+        1: CompNodeGene(1, CompNodeKind.OUTPUT, "head", 5, 0),
+    }
+    comp = CompositionGenome(nodes=nodes, edges=[CompEdgeGene(0, 1, True, 0, glue, glue_rank=rank)])
+    net = assemble(comp, AssemblyContext(bank_columns={_BANK: list(range(6))}), n_inputs=6)
+    with torch.no_grad():
+        for parameter in net.glue_u.values():
+            parameter += 0.5
+    written = writeback_composition(comp, net)
+    assert written.edges[0].glue_rank == 2 and len(written.edges[0].glue) == len(glue)
+    renet = assemble(written, AssemblyContext(bank_columns={_BANK: list(range(6))}), n_inputs=6)
+    x = torch.randn(3, 6)
+    assert torch.allclose(renet(x), net(x), atol=1e-6)  # the trained factors round-tripped
+
+
+def test_glue_for_auto_select_threshold() -> None:
+    from ardevo.evolution.composition import _glue_for
+
+    rng = random.Random(0)
+    _glue, rank = _glue_for(3, 2, rng, glue_rank=2, glue_rank_threshold=10)
+    assert rank == 0  # 6 <= threshold: dense
+    _glue, rank = _glue_for(2, 2, rng, glue_rank=4, glue_rank_threshold=1)
+    assert rank == 0  # rank must stay below min(in, out) to actually compress
+    comp = minimal_composition([(_BANK, 8)], "head", 8, InnovationTracker(_next_node_id=0), rng, glue_rank=2, glue_rank_threshold=16)
+    bank_edge = next(edge for edge in comp.edges if comp.nodes[edge.in_id].ref == _BANK)
+    bias_edge = next(edge for edge in comp.edges if comp.nodes[edge.in_id].ref == "__bias__")
+    assert bank_edge.glue_rank == 2  # 64 > 16: factored
+    assert bias_edge.glue_rank == 0  # 8 <= 16: dense
+
+
+def test_comp_neat_never_mixes_glue_ranks() -> None:
+    rng = random.Random(0)
+    tracker = InnovationTracker(_next_node_id=0)
+    parent_a = minimal_composition([(_BANK, 8)], "head", 8, tracker, rng, glue_rank=2, glue_rank_threshold=16)
+    parent_b = parent_a.clone()
+    from dataclasses import replace as gene_replace
+
+    from ardevo.evolution.composition import _glue_init
+
+    parent_b.edges = [gene_replace(edge, glue=_glue_init(8, 8, rng), glue_rank=0) if edge.glue_rank else edge for edge in parent_b.edges]
+    child = comp_neat(parent_a, parent_b, rng=random.Random(1))
+    for edge_a, edge_child in zip(parent_a.edges, child.edges):
+        if edge_a.glue_rank:
+            assert edge_child.glue == edge_a.glue and edge_child.glue_rank == edge_a.glue_rank  # rank mismatch: parent_a wins
+
+
+def test_glue_rank_serialization_and_legacy() -> None:
+    rng = random.Random(0)
+    comp = minimal_composition([(_BANK, 8)], "head", 8, InnovationTracker(_next_node_id=0), rng, glue_rank=2, glue_rank_threshold=16)
+    rebuilt = comp_from_dict(comp_to_dict(comp))
+    assert rebuilt == comp
+    legacy = comp_to_dict(comp)
+    for edge in legacy["edges"]:
+        edge.pop("glue_rank")
+    assert all(edge.glue_rank == 0 for edge in comp_from_dict(legacy).edges)  # old entries load dense
+
+
 def test_output_node_must_be_unique() -> None:
     comp = _module_comp("live:7")
     comp.nodes[9] = CompNodeGene(9, CompNodeKind.OUTPUT, "head2", 1, 0)

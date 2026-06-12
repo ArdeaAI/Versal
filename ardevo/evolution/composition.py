@@ -25,7 +25,7 @@ from torch import nn
 
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, make_acyclic
 from ardevo.evolution.registry import Registry
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
+from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.substrate import SubstrateModule, decode
 
 BIAS_REF = "__bias__"
@@ -54,7 +54,12 @@ class CompEdgeGene:
     out_id: int
     enabled: bool
     innovation: int
-    glue: tuple[float, ...]  # row-major [source.out_width x target.in_width] linear map
+    # Dense (glue_rank = 0): row-major [out_width x in_width] linear map. Factored (glue_rank = r):
+    # U then V concatenated row-major (out_width*r + r*in_width floats); the effective map is U @ V,
+    # never materialized. Factoring is the scale guard for wide ports (a 784x784 dense edge is 614k
+    # floats; rank 8 is 12.5k).
+    glue: tuple[float, ...]
+    glue_rank: int = 0
 
 
 @dataclass
@@ -148,7 +153,7 @@ def comp_to_dict(comp: CompositionGenome) -> dict[str, Any]:
             {"id": n.id, "kind": n.kind.value, "ref": n.ref, "in_width": n.in_width, "out_width": n.out_width, "aggregation": n.aggregation, "trainable": n.trainable}
             for n in comp.nodes.values()
         ],
-        "edges": [{"in": e.in_id, "out": e.out_id, "enabled": e.enabled, "innovation": e.innovation, "glue": list(e.glue)} for e in comp.edges],
+        "edges": [{"in": e.in_id, "out": e.out_id, "enabled": e.enabled, "innovation": e.innovation, "glue": list(e.glue), "glue_rank": e.glue_rank} for e in comp.edges],
     }
 
 
@@ -159,7 +164,9 @@ def comp_from_dict(data: dict[str, Any]) -> CompositionGenome:
         )
         for n in data["nodes"]
     }
-    edges = [CompEdgeGene(int(e["in"]), int(e["out"]), bool(e["enabled"]), int(e["innovation"]), tuple(float(v) for v in e["glue"])) for e in data["edges"]]
+    edges = [
+        CompEdgeGene(int(e["in"]), int(e["out"]), bool(e["enabled"]), int(e["innovation"]), tuple(float(v) for v in e["glue"]), int(e.get("glue_rank", 0))) for e in data["edges"]
+    ]
     return CompositionGenome(nodes=nodes, edges=edges)
 
 
@@ -184,12 +191,13 @@ class AssemblyContext:
     expansion_stack: list[str] = field(default_factory=list)
 
 
-def _decode_ref_module(genome: Genome, n_inputs: int, n_outputs: int) -> SubstrateModule:
+def _decode_ref_module(genome: Genome, n_inputs: int, n_outputs: int, library: ModuleLibrary | None = None) -> SubstrateModule:
+    resolver = macro_resolver(library) if library is not None else None
     try:
-        return decode(genome, n_inputs, n_outputs)
+        return decode(genome, n_inputs, n_outputs, macro_resolver=resolver)
     except ValueError as error:
         try:
-            return decode(make_acyclic(genome), n_inputs, n_outputs)
+            return decode(make_acyclic(genome), n_inputs, n_outputs, macro_resolver=resolver)
         except ValueError as repaired_error:
             raise CompositionAssemblyError(str(repaired_error)) from error
 
@@ -218,7 +226,7 @@ def _resolve_module(node: CompNodeGene, ctx: AssemblyContext) -> SubstrateModule
         except KeyError as error:
             raise CompositionAssemblyError(str(error)) from error
         if entry.entry_type == MODULE:
-            inner = _decode_ref_module(genome_from_dict(entry.payload), node.in_width, node.out_width)
+            inner = _decode_ref_module(genome_from_dict(entry.payload), node.in_width, node.out_width, ctx.library)
         elif entry.entry_type == COMPOSITION:
             inner_comp = comp_from_dict(entry.payload)
             ctx.expansion_stack.append(key)
@@ -276,7 +284,12 @@ class ComposedNet(SubstrateModule):
         if len(comp.output_ids) != 1:
             raise CompositionAssemblyError(f"v1 compositions need exactly one OUTPUT node, got {len(comp.output_ids)}")
         self.comp = comp
-        self._order = comp_topological_order(comp)
+        try:
+            self._order = comp_topological_order(comp)
+        except ValueError as error:
+            # Operators guard cycles, but a malformed comp (bad seed, id collision) must floor the
+            # candidate via the assembly-error path, never crash the whole run.
+            raise CompositionAssemblyError(str(error)) from error
         self._n_inputs = n_inputs
         self._output_id = comp.output_ids[0]
 
@@ -300,14 +313,25 @@ class ComposedNet(SubstrateModule):
                 self._inner[str(len(self._inner))] = inner
 
         self.glue = nn.ParameterDict()
+        self.glue_u = nn.ParameterDict()  # factored edges: the effective map is glue_u[key] @ glue_v[key]
+        self.glue_v = nn.ParameterDict()
         self._incoming: dict[int, list[tuple[int, str]]] = {}
         for edge in comp.enabled_edges():
             source, target = comp.nodes[edge.in_id], comp.nodes[edge.out_id]
-            expected = source.out_width * target.in_width
-            if len(edge.glue) != expected:
-                raise CompositionAssemblyError(f"glue on {edge.in_id}->{edge.out_id} has {len(edge.glue)} values, expected {expected}")
             key = f"{edge.in_id}->{edge.out_id}"
-            self.glue[key] = nn.Parameter(torch.tensor(edge.glue, dtype=torch.float32).reshape(source.out_width, target.in_width))
+            if edge.glue_rank > 0:
+                rank = edge.glue_rank
+                expected = source.out_width * rank + rank * target.in_width
+                if len(edge.glue) != expected:
+                    raise CompositionAssemblyError(f"factored glue on {edge.in_id}->{edge.out_id} has {len(edge.glue)} values, expected {expected} (rank {rank})")
+                split = source.out_width * rank
+                self.glue_u[key] = nn.Parameter(torch.tensor(edge.glue[:split], dtype=torch.float32).reshape(source.out_width, rank))
+                self.glue_v[key] = nn.Parameter(torch.tensor(edge.glue[split:], dtype=torch.float32).reshape(rank, target.in_width))
+            else:
+                expected = source.out_width * target.in_width
+                if len(edge.glue) != expected:
+                    raise CompositionAssemblyError(f"glue on {edge.in_id}->{edge.out_id} has {len(edge.glue)} values, expected {expected}")
+                self.glue[key] = nn.Parameter(torch.tensor(edge.glue, dtype=torch.float32).reshape(source.out_width, target.in_width))
             self._incoming.setdefault(edge.out_id, []).append((edge.in_id, key))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -320,7 +344,9 @@ class ComposedNet(SubstrateModule):
                 else:
                     values[node_id] = x.index_select(1, self._columns[node_id])
                 continue
-            contributions = [values[in_id] @ self.glue[key] for in_id, key in self._incoming.get(node_id, [])]
+            contributions = [
+                (values[in_id] @ self.glue_u[key]) @ self.glue_v[key] if key in self.glue_u else values[in_id] @ self.glue[key] for in_id, key in self._incoming.get(node_id, [])
+            ]
             if not contributions:
                 combined = torch.zeros(x.shape[0], node.in_width, dtype=x.dtype, device=x.device)
             elif node.aggregation == "product" and len(contributions) > 1:
@@ -350,7 +376,10 @@ def writeback_composition(comp: CompositionGenome, net: ComposedNet) -> Composit
     updated: list[CompEdgeGene] = []
     for edge in child.edges:
         key = f"{edge.in_id}->{edge.out_id}"
-        if edge.enabled and key in net.glue:
+        if edge.enabled and key in net.glue_u:
+            factors = net.glue_u[key].detach().reshape(-1).tolist() + net.glue_v[key].detach().reshape(-1).tolist()
+            updated.append(replace(edge, glue=tuple(float(value) for value in factors)))
+        elif edge.enabled and key in net.glue:
             updated.append(replace(edge, glue=tuple(float(v) for v in net.glue[key].detach().reshape(-1).tolist())))
         else:
             updated.append(edge)
@@ -374,6 +403,9 @@ class RefSpec:
 class CompMutationContext:
     innovations: InnovationTracker
     ref_catalog: list[RefSpec]
+    # New glue auto-factorizes (rank = glue_rank) when in*out exceeds glue_rank_threshold (> 0).
+    glue_rank: int = 0
+    glue_rank_threshold: int = 0
 
 
 CompMutator = Callable[..., CompositionGenome]
@@ -386,6 +418,18 @@ def _glue_init(in_width: int, out_width: int, rng: random.Random, scale: float |
     return tuple(rng.gauss(0.0, sigma) for _ in range(in_width * out_width))
 
 
+def _glue_for(
+    in_width: int, out_width: int, rng: random.Random, *, glue_rank: int = 0, glue_rank_threshold: int = 0, glue_scale: float | None = None
+) -> tuple[tuple[float, ...], int]:
+    """Choose dense or factored glue for a NEW edge. Factored entries draw with sigma chosen so
+    var((U @ V)_ij) = rank * sigma^4 matches the dense 1/in_width init variance."""
+    if glue_rank > 0 and glue_rank_threshold > 0 and in_width * out_width > glue_rank_threshold and glue_rank < min(in_width, out_width):
+        sigma = (in_width * glue_rank) ** -0.25
+        values = tuple(rng.gauss(0.0, sigma) for _ in range(in_width * glue_rank + glue_rank * out_width))
+        return values, glue_rank
+    return _glue_init(in_width, out_width, rng, glue_scale), 0
+
+
 def minimal_composition(
     input_specs: list[tuple[str, int]],
     output_ref: str,
@@ -394,6 +438,8 @@ def minimal_composition(
     rng: random.Random,
     *,
     glue_scale: float | None = None,
+    glue_rank: int = 0,
+    glue_rank_threshold: int = 0,
 ) -> CompositionGenome:
     """The seed skeleton: INPUT banks (+ a bias source) glued straight to the OUTPUT head."""
     comp = CompositionGenome()
@@ -406,7 +452,8 @@ def minimal_composition(
     comp.nodes[output_id] = CompNodeGene(output_id, CompNodeKind.OUTPUT, output_ref, output_width, 0)
     for source in sources:
         width = comp.nodes[source].out_width
-        comp.edges.append(CompEdgeGene(source, output_id, True, tracker.innovation(source, output_id), _glue_init(width, output_width, rng, glue_scale)))
+        glue, rank = _glue_for(width, output_width, rng, glue_rank=glue_rank, glue_rank_threshold=glue_rank_threshold, glue_scale=glue_scale)
+        comp.edges.append(CompEdgeGene(source, output_id, True, tracker.innovation(source, output_id), glue, rank))
     return comp
 
 
@@ -419,12 +466,16 @@ def add_module_between(
     rng: random.Random,
     *,
     glue_scale: float | None = None,
+    glue_rank: int = 0,
+    glue_rank_threshold: int = 0,
 ) -> int:
     """Insert a MODULE node reading `source_id` and feeding `target_id`; returns the new node id."""
     node_id = tracker.new_node_id()
     comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, spec.ref, spec.in_width, spec.out_width)
-    comp.edges.append(CompEdgeGene(source_id, node_id, True, tracker.innovation(source_id, node_id), _glue_init(comp.nodes[source_id].out_width, spec.in_width, rng, glue_scale)))
-    comp.edges.append(CompEdgeGene(node_id, target_id, True, tracker.innovation(node_id, target_id), _glue_init(spec.out_width, comp.nodes[target_id].in_width, rng, glue_scale)))
+    in_glue, in_rank = _glue_for(comp.nodes[source_id].out_width, spec.in_width, rng, glue_rank=glue_rank, glue_rank_threshold=glue_rank_threshold, glue_scale=glue_scale)
+    comp.edges.append(CompEdgeGene(source_id, node_id, True, tracker.innovation(source_id, node_id), in_glue, in_rank))
+    out_glue, out_rank = _glue_for(spec.out_width, comp.nodes[target_id].in_width, rng, glue_rank=glue_rank, glue_rank_threshold=glue_rank_threshold, glue_scale=glue_scale)
+    comp.edges.append(CompEdgeGene(node_id, target_id, True, tracker.innovation(node_id, target_id), out_glue, out_rank))
     return node_id
 
 
@@ -444,7 +495,7 @@ def add_module_node(comp: CompositionGenome, ctx: CompMutationContext, *, rng: r
     candidates = [t for t in targets if t != source_id and not comp_would_create_cycle(child, source_id, t)]
     if not candidates:
         return comp
-    add_module_between(child, spec, source_id, rng.choice(candidates), ctx.innovations, rng)
+    add_module_between(child, spec, source_id, rng.choice(candidates), ctx.innovations, rng, glue_rank=ctx.glue_rank, glue_rank_threshold=ctx.glue_rank_threshold)
     return child
 
 
@@ -477,8 +528,8 @@ def add_comp_edge(comp: CompositionGenome, ctx: CompMutationContext, *, rng: ran
         for target in targets:
             if source == target or child.has_edge(source, target) or comp_would_create_cycle(child, source, target):
                 continue
-            glue = _glue_init(child.nodes[source].out_width, child.nodes[target].in_width, rng)
-            child.edges.append(CompEdgeGene(source, target, True, ctx.innovations.innovation(source, target), glue))
+            glue, rank = _glue_for(child.nodes[source].out_width, child.nodes[target].in_width, rng, glue_rank=ctx.glue_rank, glue_rank_threshold=ctx.glue_rank_threshold)
+            child.edges.append(CompEdgeGene(source, target, True, ctx.innovations.innovation(source, target), glue, rank))
             return child
     return comp
 
@@ -527,7 +578,7 @@ def comp_neat(parent_a: CompositionGenome, parent_b: CompositionGenome, *, rng: 
     child_edges: list[CompEdgeGene] = []
     for edge_a in parent_a.edges:
         edge_b = by_innovation_b.get(edge_a.innovation)
-        if edge_b is None or len(edge_b.glue) != len(edge_a.glue) or rng.random() < 0.5:
+        if edge_b is None or edge_b.glue_rank != edge_a.glue_rank or len(edge_b.glue) != len(edge_a.glue) or rng.random() < 0.5:
             child_edges.append(edge_a)
         else:
             child_edges.append(edge_b)

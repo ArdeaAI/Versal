@@ -54,3 +54,29 @@ def minimal(
             innovation += 1
 
     return Genome(nodes=nodes, connections=connections)
+
+
+def stamp_input_coordinates(genome: Genome, input_shape: tuple[int, ...]) -> Genome:
+    """Stamp each INPUT node with its raw unraveled axis-index coordinate (id order = raveled
+    row-major order, the exact convention `MultiTaskSubstrate._grow_bank` uses).
+
+    This is what lets the geometry-biased mutators (add_local_node, add_local_connection,
+    add_shared_motif) grow LOCAL receptive fields on grid tasks in the DIRECT path, where genomes
+    are seeded by `minimal` instead of the multitask substrate."""
+    from dataclasses import replace
+
+    total = 1
+    for dim in input_shape:
+        total *= int(dim)
+    input_ids = genome.input_ids
+    if total != len(input_ids):
+        raise ValueError(f"input shape {input_shape} has {total} cells but the genome has {len(input_ids)} inputs")
+    child = genome.clone()
+    for flat, node_id in enumerate(input_ids):
+        index: list[float] = []
+        remainder = flat
+        for dim in reversed(input_shape):
+            index.append(float(remainder % int(dim)))
+            remainder //= int(dim)
+        child.nodes[node_id] = replace(child.nodes[node_id], coordinate=tuple(reversed(index)))
+    return child

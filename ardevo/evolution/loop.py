@@ -88,6 +88,7 @@ class HierarchicalState:
     species_champions: dict[int, Genome] = field(default_factory=dict)
     module_species_history: list[dict[int, int]] = field(default_factory=list)
     repaired_refs: int = 0
+    absorbed_keys: list[str] = field(default_factory=list)  # library entries already grafted into the pool
 
 
 @dataclass
@@ -124,6 +125,8 @@ class HierarchicalLoop:
     comp_mutation: CompMutationPipeline
     max_inline_depth: int
     glue_scale: float | None
+    glue_rank: int
+    glue_rank_threshold: int
     module_pop_size: int
     module_elitism: int
     in_ports: int
@@ -134,6 +137,15 @@ class HierarchicalLoop:
     decay: float
     offspring_discount: float
     seed_fraction: float
+    # N > 1 assesses candidates on a thread pool. Safe because each candidate decodes its OWN
+    # module copies (fresh AssemblyContext) and assessment never draws from the shared rng (the
+    # train-op contract in train.py); torch releases the GIL inside kernels. Do NOT introduce any
+    # cross-candidate cache of decoded inners without revisiting this.
+    parallel_assess: int = 0
+    # At each lookup miss the orchestrator absorbs up to this many NEW exact-port library entries
+    # into the module pool (grafted over the worst non-champion members): found structures become
+    # building blocks IN the soup, mid-run, not just at fresh_state.
+    absorb_top_k: int = 0
     library: ModuleLibrary | None = None
 
     def attach_library(self, library: ModuleLibrary | None) -> None:
@@ -210,6 +222,11 @@ class HierarchicalLoop:
 
     # --- assessment ---------------------------------------------------------------------------------
 
+    def assess_composition(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
+        """Public assessment seam: the orchestrator's strategies verify champions through it
+        (fresh assembly against CURRENT champions/library) before threshold checks and admission."""
+        return self._assess(comp, spec, state, train=train)
+
     def _assess(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
         ctx = self._context(state)
         ctx.bank_columns = dict(spec.bank_columns)
@@ -230,6 +247,18 @@ class HierarchicalLoop:
     def _train(self, comp: CompositionGenome, net: ComposedNet, spec: CompTaskSpec, state: HierarchicalState) -> tuple[CompositionGenome, ComposedNet]:
         self.evolver.train_op(comp, net, spec.encoded, rng=state.rng, writeback=False)
         return comp, net
+
+    def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
+        """Assess a batch of candidates, on a thread pool when configured (order-preserving map).
+
+        Results are identical to the serial loop: candidates share no trainable state, assessment
+        consumes no rng, and floored candidates (assembly errors) are produced INSIDE _assess."""
+        if self.parallel_assess <= 1 or len(comps) <= 1:
+            return [self._assess(comp, spec, state, train=train) for comp in comps]
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
+            return list(pool.map(lambda comp: self._assess(comp, spec, state, train=train), comps))
 
     # --- attribution and writeback --------------------------------------------------------------------
 
@@ -253,13 +282,19 @@ class HierarchicalLoop:
                         if index == champion:
                             state.modules[index].fitness = value
                         else:
-                            state.modules[index].fitness *= self.decay
+                            state.modules[index].fitness = self._decayed(state.modules[index].fitness)
             elif ref.startswith("library:") and self.library is not None:
                 self.library.bump_stats(ref.removeprefix("library:"), value)
         for species_id, members in state.species_members.items():
             if species_id not in referenced_species:
                 for index in members:
-                    state.modules[index].fitness *= self.decay
+                    state.modules[index].fitness = self._decayed(state.modules[index].fitness)
+
+    def _decayed(self, fitness: float) -> float:
+        """Decay erodes stale POSITIVE credit only. Multiplying a NEGATIVE score by decay would
+        move it toward neutral, i.e. REWARD a module for going unreferenced while compositions
+        score badly; bad scores must persist until real evidence replaces them."""
+        return fitness * self.decay if fitness > 0.0 else fitness
 
     def _module_writeback(self, assessed: list[AssessedComposition], state: HierarchicalState) -> None:
         """Champion-only Lamarckianism: ONLY the generation's best composition writes its trained
@@ -285,7 +320,12 @@ class HierarchicalLoop:
     # --- reproduction -----------------------------------------------------------------------------------
 
     def _module_context(self, state: HierarchicalState) -> MutationContext:
-        return MutationContext(innovations=state.module_innovations, activations=self.evolver.activations, default_activation=self.evolver.default_activation)
+        return MutationContext(
+            innovations=state.module_innovations,
+            activations=self.evolver.activations,
+            default_activation=self.evolver.default_activation,
+            library=self.library,
+        )
 
     def advance_modules(self, state: HierarchicalState) -> None:
         """One module generation: speciate on attributed fitness, then reproduce per species with
@@ -327,27 +367,58 @@ class HierarchicalLoop:
         state.species_champion_index = champion_index
         state.species_champions = champions
 
+    def absorb_new_entries(self, state: HierarchicalState) -> int:
+        """Graft the best not-yet-absorbed exact-port MODULE entries over the worst non-champion
+        members (exact ports only: live decode hard-requires matching widths). Newcomers start at
+        the pool mean fitness: neutral enough to survive one selection round without dominating."""
+        if self.library is None or self.absorb_top_k <= 0 or not state.modules:
+            return 0
+        from ardevo.library import graft
+
+        candidates = [entry for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports) if entry.key not in state.absorbed_keys][
+            : self.absorb_top_k
+        ]
+        if not candidates:
+            return 0
+        protected = set(state.species_champion_index.values())
+        replaceable = sorted((index for index in range(len(state.modules)) if index not in protected), key=lambda index: state.modules[index].fitness)
+        mean_fitness = sum(module.fitness for module in state.modules) / len(state.modules)
+        absorbed = 0
+        for entry, index in zip(candidates, replaceable):
+            state.modules[index] = LiveModule(genome=graft(entry, state.module_innovations), fitness=mean_fitness)
+            state.absorbed_keys.append(entry.key)
+            absorbed += 1
+        if absorbed:
+            logger.info("absorbed %d library entries into the module pool: %s", absorbed, state.absorbed_keys[-absorbed:])
+            self._speciate_only(state)
+        return absorbed
+
     def _reproduce_comps(self, assessed: list[AssessedComposition], spec: CompTaskSpec, state: HierarchicalState) -> list[AssessedComposition]:
         ordered = sorted(assessed, key=lambda item: item.fitness, reverse=True)
         # Elites keep their genes but are RE-EVALUATED (no gradient, no drift): their live refs
         # resolve against modules that moved since last generation, so cached fitness goes stale.
-        next_generation = [self._assess(item.comp, spec, state, train=False) for item in ordered[: self.comp_elitism]]
-        n_offspring = max(self.comp_pop_size - len(next_generation), 0)
-        if n_offspring == 0:
-            return next_generation
-        comps = [item.comp for item in ordered]
-        fitnesses = [item.fitness for item in ordered]
-        parents = self.comp_selection_op(comps, fitnesses, rng=state.rng, count=2 * n_offspring)
-        comp_ctx = CompMutationContext(innovations=state.comp_innovations, ref_catalog=self.ref_catalog(state))
-        for k in range(n_offspring):
-            if state.rng.random() < self.comp_crossover_rate:
-                child = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
-            else:
-                child = parents[2 * k].clone()
-            child = self.comp_mutation(child, comp_ctx, rng=state.rng)
-            child = self._repair_refs(child, state)
-            next_generation.append(self._assess(child, spec, state, train=True))
-        return next_generation
+        # Repair dead live refs FIRST: module species die during advance_modules, and an elite
+        # pointing at one would otherwise be silently floored (champion lineage lost).
+        elites = [self._repair_refs(item.comp, state) for item in ordered[: self.comp_elitism]]
+        n_offspring = max(self.comp_pop_size - len(elites), 0)
+        # ALL rng draws happen up front (selection, crossover, mutation, repair); assessment is
+        # rng-free, so deferring it into one (possibly parallel) batch is stream-identical.
+        children: list[CompositionGenome] = []
+        if n_offspring > 0:
+            comps = [item.comp for item in ordered]
+            fitnesses = [item.fitness for item in ordered]
+            parents = self.comp_selection_op(comps, fitnesses, rng=state.rng, count=2 * n_offspring)
+            comp_ctx = CompMutationContext(
+                innovations=state.comp_innovations, ref_catalog=self.ref_catalog(state), glue_rank=self.glue_rank, glue_rank_threshold=self.glue_rank_threshold
+            )
+            for k in range(n_offspring):
+                if state.rng.random() < self.comp_crossover_rate:
+                    child = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
+                else:
+                    child = parents[2 * k].clone()
+                child = self.comp_mutation(child, comp_ctx, rng=state.rng)
+                children.append(self._repair_refs(child, state))
+        return self._assess_all(elites, spec, state, train=False) + self._assess_all(children, spec, state, train=True)
 
     # --- the per-task drive ---------------------------------------------------------------------------
 
@@ -364,10 +435,21 @@ class HierarchicalLoop:
         """Evolve a composition population against one task for up to `budget` generations."""
         population: list[CompositionGenome] = [comp.clone() for comp in (seed_comps or [])][: self.comp_pop_size]
         while len(population) < self.comp_pop_size:
-            population.append(minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, state.comp_innovations, state.rng, glue_scale=self.glue_scale))
+            population.append(
+                minimal_composition(
+                    spec.input_specs,
+                    spec.output_ref,
+                    spec.output_width,
+                    state.comp_innovations,
+                    state.rng,
+                    glue_scale=self.glue_scale,
+                    glue_rank=self.glue_rank,
+                    glue_rank_threshold=self.glue_rank_threshold,
+                )
+            )
         population = [self._repair_refs(comp, state) for comp in population]
 
-        assessed = [self._assess(comp, spec, state, train=True) for comp in population]
+        assessed = self._assess_all(population, spec, state, train=True)
         self._attribute(assessed, state)
         self._module_writeback(assessed, state)
         best = max(assessed, key=lambda item: item.fitness)
@@ -418,6 +500,7 @@ def state_to_dict(state: HierarchicalState) -> dict[str, Any]:
         "species_champions": {str(species_id): genome_to_dict(genome) for species_id, genome in state.species_champions.items()},
         "module_species_history": [{str(species_id): count for species_id, count in snapshot.items()} for snapshot in state.module_species_history],
         "repaired_refs": state.repaired_refs,
+        "absorbed_keys": list(state.absorbed_keys),
     }
 
 
@@ -433,6 +516,7 @@ def state_from_dict(data: dict[str, Any], rng: random.Random) -> HierarchicalSta
         species_champions={int(species_id): genome_from_dict(genome) for species_id, genome in data["species_champions"].items()},
         module_species_history=[{int(species_id): int(count) for species_id, count in snapshot.items()} for snapshot in data["module_species_history"]],
         repaired_refs=int(data.get("repaired_refs", 0)),
+        absorbed_keys=[str(key) for key in data.get("absorbed_keys", [])],
     )
 
 
@@ -471,6 +555,8 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         comp_mutation=CompMutationPipeline(mutators),
         max_inline_depth=int(comp_cfg.get("max_inline_depth", 4)),
         glue_scale=float(comp_cfg["glue_scale"]) if "glue_scale" in comp_cfg else None,
+        glue_rank=int(comp_cfg.get("glue_rank", 0)),
+        glue_rank_threshold=int(comp_cfg.get("glue_rank_threshold", 0)),
         module_pop_size=int(modules_cfg.get("pop_size", evolution.get("pop_size", 32))),
         module_elitism=int(modules_cfg.get("elitism", evolution.get("elitism", 1))),
         in_ports=int(modules_cfg.get("in_ports", 4)),
@@ -481,4 +567,6 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         decay=float(modules_cfg.get("decay", 0.95)),
         offspring_discount=float(modules_cfg.get("offspring_discount", 0.9)),
         seed_fraction=float(modules_cfg.get("seed_fraction", 0.25)),
+        parallel_assess=int(evolution.get("parallel_assess", 0)),
+        absorb_top_k=int(modules_cfg.get("absorb_top_k", 0)),
     )

@@ -164,6 +164,38 @@ def test_attribution_credits_champion_and_decays_the_rest() -> None:
     assert all(abs(state.modules[index].fitness - 0.45) < 1e-9 for index in others)  # 0.5 * decay
 
 
+def test_decay_never_rewards_negative_fitness() -> None:
+    """B5 regression: unreferenced modules with NEGATIVE scores must not drift toward neutral."""
+    loop = build_loop(_config())
+    state = loop.fresh_state(random.Random(0))
+    species_id = sorted(state.species_champions)[0]
+    for module in state.modules:
+        module.fitness = -0.5
+    item = AssessedComposition(comp=_live_comp(species_id, 8, 2), metrics={}, fitness=0.7, net=None)
+    loop._attribute([item], state)
+    champion_index = state.species_champion_index[species_id]
+    assert state.modules[champion_index].fitness == 0.7
+    others = [index for members in state.species_members.values() for index in members if index != champion_index]
+    assert all(state.modules[index].fitness == -0.5 for index in others)  # NOT -0.475
+
+
+def test_elites_with_dead_refs_are_repaired_not_floored(xor_task: Task) -> None:
+    """B3 regression: an elite whose live species died must be re-pointed, not silently floored."""
+    from ardevo.evolution.genome import InnovationTracker
+
+    loop = build_loop(_config())
+    state = loop.fresh_state(random.Random(0))
+    state.comp_innovations = InnovationTracker(_next_node_id=100)  # hand-built comp uses ids 0-2
+    spec = _spec(xor_task)
+    dead_elite = loop._assess(_live_comp(9999, 2, 1), spec, state, train=False)
+    assert dead_elite.fitness <= -1e8  # without repair, the dead ref floors it
+    dead_elite = AssessedComposition(comp=_live_comp(9999, 2, 1), metrics={}, fitness=5.0, net=None)  # pretend it was the champion
+    survivors = loop._reproduce_comps([dead_elite], spec, state)
+    elite = survivors[0]
+    assert elite.fitness > -1e8
+    assert all(int(ref.removeprefix("live:")) in state.species_champions for ref in elite.comp.refs() if ref.startswith("live:"))
+
+
 def test_attribution_bumps_library_stats(tmp_path: Path, solving_genome) -> None:
     library = ModuleLibrary(tmp_path / "lib")
     io = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
@@ -204,6 +236,55 @@ def test_repair_refs_repoints_dead_species() -> None:
     ref = repaired.nodes[1].ref
     assert int(ref.removeprefix("live:")) in state.species_champions
     assert state.repaired_refs == 1
+
+
+def test_absorb_new_entries_grafts_over_worst_non_champions(tmp_path: Path, solving_genome) -> None:
+    from ardevo.evolution.init import minimal
+    from ardevo.library import MODULE, ModuleLibrary
+
+    library = ModuleLibrary(tmp_path / "lib")
+    module_genome = minimal(4, 1, rng=random.Random(3))
+    io = {"inputs": [{"signature": "ANY", "width": 4}], "output": {"signature": "ANY", "width": 1}}
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(module_genome), io=io, provenance={"accepted_metric": 1.0, "weight_robustness": 0.9})
+
+    config = _config()
+    config["evolution"]["modules"]["absorb_top_k"] = 2
+    loop = build_loop(config)
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    for index, module in enumerate(state.modules):
+        module.fitness = float(index)  # index 0 is the worst
+    champions = set(state.species_champion_index.values())
+    worst_replaceable = min((i for i in range(len(state.modules)) if i not in champions), key=lambda i: state.modules[i].fitness)
+
+    absorbed = loop.absorb_new_entries(state)
+    assert absorbed == 1 and state.absorbed_keys == [key]
+    grafted = state.modules[worst_replaceable].genome
+    assert sorted(c.weight for c in grafted.connections) == sorted(c.weight for c in module_genome.connections)
+    # Idempotent: already-absorbed entries are never grafted twice.
+    assert loop.absorb_new_entries(state) == 0
+
+
+def test_mutation_context_sees_live_library_entries(tmp_path: Path, solving_genome) -> None:
+    """The by-path cache snapshot goes stale; the live handle must see mid-run admissions."""
+    from ardevo.evolution.mutation import add_library_module
+    from ardevo.library import MODULE, ModuleLibrary
+
+    config = _config()
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    ctx = loop._module_context(state)
+    assert ctx.library is library
+
+    host = state.modules[0].genome
+    before = add_library_module(host, ctx, rng=random.Random(0), prob=1.0, path=str(tmp_path / "lib"))
+    assert genome_to_dict(before) == genome_to_dict(host)  # empty library: no-op
+    io = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
+    library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=io, provenance={})  # admitted MID-RUN
+    after = add_library_module(host, ctx, rng=random.Random(0), prob=1.0, path=str(tmp_path / "lib"))
+    assert len(after.nodes) > len(host.nodes)  # the live handle saw the new entry
 
 
 def test_state_serialization_round_trip(decomposable_task: Task) -> None:

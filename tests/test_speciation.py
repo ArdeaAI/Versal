@@ -14,6 +14,19 @@ def test_compatibility_distance_grows_with_structural_difference(linear_genome, 
     assert structural > weight_only == 0.0
 
 
+def test_node_gene_term_separates_aggregation_variants(solving_genome):
+    """B6 regression: sum-vs-product (or activation) flips must be visible to speciation."""
+    from dataclasses import replace
+
+    variant = solving_genome.clone()
+    variant.nodes[3] = replace(variant.nodes[3], aggregation="product")
+    coeffs = {"c_excess": 1.0, "c_disjoint": 1.0, "c_weight": 0.5}
+    assert compatibility_distance(solving_genome, variant, **coeffs) == 0.0  # default keeps old behavior
+    with_node_term = compatibility_distance(solving_genome, variant, **coeffs, c_node=0.25)
+    assert with_node_term > 0.0
+    assert compatibility_distance(solving_genome, solving_genome, **coeffs, c_node=0.25) == 0.0
+
+
 def test_no_speciation_is_one_global_group(linear_genome):
     genomes = [linear_genome.clone() for _ in range(10)]
     fitnesses = [float(i) for i in range(10)]

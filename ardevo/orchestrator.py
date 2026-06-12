@@ -27,8 +27,10 @@ from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, C
 from ardevo.evolution.genome import genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.train import _writeback
-from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, task_io
-from ardevo.substrate import decode
+from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, task_io
+from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
+from ardevo.substrate import decode, decode_recurrent
+from ardevo.temporal import temporal_adapter
 from ardevo.utils.logging import Logger
 
 logger = Logger.get_logger()
@@ -65,6 +67,8 @@ class Attempt:
     generations: int
     library_key: str | None = None
     decompose_op: str | None = None
+    strategy: str | None = None  # which evolve strategy produced the winner (or the best loser)
+    failure_stage: str | None = None  # for failed decomposed tasks: "subtask:<name>" | "parent_re_evolve"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +79,8 @@ class Attempt:
             "generations": self.generations,
             "library_key": self.library_key,
             "decompose_op": self.decompose_op,
+            "strategy": self.strategy,
+            "failure_stage": self.failure_stage,
         }
 
     @classmethod
@@ -87,12 +93,14 @@ class Attempt:
             generations=int(data["generations"]),
             library_key=data.get("library_key"),
             decompose_op=data.get("decompose_op"),
+            strategy=data.get("strategy"),
+            failure_stage=data.get("failure_stage"),
         )
 
 
 @dataclass(frozen=True)
 class Solution:
-    key: str
+    key: str | None  # None when the task was SOLVED but the admission gate declined to shelve it
     entry_type: str
     metric: float
 
@@ -106,12 +114,12 @@ class StallDetector:
     stall_epsilon: float
     floor: float
     budget: int
-    metric_of: Callable[[AssessedComposition], float]
+    metric_of: Callable[[Any], float]
     best_fitness: float = -math.inf
     since_improvement: int = 0
     stalled: bool = False
 
-    def __call__(self, generation: int, best: AssessedComposition) -> bool:
+    def __call__(self, generation: int, best: Any) -> bool:
         if best.fitness > self.best_fitness + self.stall_epsilon:
             self.best_fitness = best.fitness
             self.since_improvement = 0
@@ -137,18 +145,37 @@ class Orchestrator:
         budgets = table.get("budgets", {})
         self.budgets = {int(name.removeprefix("depth")): int(value) for name, value in budgets.items()} or {0: 120, 1: 60, 2: 30}
         self.decomposers = build_decomposers(table)
+        library_cfg = config.get("library", {}) or {}
+        self.admission = LIBRARY_ADMISSION.get(library_cfg.get("admission", "accept_all"))(**{k: v for k, v in library_cfg.items() if k != "admission"})
+        self.strategies = build_strategies(config)
+        shares = table.get("evolve_budget", {})
+        self.evolve_shares = {name: float(shares.get(name, 1.0)) for name, _strategy in self.strategies}
         self.loop = loop
         self.library = library
         self.state = state
         self.proctor = proctor
         self.attempts: list[Attempt] = []
-        self.counters = {"library_hits": 0, "library_misses": 0, "accepts": 0, "failures": 0, "decompositions": 0}
+        self.counters = {
+            "library_hits": 0,
+            "library_misses": 0,
+            "accepts": 0,
+            "failures": 0,
+            "decompositions": 0,
+            "admission_rejected": 0,
+            "decompose_subtask_failed": 0,
+            "decompose_parent_failed": 0,
+        }
+        self._failure_stage: str | None = None
+        self._failure_op: str | None = None
 
     # --- public API ---------------------------------------------------------------------------------
 
     def solve(self, task: Task, depth: int = 0) -> Solution | None:
         spec = comp_task_spec(task)
         name = task.meta.name
+        if depth == 0:
+            self._failure_stage = None  # forensics for THIS top-level task only
+            self._failure_op = None
 
         hit = self._lookup(task, spec)
         if hit is not None:
@@ -156,26 +183,73 @@ class Orchestrator:
             self._record(Attempt(task=name, depth=depth, outcome="library_hit", metric=hit.metric, generations=0, library_key=hit.key))
             return hit
         self.counters["library_misses"] += 1
+        self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
-        stall = self._stall_detector(budget)
-        best = self.loop.run_task(spec, self.state, budget=budget, stop=stall, on_generation=self._on_generation)
-        metric = self._metric(best)
-        if metric >= self.accept_threshold:
-            key = self._admit(best, task, depth, decompose_op=None)
+        result = self._evolve(task, spec, budget)
+        if result.metric >= self.accept_threshold:
+            key = self._admit_result(result, task, depth, decompose_op=None)
             self.counters["accepts"] += 1
-            self._record(Attempt(task=name, depth=depth, outcome="evolved", metric=metric, generations=budget, library_key=key))
-            return Solution(key=key, entry_type=COMPOSITION, metric=metric)
+            self._record(Attempt(task=name, depth=depth, outcome="evolved", metric=result.metric, generations=result.generations_used, library_key=key, strategy=result.strategy))
+            return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric)
 
         if depth < self.max_depth:
-            solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=metric)
+            solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
             if solution is not None:
                 return solution
 
         self.counters["failures"] += 1
-        self._record(Attempt(task=name, depth=depth, outcome="failed", metric=metric, generations=budget))
-        logger.info("orchestrator gave up on %s at depth %d (best %s=%.3f)", name, depth, self.accept_metric, metric)
+        self._record(
+            Attempt(
+                task=name,
+                depth=depth,
+                outcome="failed",
+                metric=result.metric,
+                generations=result.generations_used,
+                strategy=result.strategy,
+                decompose_op=self._failure_op if depth == 0 else None,
+                failure_stage=self._failure_stage if depth == 0 else None,
+            )
+        )
+        logger.info("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.accept_metric, result.metric, result.strategy)
         return None
+
+    # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
+
+    def _runtime(self) -> StrategyRuntime:
+        return StrategyRuntime(
+            loop=self.loop,
+            library=self.library,
+            state=self.state,
+            accept_threshold=self.accept_threshold,
+            metric_of=self._metric,
+            stall_factory=self._stall_detector,
+            on_generation=self._on_generation,
+        )
+
+    def _evolve(self, task: Task, spec: CompTaskSpec, budget: int, seed_comps: list[CompositionGenome] | None = None) -> StrategyResult:
+        """Run the configured strategies in order under one shared budget. First strategy to clear
+        the accept threshold wins (later ones never run); a stalled strategy's UNSPENT generations
+        roll into the next allocation; the best loser is returned when nobody clears the bar."""
+        runtime = self._runtime()
+        total_share = sum(self.evolve_shares.values()) or 1.0
+        results: list[StrategyResult] = []
+        remaining = budget
+        for position, (name, strategy) in enumerate(self.strategies):
+            if position == len(self.strategies) - 1:
+                allocation = remaining
+            else:
+                allocation = min(remaining, max(1, round(budget * self.evolve_shares[name] / total_share)))
+            if allocation <= 0:
+                break
+            outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
+            results.append(outcome)
+            remaining -= outcome.generations_used
+            if outcome.metric >= self.accept_threshold:
+                return outcome
+            if remaining <= 0:
+                break
+        return max(results, key=lambda item: item.metric)
 
     # --- ladder steps -------------------------------------------------------------------------------
 
@@ -188,17 +262,30 @@ class Orchestrator:
             limit=self.quick_eval_top_k,
         )
         for entry in candidates:
-            metric = self._quick_metric(entry, spec)
+            metric = self._quick_metric(entry, task, spec)
             if metric is not None and metric >= self.accept_threshold:
                 return Solution(key=entry.key, entry_type=entry.entry_type, metric=metric)
         return None
 
-    def _quick_metric(self, entry: LibraryEntry, spec: CompTaskSpec) -> float | None:
-        """Evaluate a stored entry against the task with NO training (forward passes only)."""
+    @staticmethod
+    def _entry_is_temporal(entry: LibraryEntry) -> bool:
+        signature = entry.io["inputs"][0].get("signature", "")
+        return "|" in signature and "T" in signature.split("|", 1)[1].split(",")
+
+    def _quick_metric(self, entry: LibraryEntry, task: Task, spec: CompTaskSpec) -> float | None:
+        """Evaluate a stored entry against the task with NO training (forward passes only).
+
+        TIME-bearing MODULE entries (direct-strategy temporal winners) are scored through the
+        stepped substrate; everything else uses the flat decode."""
         from ardevo.evaluation import evaluate
         from ardevo.evolution.composition import AssemblyContext, CompositionAssemblyError, assemble
 
         try:
+            if entry.entry_type == MODULE and self._entry_is_temporal(entry):
+                adapter = temporal_adapter(task)
+                module = decode_recurrent(genome_from_dict(entry.payload), adapter.n_inputs, adapter.n_outputs, adapter.mode)
+                metrics = adapter.evaluate(module)
+                return self._metric(AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None))
             if entry.entry_type == MODULE:
                 module = decode(genome_from_dict(entry.payload), spec.n_inputs, spec.output_width)
             else:
@@ -228,26 +315,82 @@ class Orchestrator:
         for subtask in subtasks:
             solved = self.solve(subtask.task, depth + 1)
             if solved is None:
-                return None  # a missing part means the wired parent cannot be completed
+                # A missing part means the wired parent cannot be completed; record WHERE it died.
+                self.counters["decompose_subtask_failed"] += 1
+                self._failure_stage = f"subtask:{subtask.task.meta.name}"
+                self._failure_op = chosen_name
+                return None
             solutions.append((subtask, solved))
 
         seed = self._port_wired_skeleton(spec, solutions)
         seeds = [seed] if seed is not None else None
         retry_budget = max(budget // 2, 5)
-        stall = self._stall_detector(retry_budget)
-        best = self.loop.run_task(spec, self.state, budget=retry_budget, stop=stall, seed_comps=seeds, on_generation=self._on_generation)
-        metric = self._metric(best)
-        if metric >= self.accept_threshold:
-            key = self._admit(best, task, depth, decompose_op=chosen_name)
+        result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
+        if result.metric >= self.accept_threshold:
+            key = self._admit_result(result, task, depth, decompose_op=chosen_name)
             self.counters["accepts"] += 1
-            attempt = Attempt(task=task.meta.name, depth=depth, outcome="decomposed", metric=metric, generations=retry_budget, library_key=key, decompose_op=chosen_name)
+            attempt = Attempt(
+                task=task.meta.name,
+                depth=depth,
+                outcome="decomposed",
+                metric=result.metric,
+                generations=result.generations_used,
+                library_key=key,
+                decompose_op=chosen_name,
+                strategy=result.strategy,
+            )
             self._record(attempt)
-            return Solution(key=key, entry_type=COMPOSITION, metric=metric)
+            return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric)
+        # Every part solved but the wired parent still missed the bar.
+        self.counters["decompose_parent_failed"] += 1
+        self._failure_stage = "parent_re_evolve"
+        self._failure_op = chosen_name
         return None
 
     # --- admission ----------------------------------------------------------------------------------
 
-    def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str:
+    def _gated_add(self, *, entry_type: str, payload: dict[str, Any], io: dict[str, Any], provenance: dict[str, Any], level: int, dependency: bool) -> str | None:
+        """All library writes flow through here. Dependencies (module snapshots a composition
+        needs, and sub-solutions inside a decompose recursion) BYPASS the policy: a parent must
+        never dangle. Top-level winners face the configured admission policy; rejection still
+        counts the task as solved, it just is not shelved."""
+        if dependency:
+            return self.library.add(entry_type=entry_type, payload=payload, io=io, provenance={**provenance, "dependency": True}, level=level)
+        decision = self.admission(self.library, entry_type=entry_type, io=io, provenance=provenance)
+        if not decision.admit:
+            self.counters["admission_rejected"] += 1
+            logger.info("admission rejected (%s): %s", entry_type, decision.reason)
+            return None
+        for retired_key in decision.retire:
+            self.library.retire(retired_key)
+            logger.info("retired library entry %s (%s)", retired_key, decision.reason)
+        return self.library.add(entry_type=entry_type, payload=payload, io=io, provenance=provenance, level=level)
+
+    def _admit_result(self, result: StrategyResult, task: Task, depth: int, decompose_op: str | None) -> str | None:
+        """Route a strategy winner to the right admission shape."""
+        if result.champion_comp is not None:
+            return self._admit(result.champion_comp, task, depth, decompose_op)
+        if result.champion_genome is not None:
+            return self._admit_direct_module(result, task, depth)
+        raise ValueError(f"strategy {result.strategy!r} produced no admissible champion")
+
+    def _admit_direct_module(self, result: StrategyResult, task: Task, depth: int) -> str | None:
+        """A direct-strategy winner is a TASK-SHAPED mini-model: admitted with its REAL io
+        signature/widths (not the ANY-port snapshot shape), so lookups hit it exactly and the
+        composition strategy can reference it through the catalog immediately."""
+        assert result.champion_genome is not None
+        provenance = {
+            "task": task.meta.name,
+            "rung": task.meta.rung,
+            "depth": depth,
+            "strategy": result.strategy,
+            "accepted_metric": result.metric,
+            "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
+        }
+        level = module_level(result.champion_genome, self.library)
+        return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
+
+    def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
         entries carrying the exact trained weights that scored; the composition references those."""
         metric = self._metric(best)
@@ -278,9 +421,10 @@ class Orchestrator:
                 "accepted_metric": metric,
                 "weight_robustness": best.metrics.get("weight_robustness", 0.0),
             }
-            key = self.library.add(entry_type=MODULE, payload=genome_to_dict(tuned), io=module_io, provenance=provenance, level=1)
+            snapshot_level = module_level(tuned, self.library)
+            key = self.library.add(entry_type=MODULE, payload=genome_to_dict(tuned), io=module_io, provenance={**provenance, "dependency": True}, level=snapshot_level)
             ref_map[ref] = f"library:{key}"
-            levels.append(1)
+            levels.append(snapshot_level)
 
         detached = best.comp.clone()
         for node_id in detached.module_ids:
@@ -296,7 +440,7 @@ class Orchestrator:
             "accepted_metric": metric,
             "weight_robustness": best.metrics.get("weight_robustness", 0.0),
         }
-        return self.library.add(entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level)
+        return self._gated_add(entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
 
     # --- skeleton wiring ------------------------------------------------------------------------------
 
@@ -305,6 +449,9 @@ class Orchestrator:
         roles: output_slice (module output lands in its head slice) and input_subset (module reads
         its input slice, outputs sum into the whole head). Other roles fall back to None: the
         sub-solutions are still in the library and reachable through add_module_node."""
+        if any(solution.key is None for _subtask, solution in solutions):
+            logger.info("a sub-solution was solved but not shelved; relying on the ref catalog instead of a wired skeleton")
+            return None
         roles = {subtask.port.role for subtask, _ in solutions}
         if not roles <= {"output_slice", "input_subset"}:
             logger.info("no skeleton wiring for roles %s; relying on the ref catalog instead", roles)
@@ -325,6 +472,8 @@ class Orchestrator:
         per_position = spec.output_width // positions_total if positions_total else 1
 
         for subtask, solution in solutions:
+            if solution.key is None:  # unreachable after the guard above; narrows for the type checker
+                return None
             entry = self.library.load(solution.key)
             in_width = sum(item["width"] for item in entry.io["inputs"])
             out_width = entry.io["output"]["width"]
@@ -352,7 +501,7 @@ class Orchestrator:
     def _stall_detector(self, budget: int) -> StallDetector:
         return StallDetector(stall_generations=self.stall_generations, stall_epsilon=self.stall_epsilon, floor=self.floor, budget=budget, metric_of=self._metric)
 
-    def _metric(self, item: AssessedComposition) -> float:
+    def _metric(self, item: Any) -> float:
         metrics = item.metrics
         if self.accept_metric == "query_accuracy" and not math.isfinite(metrics.get("query_loss", math.inf)):
             return float(metrics.get("support_accuracy", 0.0))  # degenerate query-less task
@@ -362,10 +511,10 @@ class Orchestrator:
         self.attempts.append(attempt)
         logger.info("attempt: %s", attempt.to_dict())
 
-    def _on_generation(self, generation: int, best: AssessedComposition, mean_fitness: float) -> None:
+    def _on_generation(self, strategy: str, generation: int, best: Any, mean_fitness: float) -> None:
         if self.proctor is not None:
-            self.proctor.log_scalar("Fitness", "comp_best", best.fitness, self.state.generation)
-            self.proctor.log_scalar("Fitness", "comp_mean", mean_fitness, self.state.generation)
+            self.proctor.log_scalar("Fitness", f"{strategy}_best", best.fitness, self.state.generation)
+            self.proctor.log_scalar("Fitness", f"{strategy}_mean", mean_fitness, self.state.generation)
             self.proctor.log_scalar("Robustness", "weight_robustness", best.metrics.get("weight_robustness", 0.0), self.state.generation)
 
 

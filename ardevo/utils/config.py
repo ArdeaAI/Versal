@@ -82,6 +82,8 @@ class Config:
             "schedule": schedule,
             # Present only for an orchestrated run; selects OrchestratedTrial in main.
             "orchestrator": raw.get("orchestrator", {}),
+            # Library admission policy knobs (quality gate + per-signature caps).
+            "library": raw.get("library", {}),
         }
 
         # Flat scalars for ClearML hyperparameter tracking (logging only; not the source of truth).

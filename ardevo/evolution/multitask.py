@@ -69,30 +69,67 @@ def task_entry(task: Task) -> TaskEntry:
     )
 
 
-def build_pool(source: str, rungs: list[int], n_samples: int, support_fraction: float, tasks_per_rung: int, shuffle: bool, seed: int) -> list[TaskEntry]:
+@dataclass(frozen=True)
+class SkippedRung:
+    """Why a configured rung produced no tasks: visible in stats.json and the console, never just a
+    log line (rung 5 silently never loading is how a 'full ladder' run quietly stops being one)."""
+
+    rung: int
+    error_type: str
+    message: str
+
+
+@dataclass
+class PoolReport:
+    entries: list[TaskEntry]
+    skipped: list[SkippedRung]
+
+
+def build_pool_report(
+    source: str,
+    rungs: list[int],
+    n_samples: int,
+    support_fraction: float,
+    tasks_per_rung: int,
+    shuffle: bool,
+    seed: int,
+    dataset_factory: Any = None,
+) -> PoolReport:
     """Load every task across the configured rungs as schedulable entries, RUNG BY RUNG.
 
-    Each rung is loaded in its own `IcarusDataset` so one unloadable rung does not kill the whole run:
+    Each rung is loaded in its own dataset so one unloadable rung does not kill the whole run:
     a missing config, a network error, or a heavy modality whose binary payload overflows the arrow
-    loader's 2 GB chunk limit is skipped with a warning instead of raising. (`source` is the hyphen
-    `hf_repo`.) The schedule stage owns task ordering, so a flat concatenation here is enough.
+    loader's 2 GB chunk limit is recorded as a `SkippedRung` instead of raising. (`source` is the
+    hyphen `hf_repo`.) A rung that loads but yields ZERO tasks is also recorded: silence here is
+    how coverage gaps hide. `dataset_factory` is the offline-test seam (defaults to IcarusDataset).
     """
+    factory = dataset_factory or IcarusDataset
     entries: list[TaskEntry] = []
+    skipped: list[SkippedRung] = []
     for rung in rungs:
-        dataset: IcarusDataset | None = None
+        dataset = None
+        loaded = 0
         try:
-            dataset = IcarusDataset(
-                rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source
-            )
-            entries.extend(task_entry(dataset[index]) for index in range(len(dataset)))
+            dataset = factory(rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source)
+            for index in range(len(dataset)):
+                entries.append(task_entry(dataset[index]))
+                loaded += 1
+            if loaded == 0:
+                skipped.append(SkippedRung(rung=rung, error_type="EmptyRung", message="dataset loaded but yielded zero tasks"))
         except Exception as error:  # broad: many failure modes (arrow overflow, network, missing config); skip the rung and continue
             logger.warning("skipping rung %s: could not load it (%s: %s)", rung, type(error).__name__, error)
+            skipped.append(SkippedRung(rung=rung, error_type=type(error).__name__, message=str(error)[:300]))
             continue
         finally:
             if dataset is not None:
                 dataset.close()
                 gc.collect()
-    return entries
+    return PoolReport(entries=entries, skipped=skipped)
+
+
+def build_pool(source: str, rungs: list[int], n_samples: int, support_fraction: float, tasks_per_rung: int, shuffle: bool, seed: int) -> list[TaskEntry]:
+    """Back-compat wrapper: the entries only (the continuous trial's original contract)."""
+    return build_pool_report(source, rungs, n_samples, support_fraction, tasks_per_rung, shuffle, seed).entries
 
 
 def _coordinates(shape: tuple[int, ...]) -> list[tuple[float, ...]]:

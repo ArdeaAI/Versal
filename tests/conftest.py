@@ -100,6 +100,23 @@ def decomposable_task() -> Task:
 
 
 @pytest.fixture
+def xor_pairs_task() -> Task:
+    """4-bit input -> 2-bit output where out[g] = XOR(bit 2g, bit 2g+1). Not linearly separable in
+    either output, so a tiny evolve budget fails at depth 0; output_slices yields two
+    XOR-with-spectators subtasks the direct strategy solves, and the port-wired skeleton over the
+    frozen parts answers the parent exactly. The canonical REAL end-to-end decompose fixture."""
+    pairs: list[tuple[Field, Field]] = []
+    for value in range(16):
+        bits = [float((value >> bit) & 1) for bit in range(4)]
+        x = Field(torch.tensor(bits, dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
+        y_values = [float(int(bits[0]) != int(bits[1])), float(int(bits[2]) != int(bits[3]))]
+        y = Field(torch.tensor(y_values, dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
+        pairs.append((x, y))
+    meta = TaskMeta(rung=0, kind=TaskKind.MAP, name="xor_pairs", fixed_split=True)
+    return Task(meta=meta, support=list(pairs), query=list(pairs))
+
+
+@pytest.fixture
 def linear_genome() -> Genome:
     """2 inputs + bias wired straight to a linear output (no hidden node)."""
     nodes = {

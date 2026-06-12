@@ -35,6 +35,7 @@ def _orchestrator(tmp_path: Path, **overrides) -> Orchestrator:
         "budgets": {"depth0": 3, "depth1": 2, "depth2": 2},
         **overrides.pop("table", {}),
     }
+    config.update(overrides.pop("config_extra", {}))
     loop = build_loop(config)
     library = ModuleLibrary(tmp_path / "lib")
     loop.attach_library(library)
@@ -90,6 +91,7 @@ def test_stall_triggers_decompose_recurse_and_level2_admission(tmp_path: Path, d
     outcomes = [attempt.outcome for attempt in orchestrator.attempts]
     assert outcomes == ["evolved", "evolved", "decomposed"]  # two depth-1 accepts, then the wired parent
     assert orchestrator.counters["decompositions"] == 1
+    assert solution.key is not None
     entry = orchestrator.library.load(solution.key)
     assert entry.level == 3  # composition over level-2 sub-compositions
     assert len(orchestrator.library) == 3
@@ -179,7 +181,7 @@ def test_admission_detaches_live_refs(tmp_path: Path, xor_task: Task) -> None:
     """Admitted compositions must reference only library entries (live species are run-local)."""
     orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.0, "decompose": [], "budgets": {"depth0": 2}})
     solution = orchestrator.solve(xor_task)
-    assert solution is not None
+    assert solution is not None and solution.key is not None
     entry = orchestrator.library.load(solution.key)
     comp = comp_from_dict(entry.payload)
     assert all(ref.startswith("library:") for ref in comp.refs())
@@ -213,6 +215,58 @@ def test_orchestrated_checkpoint_writes_artifacts_only_for_new_library_entries(t
     assert hit is not None
     assert orchestrator.attempts[-1].outcome == "library_hit"
     assert [key for key in orchestrator.library.keys() if key not in before_hit] == []
+
+
+def test_real_end_to_end_decompose_with_direct_subsolves(tmp_path: Path, xor_pairs_task: Task) -> None:
+    """The REAL ladder, no stubs: depth-0 evolution fails fast, output_slices splits the task, the
+    DIRECT strategy solves both XOR halves, and the port-wired skeleton answers the parent."""
+    table = {
+        "evolve": ["composition", "direct"],
+        "accept_threshold": 0.95,
+        "floor": 0.0,
+        "stall_generations": 2,
+        "max_depth": 1,
+        "decompose": ["output_slices"],
+        "output_slices_n_groups": 2,
+        "budgets": {"depth0": 4, "depth1": 60},
+        "direct": {"pop_size": 24, "elitism": 2},
+    }
+    orchestrator = _orchestrator(tmp_path, table=table)
+    solution = orchestrator.solve(xor_pairs_task)
+    assert solution is not None, [a.to_dict() for a in orchestrator.attempts]
+    parent = orchestrator.attempts[-1]
+    assert parent.outcome == "decomposed" and parent.decompose_op == "output_slices"
+    assert parent.metric >= 0.95
+    sub_attempts = [a for a in orchestrator.attempts if a.depth == 1 and a.outcome == "evolved"]
+    assert len(sub_attempts) == 2 and all(a.strategy == "direct" for a in sub_attempts)
+    for attempt in sub_attempts:
+        assert attempt.library_key is not None
+        entry = orchestrator.library.load(attempt.library_key)
+        assert entry.entry_type == MODULE
+        assert entry.io["inputs"][0]["width"] == 4 and entry.io["output"]["width"] == 1  # real task shape
+    assert solution.key is not None
+    assert orchestrator.library.load(solution.key).level == 2  # composition over level-1 direct modules
+    assert orchestrator.counters["decompositions"] == 1
+    assert orchestrator.counters["decompose_subtask_failed"] == 0
+    assert orchestrator.counters["decompose_parent_failed"] == 0
+
+
+def test_decompose_forensics_record_where_it_died(tmp_path: Path, decomposable_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    calls: list[str] = []
+    _patch_run_task(orchestrator, _fake_run_task({"half_parity.out0": 1.0}, calls))  # out1 never clears
+    assert orchestrator.solve(decomposable_task) is None
+    assert orchestrator.counters["decompose_subtask_failed"] >= 1
+    failed = orchestrator.attempts[-1]
+    assert failed.failure_stage == "subtask:half_parity.out1" and failed.decompose_op == "output_slices"
+
+    orchestrator2 = _orchestrator(tmp_path / "second", table={"max_depth": 1})
+    calls2: list[str] = []
+    metrics = {"half_parity.out0": 1.0, "half_parity.out1": 1.0}  # parts solve, parent never does
+    _patch_run_task(orchestrator2, _fake_run_task(metrics, calls2))
+    assert orchestrator2.solve(decomposable_task) is None
+    assert orchestrator2.counters["decompose_parent_failed"] == 1
+    assert orchestrator2.attempts[-1].failure_stage == "parent_re_evolve"
 
 
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:

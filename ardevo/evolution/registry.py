@@ -122,6 +122,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     return Evolver(
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
+        parallel_assess=int(evolution.get("parallel_assess", 0)),
         seed=int(config.get("seed", 0)),
         init_op=init_op,
         selection_op=selection_op,

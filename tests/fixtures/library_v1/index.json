@@ -1,0 +1,94 @@
+[
+  {
+    "key": "c2_88ff427f98da",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.32021845249198955,
+    "stats": {
+      "use_count": 1895,
+      "max_attributed_fitness": 1.1869230782985687
+    }
+  },
+  {
+    "key": "c3_87a6e67226b1",
+    "entry_type": "composition",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.47655863382229824,
+    "stats": {
+      "use_count": 1963,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "m1_0190d087d483",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "stats": {
+      "use_count": 3424,
+      "max_attributed_fitness": 1.1869230782985687
+    }
+  },
+  {
+    "key": "m1_39414fd664d6",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.32021845249198955,
+    "stats": {
+      "use_count": 2355,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  }
+]

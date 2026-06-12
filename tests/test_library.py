@@ -93,6 +93,85 @@ def test_add_library_module_inlines_and_stays_decodable(tmp_path: Path, solving_
     assert out.shape == (2, 1)
 
 
+def test_dedupe_refreshes_ranking_metadata(tmp_path: Path, solving_genome: Genome) -> None:
+    """B7 regression: a re-admission is fresh evidence; ranking fields take the max."""
+    library = ModuleLibrary(tmp_path / "lib")
+    key = _module_entry(library, solving_genome, metric=0.5, robustness=0.1)
+    library.bump_stats(key, attributed_fitness=0.4)
+    again = library.add(
+        entry_type=MODULE,
+        payload=genome_to_dict(solving_genome),
+        io=_IO,
+        provenance={"task": "xor", "rung": 1, "accepted_metric": 0.9, "weight_robustness": 0.7},
+    )
+    assert again == key
+    ranked = library.query(min_metric=0.8)
+    assert [entry.key for entry in ranked] == [key]  # index metric refreshed to 0.9
+    entry = library.load(key)
+    assert entry.provenance["accepted_metric"] == 0.5  # original provenance preserved
+    assert len(entry.provenance["readmissions"]) == 1
+    assert entry.provenance["readmissions"][0]["accepted_metric"] == 0.9
+    assert entry.stats["use_count"] == 1  # stats untouched by readmission
+
+
+def test_retire_tombstones_but_never_deletes(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    key = _module_entry(library, solving_genome)
+    library.retire(key)
+    assert library.is_retired(key)
+    assert library.query(entry_type=MODULE) == []  # hidden from search
+    assert [entry.key for entry in library.query(entry_type=MODULE, include_retired=True)] == [key]
+    assert library.load(key).payload == genome_to_dict(solving_genome)  # refs never dangle
+    reopened = ModuleLibrary(tmp_path / "lib")
+    assert reopened.is_retired(key)  # persisted
+
+
+def test_width_tolerance_enables_near_miss_reuse(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    _module_entry(library, solving_genome)  # io is 2 -> 1
+    assert library.query(input_width=4) == []
+    assert len(library.query(input_width=4, width_tolerance=2)) == 1
+    assert library.query(input_width=4, output_width=4, width_tolerance=2) == []  # output off by 3 exceeds tolerance
+    assert len(library.query(input_width=4, output_width=2, width_tolerance=2)) == 1
+
+
+def test_v1_on_disk_format_still_loads_and_assembles() -> None:
+    """Format-compat pin: entries admitted by phase 3 (no retired/dependency keys) keep working."""
+    import torch
+
+    from ardevo.evolution.composition import AssemblyContext, assemble, comp_from_dict
+
+    library = ModuleLibrary(Path(__file__).parent / "fixtures" / "library_v1")
+    assert len(library) == 4
+    composition_entries = library.query(entry_type="composition")
+    assert composition_entries, "v1 compositions must be queryable with default flags"
+    top = library.load("c3_87a6e67226b1")
+    comp = comp_from_dict(top.payload)
+    width = top.io["inputs"][0]["width"]
+    ctx = AssemblyContext(bank_columns={top.io["inputs"][0]["signature"]: list(range(width))}, library=library)
+    net = assemble(comp, ctx, n_inputs=width)
+    out = net(torch.zeros(2, width))
+    assert out.shape == (2, top.io["output"]["width"])
+    for key in library.keys():
+        assert not library.is_retired(key)  # missing flag defaults to live
+
+
+def test_oversized_payload_warns_but_admits(tmp_path: Path, caplog) -> None:
+    import logging
+
+    library = ModuleLibrary(tmp_path / "lib")
+    payload = {"nodes": [], "connections": [], "macros": [], "blob": "x" * 2_100_000}
+    ardevo_logger = logging.getLogger("ardevo")  # propagate=False, so caplog needs a direct handler
+    ardevo_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="ardevo"):
+            key = library.add(entry_type=MODULE, payload=payload, io=_IO, provenance={})
+    finally:
+        ardevo_logger.removeHandler(caplog.handler)
+    assert key in library.keys()  # champions are never dropped for size
+    assert any("glue_rank_threshold" in record.message for record in caplog.records)
+
+
 def test_bump_stats_tracks_use(tmp_path: Path, solving_genome: Genome) -> None:
     library = ModuleLibrary(tmp_path / "lib")
     key = _module_entry(library, solving_genome)

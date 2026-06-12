@@ -18,10 +18,10 @@ from ardevo import checkpoint, results
 from ardevo.evolution.composition import comp_from_dict
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_from_dict, state_to_dict
-from ardevo.evolution.multitask import TaskEntry, build_pool
+from ardevo.evolution.multitask import TaskEntry, build_pool_report
 from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
+from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
@@ -50,7 +50,7 @@ class OrchestratedTrial(Proctor):
         self.rungs = list(range(1, 19)) if rungs_cfg == "all" else [int(rung) for rung in rungs_cfg]
         self.tasks_to_run = int(table.get("tasks", 20))
 
-        self.pool: list[TaskEntry] = build_pool(
+        report = build_pool_report(
             source=config["dataset"],
             rungs=self.rungs,
             n_samples=int(config["n_samples"]),
@@ -59,8 +59,13 @@ class OrchestratedTrial(Proctor):
             shuffle=bool(schedule_cfg.get("shuffle", True)),
             seed=int(config.get("seed", 0)),
         )
+        self.pool: list[TaskEntry] = report.entries
+        self.skipped_rungs = report.skipped
+        for skipped in self.skipped_rungs:
+            console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
         if not self.pool:
-            raise RuntimeError(f"no tasks found for rungs {self.rungs} in {config['dataset']!r}")
+            reasons = "; ".join(f"rung {s.rung}: {s.error_type}" for s in self.skipped_rungs) or "no rungs configured"
+            raise RuntimeError(f"no tasks found for rungs {self.rungs} in {config['dataset']!r} ({reasons})")
 
         loop = build_loop(config)
         if not isinstance(loop, HierarchicalLoop):
@@ -68,6 +73,11 @@ class OrchestratedTrial(Proctor):
         self.loop = loop
         self.library = ModuleLibrary(table.get("library_dir", "library"))
         self.loop.attach_library(self.library)
+        # Macro-bearing genomes resolve their frozen inners through the LIVE library, everywhere
+        # decode is reachable in this process (direct strategy, quick evals, evolver internals).
+        from ardevo.substrate import set_macro_resolver
+
+        set_macro_resolver(macro_resolver(self.library))
         self.scheduler = build_schedule(schedule_cfg)
         self.resume_dir = config.get("resume")
         self.run_dir = Path(results.DEFAULT_ROOT)
@@ -88,7 +98,7 @@ class OrchestratedTrial(Proctor):
         orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
         orchestrator.attempts = attempts
         if counters:
-            orchestrator.counters = counters
+            orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
 
         while task_cursor < self.tasks_to_run:
             index = self.scheduler.next_index(self.pool, state.rng)
@@ -132,6 +142,7 @@ class OrchestratedTrial(Proctor):
         for series, value in orchestrator.counters.items():
             self.log_scalar("Orchestrator", series, value, task_cursor)
         self.log_scalar("Orchestrator", "library_size", len(self.library), task_cursor)
+        self.log_scalar("Orchestrator", "skipped_rungs", len(self.skipped_rungs), task_cursor)
         self.log_scalar("Orchestrator", "repaired_refs", state.repaired_refs, task_cursor)
         self.log_scalar("Modules", "pool_size", len(state.modules), task_cursor)
         if state.modules:
@@ -191,6 +202,7 @@ class OrchestratedTrial(Proctor):
                 "attempts": attempts_to_dicts(orchestrator.attempts),
             },
             "library": {"size": len(self.library), "keys": self.library.keys(), "path": str(self.library.root), "new_keys": new_library_keys, "net_key": net_key},
+            "schedule_coverage": {"rungs": self.rungs, "skipped": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs]},
             "modules": {
                 "pool_size": len(state.modules),
                 "species": len(state.species_champions),

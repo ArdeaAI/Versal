@@ -15,7 +15,7 @@ import torch
 from ardevo.dataset.icarus import Axis, BatchedField, EncodedTask, FieldDescriptor, Level0Encoder, Task, ValueType, model_output_features, query_loader, support_loader
 from ardevo.evaluation import evaluate
 from ardevo.evolution.genome import Genome
-from ardevo.substrate import RecurrentGraphNet, decode_recurrent
+from ardevo.substrate import SubstrateModule, decode_recurrent
 
 _CLASS_TYPES = (ValueType.CATEGORICAL, ValueType.ORDINAL)
 
@@ -128,10 +128,10 @@ class TemporalTaskAdapter:
     n_outputs: int
     mode: str
 
-    def decode(self, genome: Genome) -> RecurrentGraphNet:
+    def decode(self, genome: Genome) -> SubstrateModule:
         return decode_recurrent(genome, self.n_inputs, self.n_outputs, self.mode)
 
-    def evaluate(self, module: RecurrentGraphNet) -> dict[str, float]:
+    def evaluate(self, module: SubstrateModule) -> dict[str, float]:
         return evaluate(module, self.encoded, self.encoder)
 
 

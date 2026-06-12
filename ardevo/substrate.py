@@ -14,7 +14,7 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from ardevo.evolution.genome import Genome, topological_order
+from ardevo.evolution.genome import Genome, macro_implied_edges, topological_order
 
 _ACTIVATIONS: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "tanh": torch.tanh,
@@ -26,6 +26,19 @@ _ACTIVATIONS: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
 
 def activation_names() -> list[str]:
     return list(_ACTIVATIONS)
+
+
+# Macro nodes resolve their inner network at decode time. The resolver maps a library key to the
+# inner Genome. A module-level default keeps the six decode call sites signature-stable; explicit
+# `macro_resolver=` arguments override it (the hierarchical/orchestrated paths pass theirs).
+MacroResolver = Callable[[str], Genome]
+_DEFAULT_MACRO_RESOLVER: MacroResolver | None = None
+_MAX_MACRO_DEPTH = 4
+
+
+def set_macro_resolver(resolver: MacroResolver | None) -> None:
+    global _DEFAULT_MACRO_RESOLVER
+    _DEFAULT_MACRO_RESOLVER = resolver
 
 
 class SubstrateModule(nn.Module):
@@ -53,7 +66,7 @@ class SubstrateModule(nn.Module):
 class GraphNet(SubstrateModule):
     """Executable form of a genome: a topologically-layered weighted DAG evaluated level by level."""
 
-    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int) -> None:
+    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None, _macro_depth: int = 0) -> None:
         super().__init__()
         input_ids, bias_ids, output_ids = genome.input_ids, genome.bias_ids, genome.output_ids
         if len(input_ids) != n_inputs:
@@ -86,6 +99,11 @@ class GraphNet(SubstrateModule):
         self.input_pos: torch.Tensor = torch.tensor([position[i] for i in input_ids], dtype=torch.long)
         self.bias_pos: torch.Tensor = torch.tensor([position[i] for i in bias_ids], dtype=torch.long)
         self.output_pos: torch.Tensor = torch.tensor([position[i] for i in output_ids], dtype=torch.long)
+
+        # Macro-implied edges (input_i -> output_j) join the depth computation so all of a macro's
+        # outputs land at 1 + max(input depths); they carry no weight-matrix entries.
+        for source_id, target_id in macro_implied_edges(genome):
+            incoming[position[target_id]].append(position[source_id])
 
         # Longest-path depth per node: inputs/bias are depth 0 (set directly); every other node is one
         # past its deepest enabled predecessor (no intra-level edges can exist, so a level only reads
@@ -140,6 +158,38 @@ class GraphNet(SubstrateModule):
             self._levels.append((torch.tensor(level_positions, dtype=torch.long), activation_groups))
             self._product_entries.append(products)
 
+        # Macro entries per level: (local output columns in macro-gene order, ordered input
+        # positions, frozen inner module). Inner output order convention: the inner genome's sorted
+        # output ids correspond positionally to macro.output_node_ids.
+        self._macro_inner = nn.ModuleList()
+        self._macro_entries: list[list[tuple[torch.Tensor, torch.Tensor, "GraphNet"]]] = [[] for _ in self._levels]
+        if genome.macros:
+            resolver = macro_resolver or _DEFAULT_MACRO_RESOLVER
+            if resolver is None:
+                raise ValueError("genome has macro nodes but no macro resolver is configured (set_macro_resolver or pass macro_resolver=)")
+            if _macro_depth >= _MAX_MACRO_DEPTH:
+                raise ValueError(f"macro nesting exceeds depth {_MAX_MACRO_DEPTH}")
+            level_index_of = {int(level_positions[i]): (level, i) for level, (level_positions, _groups) in enumerate(self._levels) for i in range(len(level_positions))}
+            for macro in genome.macros:
+                inner_genome = resolver(macro.ref.removeprefix("library:"))
+                if len(inner_genome.input_ids) != len(macro.input_node_ids) or len(inner_genome.output_ids) != len(macro.output_node_ids):
+                    raise ValueError(
+                        f"macro {macro.ref} shape mismatch: inner {len(inner_genome.input_ids)}->{len(inner_genome.output_ids)}, "
+                        f"placement {len(macro.input_node_ids)}->{len(macro.output_node_ids)}"
+                    )
+                inner = GraphNet(inner_genome, len(inner_genome.input_ids), len(inner_genome.output_ids), macro_resolver=resolver, _macro_depth=_macro_depth + 1)
+                if not macro.trainable:
+                    for parameter in inner.parameters():
+                        parameter.requires_grad_(False)
+                self._macro_inner.append(inner)
+                levels_hit = {level_index_of[position[node_id]][0] for node_id in macro.output_node_ids}
+                if len(levels_hit) != 1:  # pragma: no cover - the implied edges force one level
+                    raise ValueError(f"macro {macro.ref} outputs span levels {levels_hit}")
+                level = levels_hit.pop()
+                local_indices = torch.tensor([level_index_of[position[node_id]][1] for node_id in macro.output_node_ids], dtype=torch.long)
+                input_positions = torch.tensor([position[node_id] for node_id in macro.input_node_ids], dtype=torch.long)
+                self._macro_entries[level].append((local_indices, input_positions, inner))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
         values = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
@@ -149,12 +199,14 @@ class GraphNet(SubstrateModule):
             values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x.dtype, device=x.device))
 
         masked = self.weights * self.mask
-        for (level_positions, activation_groups), products in zip(self._levels, self._product_entries):
+        for (level_positions, activation_groups), products, macros in zip(self._levels, self._product_entries, self._macro_entries):
             pre_activation = values @ masked[:, level_positions]
             for local_index, node_position, source_positions in products:
                 edge_weights = masked.index_select(0, source_positions).index_select(1, node_position).squeeze(1)
                 factors = values.index_select(1, source_positions) * edge_weights
                 pre_activation = pre_activation.index_copy(1, local_index, factors.prod(dim=1, keepdim=True))
+            for local_indices, input_positions, inner in macros:
+                pre_activation = pre_activation.index_copy(1, local_indices, inner(values.index_select(1, input_positions)))
             activated = pre_activation
             for activation, local_indices in activation_groups:
                 activated = activated.index_copy(1, local_indices, activation(activated.index_select(1, local_indices)))
@@ -172,9 +224,9 @@ class GraphNet(SubstrateModule):
         return {(in_id, out_id, False): float(detached[source, target]) for in_id, out_id, source, target in self._edge_positions}
 
     def core(self) -> tuple["GraphNet | None", "torch.Tensor | None"]:
-        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time and product
-        # entries change the math; both fall back to the sequential path).
-        if type(self) is GraphNet and not any(self._product_entries):
+        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time; product and
+        # macro entries change the math; all fall back to the sequential path).
+        if type(self) is GraphNet and not any(self._product_entries) and not any(self._macro_entries):
             return self, None
         return None, None
 
@@ -190,8 +242,8 @@ class RecurrentGraphNet(GraphNet):
     from the sequence each step.
     """
 
-    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last") -> None:
-        super().__init__(genome, n_inputs, n_outputs)
+    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last", *, macro_resolver: MacroResolver | None = None) -> None:
+        super().__init__(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
         if mode not in ("last", "all"):
             raise ValueError(f"unknown recurrent output mode {mode!r}; expected 'last' or 'all'")
         self.mode = mode
@@ -248,7 +300,7 @@ class RecurrentGraphNet(GraphNet):
             if self.bias_pos.numel():
                 values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x.dtype, device=x.device))
             recurrent_in = previous @ recurrent_masked
-            for (level_positions, activation_groups), products in zip(self._levels, self._recurrent_products):
+            for (level_positions, activation_groups), products, macros in zip(self._levels, self._recurrent_products, self._macro_entries):
                 pre_activation = values @ masked[:, level_positions] + recurrent_in.index_select(1, level_positions)
                 for local_index, node_position, forward_sources, recurrent_sources in products:
                     factors = []
@@ -260,6 +312,8 @@ class RecurrentGraphNet(GraphNet):
                         factors.append(previous.index_select(1, recurrent_sources) * recurrent_edge_weights)
                     combined = torch.cat(factors, dim=1).prod(dim=1, keepdim=True)
                     pre_activation = pre_activation.index_copy(1, local_index, combined)
+                for local_indices, input_positions, inner in macros:
+                    pre_activation = pre_activation.index_copy(1, local_indices, inner(values.index_select(1, input_positions)))
                 activated = pre_activation
                 for activation, local_indices in activation_groups:
                     activated = activated.index_copy(1, local_indices, activation(activated.index_select(1, local_indices)))
@@ -281,11 +335,11 @@ class RecurrentGraphNet(GraphNet):
         return exported
 
 
-def decode(genome: Genome, n_inputs: int, n_outputs: int) -> GraphNet:
+def decode(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
     """Build the torch module for a genome."""
-    return GraphNet(genome, n_inputs, n_outputs)
+    return GraphNet(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
 
 
-def decode_recurrent(genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last") -> RecurrentGraphNet:
+def decode_recurrent(genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last", *, macro_resolver: MacroResolver | None = None) -> RecurrentGraphNet:
     """Build the stepped (time-axis) torch module for a genome."""
-    return RecurrentGraphNet(genome, n_inputs, n_outputs, mode)
+    return RecurrentGraphNet(genome, n_inputs, n_outputs, mode, macro_resolver=macro_resolver)

@@ -49,6 +49,92 @@ def test_hybrid_is_superset_of_standard(xor_adapter: TaskAdapter, solving_genome
         assert metrics[key] == trained[key]
 
 
+def test_batched_samples_parity_with_serial(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
+    """T2: the stacked fast path must reproduce the serial fill/restore numbers."""
+    module = xor_adapter.decode(solving_genome)
+    fast = weight_samples(solving_genome, module, xor_adapter, batched_samples=True)
+    slow = weight_samples(solving_genome, xor_adapter.decode(solving_genome), xor_adapter, batched_samples=False)
+    for key in ("support_accuracy", "query_accuracy", "mean_sample_accuracy", "max_sample_accuracy", "min_sample_accuracy", "best_sample_weight"):
+        assert fast[key] == slow[key], key
+    for key in ("support_loss", "query_loss", "mean_sample_loss", "weight_robustness"):
+        assert abs(fast[key] - slow[key]) < 1e-6, key
+
+
+def test_batched_samples_leave_module_weights_untouched(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
+    module = xor_adapter.decode(solving_genome)
+    before = module.export_weights()
+    weight_samples(solving_genome, module, xor_adapter, batched_samples=True)
+    assert module.export_weights() == before
+
+
+def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
+    """The HeadSlicedNet (multitask) path: column selection must survive the stacked forward."""
+    from dataclasses import dataclass
+
+    import torch
+
+    from ardevo.dataset.icarus import EncodedTask, Level0Encoder
+    from ardevo.evaluation import evaluate
+    from ardevo.evolution.genome import ConnectionGene, NodeGene, NodeKind
+    from ardevo.evolution.multitask import HeadSlicedNet
+    from ardevo.substrate import decode
+
+    two_headed = solving_genome.clone()
+    two_headed.nodes[6] = NodeGene(6, NodeKind.OUTPUT, "identity")
+    two_headed.connections = list(two_headed.connections) + [ConnectionGene(2, 6, 0.3, True, 99)]
+
+    @dataclass
+    class _HeadAdapter:
+        encoded: EncodedTask
+        encoder: Level0Encoder
+
+        def evaluate(self, module) -> dict[str, float]:
+            return evaluate(module, self.encoded, self.encoder)
+
+    adapter = _HeadAdapter(xor_adapter.encoded, xor_adapter.encoder)
+    fast_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    slow_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    fast = weight_samples(two_headed, fast_module, adapter, batched_samples=True)
+    slow = weight_samples(two_headed, slow_module, adapter, batched_samples=False)
+    for key in ("mean_sample_accuracy", "max_sample_accuracy", "best_sample_weight"):
+        assert fast[key] == slow[key], key
+    assert abs(fast["weight_robustness"] - slow["weight_robustness"]) < 1e-6
+
+
+def test_non_batchable_modules_fall_back_to_serial(xor_adapter: TaskAdapter) -> None:
+    from tests.test_aggregation import _product_xor_genome
+
+    genome = _product_xor_genome()
+    module = xor_adapter.decode(genome)  # product node: core() is (None, None)
+    metrics = weight_samples(genome, module, xor_adapter, batched_samples=True)
+    assert _ROBUSTNESS_KEYS <= set(metrics)
+
+
+def test_frozen_parameters_are_never_filled_during_sampling(tmp_path, xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
+    """Robustness measures what evolution/training CONTROLS: frozen library inners stay intact."""
+    from ardevo.evolution.composition import AssemblyContext, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, assemble
+    from ardevo.evolution.genome import genome_to_dict
+    from ardevo.library import MODULE, ModuleLibrary
+
+    library = ModuleLibrary(tmp_path / "lib")
+    io = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=io, provenance={})
+    nodes = {
+        0: CompNodeGene(0, CompNodeKind.INPUT, "BINARY|K", 0, 2),
+        1: CompNodeGene(1, CompNodeKind.MODULE, f"library:{key}", 2, 1),
+        2: CompNodeGene(2, CompNodeKind.OUTPUT, "head", 1, 0),
+    }
+    comp = CompositionGenome(nodes=nodes, edges=[CompEdgeGene(0, 1, True, 0, (1.0, 0.0, 0.0, 1.0)), CompEdgeGene(1, 2, True, 1, (1.0,))])
+    net = assemble(comp, AssemblyContext(bank_columns={"BINARY|K": [0, 1]}, library=library), n_inputs=2)
+    inner = net.inner_modules[f"library:{key}"]
+
+    observed: list[float] = []
+    inner.register_forward_pre_hook(lambda module, args: observed.append(float(module.weights.detach()[0, 3])))
+    weight_samples(comp, net, xor_adapter, batched_samples=True)  # ComposedNet falls back to serial
+    original = float(solving_genome.connections[0].weight)
+    assert observed and all(value == original for value in observed)  # inner never filled mid-sampling
+
+
 def _config(evaluate_kind: str | None) -> dict:
     from typing import Any
 

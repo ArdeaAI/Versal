@@ -64,11 +64,11 @@ def support_loss(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
     return loss_fn(raw, target, descriptor, mask)
 
 
-def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: DecodingEncoder) -> tuple[float, float]:
-    """Accuracy (via decode) and dispatched loss for one encoded (input, target) split."""
-    x, _descriptor = encoded_input
-    target, mask, descriptor = encoded_target
-    raw = as_logits(module(x), descriptor, target_positions(target))
+def split_metrics_from_raw(raw: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None, descriptor, encoder: DecodingEncoder) -> tuple[float, float]:
+    """Accuracy (via decode) and dispatched loss from an ALREADY-COMPUTED logits tensor.
+
+    The single source of the metric math: the per-candidate path and the population/sample-batched
+    paths all delegate here so their numbers can never drift apart."""
     loss = loss_fn(raw, target, descriptor, mask)
     if descriptor.value_type is ValueType.CONTINUOUS:
         # Compare in the same (normalized) space the loss uses: within-tolerance fraction, not exact match.
@@ -83,6 +83,14 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
     else:
         accuracy = correct.float().mean()
     return float(accuracy), float(loss)
+
+
+def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: DecodingEncoder) -> tuple[float, float]:
+    """Accuracy (via decode) and dispatched loss for one encoded (input, target) split."""
+    x, _descriptor = encoded_input
+    target, mask, descriptor = encoded_target
+    raw = as_logits(module(x), descriptor, target_positions(target))
+    return split_metrics_from_raw(raw, target, mask, descriptor, encoder)
 
 
 def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder) -> dict[str, float]:

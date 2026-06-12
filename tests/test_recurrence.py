@@ -138,6 +138,49 @@ def test_tracker_distinguishes_recurrent_and_accepts_legacy() -> None:
     assert legacy.innovation(1, 2) == 0  # 3-element entries load as forward edges
 
 
+def test_set_connection_keeps_forward_and_recurrent_pairs_distinct() -> None:
+    """B1 regression: a forward and a recurrent gene on the SAME node pair are different genes."""
+    from dataclasses import replace as gene_replace
+
+    from ardevo.evolution.genome import set_connection
+
+    genome = _accumulator_genome()
+    forward = ConnectionGene(3, 3, 0.5, True, 9, recurrent=False)
+    genome.connections.append(forward)  # now both a recurrent AND a forward self-edge on node 3
+    recurrent_gene = next(c for c in genome.connections if c.recurrent)
+    set_connection(genome, gene_replace(recurrent_gene, enabled=False))
+    by_flag = {(c.in_id, c.out_id, c.recurrent): c for c in genome.connections}
+    assert by_flag[(3, 3, True)].enabled is False  # the recurrent gene was disabled
+    assert by_flag[(3, 3, False)].enabled is True  # the forward gene was NOT clobbered
+
+
+def test_add_node_split_preserves_recurrence() -> None:
+    """B2 regression: splitting a recurrent self-loop must keep the delay on the incoming half and
+    never manufacture a forward cycle for make_acyclic to silently destroy."""
+    genome = _accumulator_genome()
+    ctx = MutationContext(innovations=InnovationTracker.from_genomes([genome]), activations=["identity"], default_activation="identity")
+    rng = random.Random(4)
+    from ardevo.evolution.mutation import add_node
+
+    child = genome
+    for _ in range(50):  # rng.choice must eventually pick the recurrent self-loop
+        child = add_node(genome, ctx, rng=rng, prob=1.0)
+        if len(child.nodes) > len(genome.nodes) and any(c.recurrent and c.enabled and c.in_id != c.out_id for c in child.connections):
+            break
+    else:
+        raise AssertionError("add_node never split the recurrent self-loop")
+
+    repaired = make_acyclic(child)
+    assert {(c.in_id, c.out_id, c.recurrent, c.enabled) for c in repaired.connections} == {(c.in_id, c.out_id, c.recurrent, c.enabled) for c in child.connections}
+    new_id = max(child.nodes)
+    split_in = next(c for c in child.connections if c.out_id == new_id)
+    split_out = next(c for c in child.connections if c.in_id == new_id)
+    assert split_in.recurrent is True and split_out.recurrent is False  # delay rides the incoming half
+    # With identity activations the split accumulator still sums the sequence exactly.
+    module = decode_recurrent(child, n_inputs=1, n_outputs=1, mode="last")
+    assert torch.allclose(module(_sequence([1.0, 2.0, 3.0, 4.0])), torch.tensor([[10.0]]))
+
+
 def test_add_recurrent_connection_adds_one_self_loop() -> None:
     genome = _accumulator_genome()
     genome.connections = [c for c in genome.connections if not c.recurrent]

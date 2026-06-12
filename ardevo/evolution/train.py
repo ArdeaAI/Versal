@@ -92,62 +92,86 @@ def gradient_batched(
     device: str = "auto",
     max_padded_nodes: int = 1024,
 ) -> list[tuple[Genome, SubstrateModule]]:
-    """Train every candidate at once via `BatchedGraphNet`; falls back to the sequential `gradient`
-    (identical params, identical numerics) when a candidate is not batchable (recurrent/product/
-    composed substrates) or the padded size would blow memory."""
+    """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
+    params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
+    product/macro/composed substrates, oversized padding, mismatched heads) no longer force the
+    WHOLE generation onto the sequential path; `fallback` reports the serial fraction."""
     from ardevo.substrate_batched import BatchedGraphNet
 
-    cores = [module.core() for module in modules]
-    head_columns = [columns for _net, columns in cores]
-    batchable = (
-        steps > 0
-        and all(net is not None for net, _columns in cores)
-        and len({(int(net.input_pos.numel()), int(net.output_pos.numel())) for net, _ in cores if net is not None}) == 1
-        and max((net.n for net, _ in cores if net is not None), default=0) <= max_padded_nodes
-        and all((a is None and b is None) or (a is not None and b is not None and bool(torch.equal(a, b))) for a, b in zip(head_columns, head_columns[1:]))
-    )
-    if not batchable:
-        last_batch_stats.update({"fallback": 1.0, "train_seconds": 0.0, "n_max": 0.0, "pad_efficiency": 0.0})
-        started = time.perf_counter()
-        results = [gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay) for genome, module in zip(genomes, modules)]
-        last_batch_stats["train_seconds"] = time.perf_counter() - started
-        return results
-
-    nets = [net for net, _columns in cores if net is not None]
     started = time.perf_counter()
-    resolved = torch.device("mps") if device == "auto" and torch.backends.mps.is_available() else torch.device(device if device != "auto" else "cpu")
-    batched = BatchedGraphNet(nets, device=resolved)
-    x, _descriptor = encoded.support_input
-    target, mask, descriptor = encoded.support_target
-    x_device = x.to(resolved)
-    target_device, mask_device = target.to(resolved), (mask.to(resolved) if mask is not None else None)
-    columns = head_columns[0].to(resolved) if head_columns[0] is not None else None
-    population = len(nets)
+    cores = [module.core() for module in modules]
+    batch_indices: list[int] = []
+    serial_indices: list[int] = []
+    reference: tuple[tuple[int, int], torch.Tensor | None] | None = None
+    for index, (net, columns) in enumerate(cores):
+        if steps <= 0 or net is None or net.n > max_padded_nodes:
+            serial_indices.append(index)
+            continue
+        signature = (int(net.input_pos.numel()), int(net.output_pos.numel()))
+        if reference is None:
+            reference = (signature, columns)
+        ref_signature, ref_columns = reference
+        same_columns = (columns is None and ref_columns is None) or (columns is not None and ref_columns is not None and bool(torch.equal(columns, ref_columns)))
+        if signature == ref_signature and same_columns:
+            batch_indices.append(index)
+        else:
+            serial_indices.append(index)
+    if len(batch_indices) < 2:  # padding a single candidate buys nothing over the plain path
+        serial_indices = sorted(serial_indices + batch_indices)
+        batch_indices = []
 
-    if batched.mask.any():
-        optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay)
-        for _ in range(steps):
-            optimizer.zero_grad()
-            out = batched(x_device)  # [P, B, n_out]
-            if columns is not None:
-                out = out.index_select(2, columns)
-            folded = out.reshape(population * x_device.shape[0], -1)
-            raw = as_logits(folded, descriptor, target_positions(target_device))
-            target_repeated = target_device.repeat(population, *([1] * (target_device.dim() - 1)))
-            mask_repeated = mask_device.repeat(population, *([1] * (mask_device.dim() - 1))) if mask_device is not None else None
-            # The P multiplier turns the folded MEAN into the SUM of per-candidate losses: each
-            # candidate's gradient (and Adam update) is exactly what the sequential path computes.
-            loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
-            if not loss.requires_grad:
-                break
-            loss.backward()
-            optimizer.step()
-        batched.unstack_into(nets)
+    results: list[tuple[Genome, SubstrateModule] | None] = [None] * len(modules)
+    for index in serial_indices:
+        results[index] = gradient(genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
 
-    last_batch_stats.update({"fallback": 0.0, "train_seconds": time.perf_counter() - started, "n_max": float(batched.n_max), "pad_efficiency": batched.pad_efficiency()})
-    if writeback:
-        return [(_writeback(genome, module), module) for genome, module in zip(genomes, modules)]
-    return list(zip(genomes, modules))
+    n_max = 0.0
+    pad_efficiency = 0.0
+    if batch_indices:
+        nets = [net for index in batch_indices if (net := cores[index][0]) is not None]
+        resolved = torch.device("mps") if device == "auto" and torch.backends.mps.is_available() else torch.device(device if device != "auto" else "cpu")
+        batched = BatchedGraphNet(nets, device=resolved)
+        x, _descriptor = encoded.support_input
+        target, mask, descriptor = encoded.support_target
+        x_device = x.to(resolved)
+        target_device, mask_device = target.to(resolved), (mask.to(resolved) if mask is not None else None)
+        ref_head = cores[batch_indices[0]][1]
+        columns = ref_head.to(resolved) if ref_head is not None else None
+        population = len(nets)
+
+        if batched.mask.any():
+            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay)
+            for _ in range(steps):
+                optimizer.zero_grad()
+                out = batched(x_device)  # [P, B, n_out]
+                if columns is not None:
+                    out = out.index_select(2, columns)
+                folded = out.reshape(population * x_device.shape[0], -1)
+                raw = as_logits(folded, descriptor, target_positions(target_device))
+                target_repeated = target_device.repeat(population, *([1] * (target_device.dim() - 1)))
+                mask_repeated = mask_device.repeat(population, *([1] * (mask_device.dim() - 1))) if mask_device is not None else None
+                # The P multiplier turns the folded MEAN into the SUM of per-candidate losses: each
+                # candidate's gradient (and Adam update) is exactly what the sequential path computes.
+                loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
+                if not loss.requires_grad:
+                    break
+                loss.backward()
+                optimizer.step()
+            batched.unstack_into(nets)
+        n_max = float(batched.n_max)
+        pad_efficiency = batched.pad_efficiency()
+        for index in batch_indices:
+            tuned = _writeback(genomes[index], modules[index]) if writeback else genomes[index]
+            results[index] = (tuned, modules[index])
+
+    last_batch_stats.update(
+        {
+            "fallback": len(serial_indices) / max(len(modules), 1),
+            "train_seconds": time.perf_counter() - started,
+            "n_max": n_max,
+            "pad_efficiency": pad_efficiency,
+        }
+    )
+    return [item for item in results if item is not None]
 
 
 def _writeback(genome: Genome, module: SubstrateModule) -> Genome:

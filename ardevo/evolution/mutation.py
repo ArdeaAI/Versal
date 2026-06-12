@@ -10,12 +10,13 @@ import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from ardevo.evolution.genome import (
     ConnectionGene,
     Genome,
     InnovationTracker,
+    MacroGene,
     NodeGene,
     NodeKind,
     coordinate_distance,
@@ -24,6 +25,9 @@ from ardevo.evolution.genome import (
 )
 from ardevo.evolution.registry import Registry
 
+if TYPE_CHECKING:
+    from ardevo.library import ModuleLibrary
+
 Mutator = Callable[..., Genome]
 
 MUTATION: Registry[Mutator] = Registry("mutation")
@@ -31,11 +35,16 @@ MUTATION: Registry[Mutator] = Registry("mutation")
 
 @dataclass
 class MutationContext:
-    """Per-run state mutators share: id/innovation allocation and the activation palette."""
+    """Per-run state mutators share: id/innovation allocation and the activation palette.
+
+    `library` is the LIVE library handle when the owning loop has one (the hierarchical loop passes
+    it so library-reading mutators see entries admitted mid-run); the flat path leaves it None and
+    those mutators fall back to a by-path cached snapshot."""
 
     innovations: InnovationTracker
     activations: list[str]
     default_activation: str
+    library: "ModuleLibrary | None" = None
 
 
 @dataclass
@@ -63,7 +72,7 @@ def add_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         return genome
     child = genome.clone()
     sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
-    targets = [*child.hidden_ids, *child.output_ids]
+    targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     rng.shuffle(sources)
     rng.shuffle(targets)
     for source in sources:
@@ -85,11 +94,14 @@ def add_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: 
         return genome
     child = genome.clone()
     target = rng.choice(enabled)
-    # NEAT split: disable the edge, route in -> new (weight 1) -> out (old weight).
+    # NEAT split: disable the edge, route in -> new (weight 1) -> out (old weight). Splitting a
+    # RECURRENT edge keeps the time delay on the INCOMING half: `in -(recurrent)-> new -(forward)-> out`
+    # delivers in@t-1 to out@t exactly like the original gene, and creates no forward cycle even for
+    # self-loops (the only forward edge is new -> out).
     set_connection(child, replace(target, enabled=False))
     new_id = ctx.innovations.new_node_id()
     child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, ctx.default_activation)
-    child.connections.append(ConnectionGene(target.in_id, new_id, 1.0, True, ctx.innovations.innovation(target.in_id, new_id)))
+    child.connections.append(ConnectionGene(target.in_id, new_id, 1.0, True, ctx.innovations.innovation(target.in_id, new_id, target.recurrent), recurrent=target.recurrent))
     child.connections.append(ConnectionGene(new_id, target.out_id, target.weight, True, ctx.innovations.innovation(new_id, target.out_id)))
     return child
 
@@ -141,7 +153,7 @@ def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
         child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
     for output in outputs:
         child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
-    hidden_targets = [node_id for node_id in child.hidden_ids if node_id != new_id]
+    hidden_targets = [node_id for node_id in child.hidden_ids if node_id != new_id and node_id not in child.macro_output_ids]
     rng.shuffle(hidden_targets)
     added = 0
     for target in hidden_targets:
@@ -156,8 +168,9 @@ def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
 
 @MUTATION.register("mutate_activation")
 def mutate_activation(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
-    # Hidden nodes only: outputs stay linear readouts so they emit raw logits.
-    candidates = genome.hidden_ids
+    # Hidden nodes only: outputs stay linear readouts so they emit raw logits. Macro output stubs
+    # are excluded: their values come from the inner network and must pass through unchanged.
+    candidates = [node_id for node_id in genome.hidden_ids if node_id not in genome.macro_output_ids]
     if rng.random() >= prob or not candidates:
         return genome
     child = genome.clone()
@@ -178,11 +191,15 @@ def add_recurrent_connection(genome: Genome, ctx: MutationContext, *, rng: rando
     if not stateful:
         return genome
     child = genome.clone()
-    if rng.random() < self_loop_bias and child.hidden_ids:
-        source = target = rng.choice(child.hidden_ids)
+    stateful_targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
+    loop_candidates = [node_id for node_id in child.hidden_ids if node_id not in child.macro_output_ids]
+    if not stateful_targets:
+        return genome
+    if rng.random() < self_loop_bias and loop_candidates:
+        source = target = rng.choice(loop_candidates)
     else:
         source = rng.choice(stateful)
-        target = rng.choice([*child.hidden_ids, *child.output_ids])
+        target = rng.choice(stateful_targets)
     if child.has_connection(source, target, recurrent=True):
         return child
     innovation = ctx.innovations.innovation(source, target, recurrent=True)
@@ -203,7 +220,11 @@ def mutate_aggregation(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     fan_in: dict[int, int] = {}
     for conn in genome.enabled_connections():
         fan_in[conn.out_id] = fan_in.get(conn.out_id, 0) + 1
-    candidates = [node_id for node_id in genome.hidden_ids if genome.nodes[node_id].aggregation == "product" or 2 <= fan_in.get(node_id, 0) <= max_fan_in]
+    candidates = [
+        node_id
+        for node_id in genome.hidden_ids
+        if node_id not in genome.macro_output_ids and (genome.nodes[node_id].aggregation == "product" or 2 <= fan_in.get(node_id, 0) <= max_fan_in)
+    ]
     if not candidates:
         return genome
     child = genome.clone()
@@ -257,7 +278,8 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     from ardevo.library import MODULE as MODULE_ENTRY
     from ardevo.library import ModuleLibrary
 
-    library = _cached_library(path)
+    # The live handle sees entries admitted MID-RUN; the by-path cache is the flat-config fallback.
+    library = ctx.library if ctx.library is not None else _cached_library(path)
     assert isinstance(library, ModuleLibrary)
     entries = library.query(entry_type=MODULE_ENTRY)
     if not entries:
@@ -286,6 +308,16 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     for conn in source.connections:
         in_id, out_id = id_map[conn.in_id], id_map[conn.out_id]
         child.connections.append(ConnectionGene(in_id, out_id, conn.weight, conn.enabled, ctx.innovations.innovation(in_id, out_id, conn.recurrent), conn.recurrent))
+    for macro in source.macros:
+        child.macros.append(
+            MacroGene(
+                ref=macro.ref,
+                input_node_ids=tuple(id_map[node_id] for node_id in macro.input_node_ids),
+                output_node_ids=tuple(id_map[node_id] for node_id in macro.output_node_ids),
+                innovation=ctx.innovations.new_marker(),
+                trainable=macro.trainable,
+            )
+        )
 
     for port in (id_map[node_id] for node_id in source.input_ids):
         source_node = rng.choice(host_sources)
@@ -293,6 +325,52 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     for port in (id_map[node_id] for node_id in source.output_ids):
         for output in host_outputs:
             child.connections.append(ConnectionGene(port, output, rng.gauss(0.0, 0.3), True, ctx.innovations.innovation(port, output)))
+    return child
+
+
+@MUTATION.register("add_macro_node")
+def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, path: str = "library", max_outputs: int = 16) -> Genome:
+    """Place a WHOLE library network as a single frozen unit (the LSTM-cell-in-a-perceptron idea).
+
+    Unlike add_library_module (which inlines an unfrozen copy as ordinary evolvable structure), a
+    macro keeps the found network's identity and function intact: the genome stores one MacroGene
+    plus m HIDDEN identity stubs; the inner network resolves at decode time and never trains.
+    Wiring is exact-k from randomly sampled host sources (no input glue in v1: glue belongs to
+    compositions); each output stub reads out to every host OUTPUT so the macro contributes
+    immediately. Acyclic by construction (fresh output ids, readouts feed only host outputs).
+    """
+    if rng.random() >= prob:
+        return genome
+    from ardevo.library import MODULE as MODULE_ENTRY
+    from ardevo.library import ModuleLibrary
+
+    library = ctx.library if ctx.library is not None else _cached_library(path)
+    assert isinstance(library, ModuleLibrary)
+    host_sources = [*genome.input_ids, *genome.bias_ids, *genome.hidden_ids]
+    host_outputs = genome.output_ids
+    if not host_sources or not host_outputs:
+        return genome
+    candidates = []
+    for entry in library.query(entry_type=MODULE_ENTRY):
+        k = sum(item["width"] for item in entry.io["inputs"])
+        m = int(entry.io["output"]["width"])
+        if 1 <= k <= len(host_sources) and 1 <= m <= max_outputs:
+            candidates.append((entry, k, m))
+    if not candidates:
+        return genome
+    entry, k, m = candidates[rng.randrange(len(candidates))]
+
+    child = genome.clone()
+    inputs = tuple(rng.sample(host_sources, k))
+    outputs = []
+    for _ in range(m):
+        new_id = ctx.innovations.new_node_id()
+        child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, "identity")
+        outputs.append(new_id)
+    child.macros.append(MacroGene(ref=f"library:{entry.key}", input_node_ids=inputs, output_node_ids=tuple(outputs), innovation=ctx.innovations.new_marker()))
+    for stub in outputs:
+        for host_output in host_outputs:
+            child.connections.append(ConnectionGene(stub, host_output, rng.gauss(0.0, 0.3), True, ctx.innovations.innovation(stub, host_output)))
     return child
 
 
@@ -340,7 +418,7 @@ def add_local_connection(genome: Genome, ctx: MutationContext, *, rng: random.Ra
         return genome
     child = genome.clone()
     sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
-    targets = [*child.hidden_ids, *child.output_ids]
+    targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     candidates: list[tuple[int, int]] = []
     weights: list[float] = []
     for source in sources:
