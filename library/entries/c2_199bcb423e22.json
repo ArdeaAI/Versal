@@ -1,0 +1,134 @@
+{
+  "key": "c2_199bcb423e22",
+  "entry_type": "composition",
+  "level": 2,
+  "io": {
+    "inputs": [
+      {
+        "signature": "BINARY|C",
+        "width": 2
+      }
+    ],
+    "output": {
+      "signature": "BINARY|C",
+      "width": 1
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 12,
+        "kind": "input",
+        "ref": "BINARY|C",
+        "in_width": 0,
+        "out_width": 2,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 13,
+        "kind": "input",
+        "ref": "__bias__",
+        "in_width": 0,
+        "out_width": 1,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 14,
+        "kind": "output",
+        "ref": "xor",
+        "in_width": 1,
+        "out_width": 0,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 50,
+        "kind": "module",
+        "ref": "library:m1_eb0d307c4e11",
+        "in_width": 4,
+        "out_width": 2,
+        "aggregation": "sum",
+        "trainable": true
+      }
+    ],
+    "edges": [
+      {
+        "in": 12,
+        "out": 14,
+        "enabled": false,
+        "innovation": 8,
+        "glue": [
+          0.7181406557148863,
+          -1.3893081234690818
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 13,
+        "out": 14,
+        "enabled": true,
+        "innovation": 9,
+        "glue": [
+          -0.08123079687356949
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 12,
+        "out": 50,
+        "enabled": true,
+        "innovation": 55,
+        "glue": [
+          0.8528850674629211,
+          -1.2778234481811523,
+          1.6118797063827515,
+          -1.518140435218811,
+          0.9091567397117615,
+          -1.528929591178894,
+          1.2662529945373535,
+          -0.8242297172546387
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 50,
+        "out": 14,
+        "enabled": true,
+        "innovation": 56,
+        "glue": [
+          3.800682783126831,
+          -0.12248687446117401
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 13,
+        "out": 50,
+        "enabled": false,
+        "innovation": 61,
+        "glue": [
+          -1.1207376993111389,
+          2.5160506236463847,
+          0.040184456316931016,
+          1.2739017707922136
+        ],
+        "glue_rank": 0
+      }
+    ]
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "xor",
+    "rung": 1,
+    "depth": 0,
+    "decompose_op": null,
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5
+  },
+  "stats": {
+    "use_count": 458,
+    "max_attributed_fitness": 0.9649672741706309
+  }
+}

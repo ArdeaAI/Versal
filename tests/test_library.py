@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 
 from ardevo.dataset.icarus import Task, TaskKind, TaskMeta
-from ardevo.evolution.genome import Genome, InnovationTracker, NodeKind, genome_to_dict
+from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
 from ardevo.evolution.mutation import MutationContext, add_library_module
 from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, task_io
 from ardevo.substrate import decode
@@ -180,3 +180,21 @@ def test_bump_stats_tracks_use(tmp_path: Path, solving_genome: Genome) -> None:
     entry = library.load(key)
     assert entry.stats["use_count"] == 2
     assert entry.stats["max_attributed_fitness"] == 0.7
+
+
+def test_summaries_filters_retired_and_dependency(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    kept = _module_entry(library, solving_genome)
+    dependency = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=_IO, provenance={"dependency": True})
+    third = Genome(
+        nodes={0: NodeGene(0, NodeKind.INPUT, "identity"), 1: NodeGene(1, NodeKind.OUTPUT, "identity")},
+        connections=[ConnectionGene(0, 1, 0.123, True, 0)],
+    )
+    retired = library.add(entry_type=MODULE, payload=genome_to_dict(third), io=_IO, provenance={})
+    library.retire(retired)
+
+    assert {row["key"] for row in library.summaries()} == {kept, dependency}
+    assert {row["key"] for row in library.summaries(include_dependencies=False)} == {kept}
+    assert {row["key"] for row in library.summaries(include_retired=True)} == {kept, dependency, retired}
+    rows = library.summaries(include_retired=True)
+    assert rows == sorted(rows, key=lambda row: (row["level"], row["key"]))

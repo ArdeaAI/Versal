@@ -171,6 +171,17 @@ class ModuleLibrary:
     def keys(self) -> list[str]:
         return sorted(self._index)
 
+    def summaries(self, *, include_retired: bool = False, include_dependencies: bool = True) -> list[dict[str, Any]]:
+        """Index-row copies for browsing/rendering, sorted by (level, key). `.get` defaults keep
+        pre-gate v1 indexes (no retired/dependency flags) loadable."""
+        rows = [
+            dict(summary)
+            for summary in self._index.values()
+            if (include_retired or not summary.get("retired", False)) and (include_dependencies or not summary.get("dependency", False))
+        ]
+        rows.sort(key=lambda item: (item["level"], item["key"]))
+        return rows
+
     def _write_index(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path.write_text(json.dumps(sorted(self._index.values(), key=lambda item: item["key"]), indent=2))

@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import torch
 
-from ardevo import checkpoint, results
+from ardevo import checkpoint, rendering, results
 from ardevo.evolution.composition import comp_from_dict
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_from_dict, state_to_dict
@@ -187,9 +187,9 @@ class OrchestratedTrial(Proctor):
         entry = self.library.load(key)
         title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
         if entry.entry_type == MODULE:
-            results.render_network(directory, genome_from_dict(entry.payload), title=title)
+            rendering.render_network(directory, genome_from_dict(entry.payload), title=title, library=self.library)
         elif entry.entry_type == COMPOSITION:
-            results.render_composition_network(directory, comp_from_dict(entry.payload), title=title)
+            rendering.render_composition_network(directory, comp_from_dict(entry.payload), title=title, library=self.library)
         else:
             raise ValueError(f"unknown library entry type {entry.entry_type!r}")
 

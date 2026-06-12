@@ -1,0 +1,127 @@
+[
+  {
+    "key": "c2_1543e6adc5c9",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "stats": {
+      "use_count": 161,
+      "max_attributed_fitness": 0.9649580497661373
+    }
+  },
+  {
+    "key": "c2_199bcb423e22",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": false,
+    "stats": {
+      "use_count": 458,
+      "max_attributed_fitness": 0.9649672741706309
+    }
+  },
+  {
+    "key": "c2_c89c003d8492",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "stats": {
+      "use_count": 227,
+      "max_attributed_fitness": 0.9637406433047727
+    }
+  },
+  {
+    "key": "m1_eb0d307c4e11",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": true,
+    "stats": {
+      "use_count": 443,
+      "max_attributed_fitness": 0.964590325182071
+    }
+  },
+  {
+    "key": "m2_bf0905e045a1",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6153846383094788,
+    "retired": false,
+    "dependency": false,
+    "stats": {
+      "use_count": 349,
+      "max_attributed_fitness": 0.9648890419793316
+    }
+  }
+]

@@ -104,6 +104,15 @@ admits novel library entries, its checkpoint (`task_<NNNN>/`), net image, specia
 ledger, library growth, and module-pool stats land in stats.json and ClearML (`Orchestrator/*`,
 `Modules/*`, `Fitness/comp_*`, `Robustness/*`).
 
+Net images are recursive and dark (`ardevo/rendering.py`): a composition draws each referenced
+library entry's full inner structure inside a labeled container, and a macro draws its embedded
+network inline, nested to depth 4 (anything unresolvable degrades to a labeled opaque box). Re-render
+everything after the fact, including one gallery contact sheet of the whole library:
+
+```bash
+uv run python -m ardevo.tools.net_gallery --per-entry renders/   # library/gallery.png + one PNG per entry
+```
+
 New substrate primitives make layered complexity EXPRESSIBLE while staying grown-from-minimal:
 `aggregation = "product"` nodes (multiplicative gating, second-order interactions) and true
 RECURRENCE (time-delayed edges + a stepped `RecurrentGraphNet` over TIME-axis tasks via
@@ -196,7 +205,8 @@ ardevo/
 ├── library.py          # the persistent search space: module/composition entries, signatures, grafting
 ├── orchestrator.py     # the escalation-ladder policy: lookup -> evolve -> decompose/recurse -> admit
 ├── checkpoint.py       # serialize/restore continuous + orchestrated runs for --resume
-├── results.py          # per-run local artifacts (stats, model, net, speciation)
+├── results.py          # per-run local artifacts (stats, model, speciation chart)
+├── rendering.py        # recursive dark network renders: compositions/macros expand library refs inline
 ├── trials/
 │   ├── xor_trial.py        # EvolutionTrial(Proctor): runs + logs one rung
 │   ├── continuous_trial.py # ContinuousTrial(Proctor): one topology across interleaved rungs

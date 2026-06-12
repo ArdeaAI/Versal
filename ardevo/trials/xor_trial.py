@@ -12,7 +12,7 @@ from typing import Any
 
 import torch
 
-from ardevo import results
+from ardevo import rendering, results
 from ardevo.dataset.icarus import Level0Encoder, support_loader
 from ardevo.dataset.loader import load_rung_task
 from ardevo.evaluation import encode, input_width, output_features
@@ -150,7 +150,7 @@ class EvolutionTrial(Proctor):
             f"{self.icarus_task.meta.name} (rung {self.icarus_task.meta.rung})  "
             f"acc={accuracy:.2f} fit={best.fitness:.3f}  {len(best.genome.hidden_ids)} hidden / {len(best.genome.enabled_connections())} edges"
         )
-        net_path = results.render_network(directory, best.genome, title=title)
+        net_path = rendering.render_network(directory, best.genome, title=title)
         species_title = f"{self.icarus_task.meta.name} (rung {self.icarus_task.meta.rung}) species over {len(self.evolver.species_history)} generations"
         species_path = results.render_speciation(directory, self.evolver.species_history, title=species_title)
 

@@ -3,19 +3,18 @@
 Every run leaves a directory `results/<YYYYMMDD_HHMMSS>_fit-<f>_acc-<a>_loss-<l>/` holding:
 - `stats.json`: run metadata, champion metrics, per-generation history, config snapshot
 - `model.json`: the champion genome (topology + scored weights), reloadable via `genome_from_dict`
-- `net.png`: a networkx render of the champion topology
+- `net.png`: the champion topology, rendered by `ardevo.rendering` (recursive, dark)
 
 These functions are pure IO/visualization (no trial or ClearML coupling) so they are easy to test
-and reuse. matplotlib/networkx are imported inside `render_network` to keep this module light and to
-set the headless `Agg` backend before pyplot loads.
+and reuse. matplotlib is imported inside `render_speciation` to keep this module light and to set
+the headless `Agg` backend before pyplot loads.
 """
 
 import json
 from pathlib import Path
 from typing import Any
 
-from ardevo.evolution.composition import CompNodeKind, CompositionGenome, comp_topological_order
-from ardevo.evolution.genome import Genome, topological_order
+from ardevo.rendering import THEME
 
 DEFAULT_ROOT = "results"
 
@@ -40,107 +39,6 @@ def write_model(directory: Path, model: dict[str, Any]) -> Path:
     return path
 
 
-def _node_layers(genome: Genome) -> dict[int, int]:
-    """Longest-path topological depth per node (inputs/bias at 0). Used for layout + color.
-
-    Layering follows FORWARD edges only; recurrent edges are time-delayed and would otherwise make
-    the depth recurrence circular."""
-    incoming: dict[int, list[int]] = {}
-    for conn in genome.forward_connections():
-        incoming.setdefault(conn.out_id, []).append(conn.in_id)
-    layer: dict[int, int] = {}
-    for node_id in topological_order(genome):
-        predecessors = incoming.get(node_id, [])
-        layer[node_id] = 0 if not predecessors else 1 + max(layer[pred] for pred in predecessors)
-    return layer
-
-
-def render_network(directory: Path, genome: Genome, *, title: str) -> Path:
-    """Render the champion topology to `net.png` (viridis nodes by depth, size by degree)."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import networkx as nx
-
-    layers = _node_layers(genome)
-    graph: nx.DiGraph = nx.DiGraph()
-    for node_id in genome.nodes:
-        graph.add_node(node_id, layer=layers.get(node_id, 0))
-    for conn in genome.enabled_connections():
-        graph.add_edge(conn.in_id, conn.out_id, weight=conn.weight)
-
-    position = nx.multipartite_layout(graph, subset_key="layer")
-    degrees = dict(graph.degree())
-    node_sizes = [140 + 220 * degrees.get(node_id, 0) for node_id in graph.nodes()]
-    node_colors = [layers.get(node_id, 0) for node_id in graph.nodes()]
-    max_layer = max(layers.values(), default=1) or 1
-    edge_widths = [0.6 + 2.4 * min(abs(data["weight"]), 3.0) / 3.0 for _u, _v, data in graph.edges(data=True)]
-
-    figure, axis = plt.subplots(figsize=(10, 7))
-    figure.patch.set_facecolor("#e8e8e8")
-    axis.set_facecolor("#e8e8e8")
-    nx.draw_networkx_edges(graph, position, ax=axis, edge_color="black", width=edge_widths, alpha=0.5, arrows=False)
-    nx.draw_networkx_nodes(graph, position, ax=axis, node_size=node_sizes, node_color=node_colors, cmap=plt.get_cmap("viridis"), vmin=0, vmax=max_layer, linewidths=0.0)
-    axis.set_title(title, fontsize=11)
-    axis.axis("off")
-    figure.tight_layout()
-
-    path = directory / "net.png"
-    figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
-    plt.close(figure)
-    return path
-
-
-def _composition_node_layers(comp: CompositionGenome) -> dict[int, int]:
-    incoming: dict[int, list[int]] = {}
-    for edge in comp.enabled_edges():
-        incoming.setdefault(edge.out_id, []).append(edge.in_id)
-    layer: dict[int, int] = {}
-    for node_id in comp_topological_order(comp):
-        predecessors = incoming.get(node_id, [])
-        layer[node_id] = 0 if not predecessors else 1 + max(layer[pred] for pred in predecessors)
-    return layer
-
-
-def render_composition_network(directory: Path, comp: CompositionGenome, *, title: str) -> Path:
-    """Render an admitted composition graph to `net.png`."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import networkx as nx
-
-    layers = _composition_node_layers(comp)
-    graph: nx.DiGraph = nx.DiGraph()
-    for node_id, node in comp.nodes.items():
-        graph.add_node(node_id, layer=layers.get(node_id, 0), kind=node.kind.value)
-    for edge in comp.enabled_edges():
-        strength = max((abs(value) for value in edge.glue), default=0.0)
-        graph.add_edge(edge.in_id, edge.out_id, weight=strength)
-
-    position = nx.multipartite_layout(graph, subset_key="layer")
-    degrees = dict(graph.degree())
-    color_by_kind = {CompNodeKind.INPUT.value: "#4c78a8", CompNodeKind.MODULE.value: "#59a14f", CompNodeKind.OUTPUT.value: "#e15759"}
-    node_sizes = [180 + 260 * degrees.get(node_id, 0) for node_id in graph.nodes()]
-    node_colors = [color_by_kind.get(graph.nodes[node_id]["kind"], "#777777") for node_id in graph.nodes()]
-    edge_widths = [0.6 + 2.4 * min(data["weight"], 3.0) / 3.0 for _u, _v, data in graph.edges(data=True)]
-
-    figure, axis = plt.subplots(figsize=(10, 7))
-    figure.patch.set_facecolor("#e8e8e8")
-    axis.set_facecolor("#e8e8e8")
-    nx.draw_networkx_edges(graph, position, ax=axis, edge_color="black", width=edge_widths, alpha=0.5, arrows=False)
-    nx.draw_networkx_nodes(graph, position, ax=axis, node_size=node_sizes, node_color=node_colors, linewidths=0.0)
-    axis.set_title(title, fontsize=11)
-    axis.axis("off")
-    figure.tight_layout()
-
-    path = directory / "net.png"
-    figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
-    plt.close(figure)
-    return path
-
-
 def render_speciation(directory: Path, species_history: list[dict[int, int]], *, title: str) -> Path:
     """Stacked-area chart of each species' population over generations (births and deaths over time)."""
     import matplotlib
@@ -150,8 +48,8 @@ def render_speciation(directory: Path, species_history: list[dict[int, int]], *,
 
     path = directory / "speciation.png"
     figure, axis = plt.subplots(figsize=(11, 6))
-    figure.patch.set_facecolor("#e8e8e8")
-    axis.set_facecolor("#e8e8e8")
+    figure.patch.set_facecolor(THEME["background"])
+    axis.set_facecolor(THEME["background"])
 
     if species_history:
         generations = list(range(len(species_history)))
@@ -160,15 +58,18 @@ def render_speciation(directory: Path, species_history: list[dict[int, int]], *,
         bands = [[snapshot.get(species_id, 0) for snapshot in species_history] for species_id in species_ids]
         cmap = plt.get_cmap("viridis")
         colors = [cmap(index / max(len(species_ids) - 1, 1)) for index in range(len(species_ids))]
-        axis.stackplot(generations, *bands, colors=colors, edgecolor="#e8e8e8", linewidth=0.2)
+        axis.stackplot(generations, *bands, colors=colors, edgecolor=THEME["background"], linewidth=0.2)
         axis.set_xlim((0, max(generations)) if max(generations) > 0 else (-0.5, 0.5))
-        axis.set_xlabel("generation")
-        axis.set_ylabel("population by species")
+        axis.set_xlabel("generation", color=THEME["label"])
+        axis.set_ylabel("population by species", color=THEME["label"])
+        axis.tick_params(colors=THEME["label"])
+        for spine in axis.spines.values():
+            spine.set_color(THEME["container_edge"])
     else:
-        axis.text(0.5, 0.5, "no speciation history", ha="center", va="center")
+        axis.text(0.5, 0.5, "no speciation history", ha="center", va="center", color=THEME["label"])
         axis.axis("off")
 
-    axis.set_title(title, fontsize=11)
+    axis.set_title(title, fontsize=11, color=THEME["title"])
     figure.tight_layout()
     figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
     plt.close(figure)

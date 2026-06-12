@@ -16,7 +16,7 @@ from typing import Any, cast
 
 import torch
 
-from ardevo import checkpoint, results
+from ardevo import checkpoint, rendering, results
 from ardevo.evolution.evolver import Assessed, Evolver, EvolverState
 from ardevo.evolution.genome import InnovationTracker, NodeKind, genome_from_dict, genome_to_dict
 from ardevo.evolution.multitask import MultiTaskAdapter, MultiTaskSubstrate, TaskEntry, build_pool
@@ -198,7 +198,7 @@ class ContinuousTrial(Proctor):
         hidden = len(champion.genome.hidden_ids)
         edges = len(champion.genome.enabled_connections())
         title = f"continuous gen {state.generation}: {hidden} hidden / {edges} edges, io {self.substrate.n_inputs}->{self.substrate.n_outputs}"
-        results.render_network(directory, champion.genome, title=title)
+        rendering.render_network(directory, champion.genome, title=title)
         results.render_speciation(directory, state.species_history, title=f"species over {len(state.species_history)} generations")
         checkpoint.write_checkpoint(
             directory, checkpoint.build_payload(state=state, speciator=self.evolver.speciate, scheduler=self.scheduler, substrate=self.substrate, active_index=active_index)
