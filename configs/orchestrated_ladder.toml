@@ -18,7 +18,7 @@
 project = "ardevo"
 experiment = "orchestrated_ladder"
 clearml = true
-machine = "LatticeCPU"
+machine = "MonadMetal"
 seed = 0
 log_level = "INFO"
 output_uri = false
@@ -28,12 +28,12 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 1000
+n_samples = 200
 support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = "all" # [1, 2, 3, 4, 5]       # widen to "all" once the fast rungs populate the library
+rungs = [11, 12, 13, 14, 15] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
 tasks_per_rung = 100
 shuffle = true
 
@@ -52,9 +52,9 @@ output_slices_n_groups = 2
 input_subsets_n_subsets = 2
 time_windows_n_windows = 2
   [orchestrator.budgets]      # evolve generations per recursion depth
-  depth0 = 1000
-  depth1 = 800
-  depth2 = 400
+  depth0 = 120 # 240
+  depth1 = 80 # 120
+  depth2 = 40 # 60
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]
@@ -64,7 +64,7 @@ recurrent = true              # permits recurrent genes (inert under the flat de
 
 [evolution]
 loop = "hierarchical"
-pop_size = 24                 # module population fallback (overridden by [evolution.modules].pop_size)
+pop_size = 128                 # module population fallback (overridden by [evolution.modules].pop_size)
 elitism = 1
   [evolution.init]
   kind = "minimal"
@@ -91,7 +91,7 @@ elitism = 1
   add_recurrent_connection_prob = 0.04
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
-  steps = 60
+  steps = 40
   lr = 0.03
   writeback = true            # flat-loop semantics; the hierarchical loop routes writeback itself
   weight_decay = 0.0002
@@ -128,7 +128,7 @@ elitism = 1
     perturb_glue_sigma = 0.3
 
   [evolution.modules]         # the shared live module population (level 1)
-  pop_size = 24
+  pop_size = 128
   elitism = 1
   in_ports = 4
   out_ports = 2

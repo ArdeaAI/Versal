@@ -23,7 +23,7 @@ from typing import Any, Callable
 import torch
 from torch import nn
 
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict
+from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, make_acyclic
 from ardevo.evolution.registry import Registry
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
 from ardevo.substrate import SubstrateModule, decode
@@ -184,6 +184,16 @@ class AssemblyContext:
     expansion_stack: list[str] = field(default_factory=list)
 
 
+def _decode_ref_module(genome: Genome, n_inputs: int, n_outputs: int) -> SubstrateModule:
+    try:
+        return decode(genome, n_inputs, n_outputs)
+    except ValueError as error:
+        try:
+            return decode(make_acyclic(genome), n_inputs, n_outputs)
+        except ValueError as repaired_error:
+            raise CompositionAssemblyError(str(repaired_error)) from error
+
+
 def _resolve_module(node: CompNodeGene, ctx: AssemblyContext) -> SubstrateModule:
     if node.ref in ctx.instance_cache:
         return ctx.instance_cache[node.ref]
@@ -191,7 +201,7 @@ def _resolve_module(node: CompNodeGene, ctx: AssemblyContext) -> SubstrateModule
         if ctx.live_resolver is None:
             raise CompositionAssemblyError(f"no live resolver for ref {node.ref!r}")
         genome = ctx.live_resolver(node.ref.removeprefix("live:"))
-        inner: SubstrateModule = decode(genome, node.in_width, node.out_width)
+        inner = _decode_ref_module(genome, node.in_width, node.out_width)
         if not node.trainable:
             for parameter in inner.parameters():
                 parameter.requires_grad_(False)
@@ -208,7 +218,7 @@ def _resolve_module(node: CompNodeGene, ctx: AssemblyContext) -> SubstrateModule
         except KeyError as error:
             raise CompositionAssemblyError(str(error)) from error
         if entry.entry_type == MODULE:
-            inner = decode(genome_from_dict(entry.payload), node.in_width, node.out_width)
+            inner = _decode_ref_module(genome_from_dict(entry.payload), node.in_width, node.out_width)
         elif entry.entry_type == COMPOSITION:
             inner_comp = comp_from_dict(entry.payload)
             ctx.expansion_stack.append(key)

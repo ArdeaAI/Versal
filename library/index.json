@@ -1,5 +1,28 @@
 [
   {
+    "key": "c2_017ce02073c4",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "CATEGORICAL|",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6666666865348816,
+    "stats": {
+      "use_count": 1074,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
     "key": "c2_059da108eed7",
     "entry_type": "composition",
     "level": 2,
@@ -18,35 +41,12 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 2761,
-      "max_attributed_fitness": 1.1407692348957061
+      "use_count": 2609,
+      "max_attributed_fitness": 1.1969230782985687
     }
   },
   {
-    "key": "c2_b2e58686b1fe",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 24
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 3
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.0,
-    "stats": {
-      "use_count": 2027,
-      "max_attributed_fitness": 1.1507692348957062
-    }
-  },
-  {
-    "key": "c2_eaecdbb68d99",
+    "key": "c2_7de749b5c941",
     "entry_type": "composition",
     "level": 2,
     "io": {
@@ -64,8 +64,146 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.0,
     "stats": {
-      "use_count": 1921,
-      "max_attributed_fitness": 1.1507692348957062
+      "use_count": 2532,
+      "max_attributed_fitness": 1.1869230782985687
+    }
+  },
+  {
+    "key": "c2_88ff427f98da",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.32021845249198955,
+    "stats": {
+      "use_count": 1740,
+      "max_attributed_fitness": 1.1869230782985687
+    }
+  },
+  {
+    "key": "c2_9c5971937da6",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5384615659713745,
+    "stats": {
+      "use_count": 1459,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "c2_e9ff17645d7b",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "stats": {
+      "use_count": 2725,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "c3_87a6e67226b1",
+    "entry_type": "composition",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.47655863382229824,
+    "stats": {
+      "use_count": 1789,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "c3_cc9246728703",
+    "entry_type": "composition",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4296758898283639,
+    "stats": {
+      "use_count": 1680,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "c4_e621f5c21332",
+    "entry_type": "composition",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.25458801533681497,
+    "stats": {
+      "use_count": 1435,
+      "max_attributed_fitness": 1.1869230782985687
     }
   },
   {
@@ -87,8 +225,77 @@
     "accepted_metric": 1.0,
     "weight_robustness": 0.5,
     "stats": {
-      "use_count": 2583,
-      "max_attributed_fitness": 1.1507692348957062
+      "use_count": 3196,
+      "max_attributed_fitness": 1.1869230782985687
+    }
+  },
+  {
+    "key": "m1_39414fd664d6",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.32021845249198955,
+    "stats": {
+      "use_count": 2165,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "m1_c9aec023e9fe",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5384615659713745,
+    "stats": {
+      "use_count": 1997,
+      "max_attributed_fitness": 1.1969230782985687
+    }
+  },
+  {
+    "key": "m1_db51ef8ddeb0",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6666666865348816,
+    "stats": {
+      "use_count": 1062,
+      "max_attributed_fitness": 1.1869230782985687
     }
   }
 ]

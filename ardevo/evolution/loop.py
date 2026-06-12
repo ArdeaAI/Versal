@@ -33,7 +33,7 @@ from ardevo.evolution.composition import (
     writeback_composition,
 )
 from ardevo.evolution.evolver import Evolver
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict
+from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from ardevo.evolution.mutation import MutationContext
 from ardevo.evolution.registry import Registry, _bind_prefixed, build_evolver
 from ardevo.evolution.train import _writeback
@@ -317,6 +317,7 @@ class HierarchicalLoop:
                 for k in range(plan.n_offspring):
                     child = self.evolver.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
                     child = self.evolver.mutation(child, ctx, rng=state.rng)
+                    child = make_acyclic(child)
                     new_indices.append(len(next_modules))
                     # Offspring inherit a discounted species fitness until a composition references them.
                     next_modules.append(LiveModule(genome=child, fitness=species_fitness * self.offspring_discount))

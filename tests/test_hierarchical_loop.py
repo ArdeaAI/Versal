@@ -8,7 +8,7 @@ import pytest
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.evolution.composition import CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome
 from ardevo.evolution.evolver import Evolver
-from ardevo.evolution.genome import genome_to_dict
+from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind, genome_to_dict, topological_order
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, FlatLoop, HierarchicalLoop, state_from_dict, state_to_dict
 from ardevo.evolution.registry import build_loop
 from ardevo.library import MODULE, ModuleLibrary, task_io
@@ -100,6 +100,41 @@ def test_run_task_end_to_end(decomposable_task: Task) -> None:
     assert "support_accuracy" in best.metrics
     assert state.generation == 3 and len(history) == 3
     assert len(state.module_species_history) >= 2  # seed speciation + at least one module advance
+
+
+def _cyclic_module_genome() -> Genome:
+    nodes = {
+        0: NodeGene(0, NodeKind.INPUT, "identity"),
+        1: NodeGene(1, NodeKind.INPUT, "identity"),
+        2: NodeGene(2, NodeKind.INPUT, "identity"),
+        3: NodeGene(3, NodeKind.INPUT, "identity"),
+        4: NodeGene(4, NodeKind.BIAS, "identity"),
+        5: NodeGene(5, NodeKind.OUTPUT, "identity"),
+        6: NodeGene(6, NodeKind.HIDDEN, "tanh"),
+        7: NodeGene(7, NodeKind.HIDDEN, "tanh"),
+    }
+    return Genome(
+        nodes=nodes,
+        connections=[
+            ConnectionGene(0, 6, 1.0, True, 0),
+            ConnectionGene(6, 7, 1.0, True, 1),
+            ConnectionGene(7, 6, 1.0, True, 2),
+            ConnectionGene(7, 5, 1.0, True, 3),
+        ],
+    )
+
+
+def test_advance_modules_repairs_cyclic_offspring() -> None:
+    loop = build_loop(_config())
+    state = loop.fresh_state(random.Random(0))
+    cyclic = _cyclic_module_genome()
+    setattr(loop.evolver, "crossover_op", lambda parent_a, parent_b, *, rng: cyclic)
+    setattr(loop.evolver, "mutation", lambda genome, ctx, *, rng: genome)
+
+    loop.advance_modules(state)
+
+    for module in state.modules:
+        topological_order(module.genome)
 
 
 def _live_comp(species_id: int, in_width: int, out_width: int) -> CompositionGenome:

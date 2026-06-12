@@ -31,7 +31,7 @@ from ardevo.evolution.composition import (
     toggle_comp_edge,
     writeback_composition,
 )
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
 from ardevo.evolution.train import gradient
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
 from ardevo.substrate import decode
@@ -71,6 +71,27 @@ def test_module_node_applies_inner_through_glue(solving_genome: Genome) -> None:
     net = assemble(_module_comp("live:7"), _ctx(solving_genome), n_inputs=2)
     x = torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
     assert torch.allclose(net(x), decode(solving_genome, 2, 1)(x))
+
+
+def test_live_module_with_cycle_is_repaired_during_assembly() -> None:
+    cyclic = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.INPUT, "identity"),
+            2: NodeGene(2, NodeKind.BIAS, "identity"),
+            3: NodeGene(3, NodeKind.OUTPUT, "identity"),
+            4: NodeGene(4, NodeKind.HIDDEN, "tanh"),
+            5: NodeGene(5, NodeKind.HIDDEN, "tanh"),
+        },
+        connections=[
+            ConnectionGene(0, 4, 1.0, True, 0),
+            ConnectionGene(4, 5, 1.0, True, 1),
+            ConnectionGene(5, 4, 1.0, True, 2),
+            ConnectionGene(5, 3, 1.0, True, 3),
+        ],
+    )
+    net = assemble(_module_comp("live:7"), _ctx(cyclic), n_inputs=2)
+    assert net(torch.zeros(2, 2)).shape == (2, 1)
 
 
 def test_repeated_ref_shares_one_inner_instance(solving_genome: Genome) -> None:
