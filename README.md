@@ -111,6 +111,25 @@ RECURRENCE (time-delayed edges + a stepped `RecurrentGraphNet` over TIME-axis ta
 running-parity machine is a 2-hidden-node genome: one product node times the previous state, one
 accumulator with a self-loop.
 
+Phase 4 turned the run data into upgrades. The EVOLVE step is now a strategy ladder
+(`[orchestrator] evolve = ["composition", "direct"]`): `direct` runs the proven flat phase-1 recipe
+on the task's REAL I/O (the fix for the two-spirals class of failures that burned 68% of all
+generations), routes TIME-axis tasks through the stepped recurrent substrate (recurrent genes
+finally execute in the orchestrated path), and admits TASK-SHAPED modules; `composition` verifies
+its champion against CURRENT module state before anything is admitted. Found networks now flow back
+into the search three ways: grafted into the module pool at every lookup miss (`absorb_top_k`),
+inlined as unfrozen evolvable structure (`add_library_module`), or embedded as a single FROZEN
+MACRO NODE (`add_macro_node`): a whole library network behind one gene, the way an LSTM cell is a
+network inside a node, with crossover/speciation treating the placement atomically. The library
+gained a quality gate (`[library] admission = "default"`: metric/robustness floors plus a
+per-signature cap that tombstones, never deletes), readmission-refreshing dedupe, and width-tolerant
+queries. Decompose failures now say WHERE they died (`failure_stage`, per-stage counters), skipped
+rungs are loud (stats + console + `ardevo/tools/rung_doctor.py`), and compositions can carry
+factored rank-r glue (`glue_rank_threshold`) so wide rungs do not explode entry sizes. Honest
+throughput note from `ai/bench_throughput.py`: thread-parallel assessment and stacked sample-eval
+measured SLOWER at current kernel sizes and ship default-off; the partitioned `gradient_batched`
+trainer (1.5x CPU / 2.1x MPS at pop 48) is the lever that pays, and the direct strategy can use it.
+
 On the prior art: CoDeepNEAT's two-population idea survives here as composition-genomes-referencing-
 species and fitness attribution; WANN's weight-agnostic insight survives as the robustness metric
 and the `weight_samples`/`hybrid` evaluate stage. Neither is implemented literally. evox was

@@ -1,0 +1,107 @@
+{
+  "key": "c2_e6f651b9dbbb",
+  "entry_type": "composition",
+  "level": 2,
+  "io": {
+    "inputs": [
+      {
+        "signature": "CONTINUOUS|C,T",
+        "width": 24
+      }
+    ],
+    "output": {
+      "signature": "CONTINUOUS|C",
+      "width": 1
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 2341,
+        "kind": "input",
+        "ref": "CONTINUOUS|C,T",
+        "in_width": 0,
+        "out_width": 24,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 2342,
+        "kind": "input",
+        "ref": "__bias__",
+        "in_width": 0,
+        "out_width": 1,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 2343,
+        "kind": "output",
+        "ref": "double_pole.b0.out0",
+        "in_width": 1,
+        "out_width": 0,
+        "aggregation": "sum",
+        "trainable": true
+      }
+    ],
+    "edges": [
+      {
+        "in": 2341,
+        "out": 2343,
+        "enabled": true,
+        "innovation": 4717,
+        "glue": [
+          1.1915236711502075,
+          -1.3116528987884521,
+          0.45281898975372314,
+          0.0723918080329895,
+          0.40832266211509705,
+          0.8560047745704651,
+          -0.8573471307754517,
+          0.11596253514289856,
+          -0.16202659904956818,
+          -0.5201941728591919,
+          -0.1587669402360916,
+          0.8793067932128906,
+          0.3286593556404114,
+          -0.9172825217247009,
+          -0.40774035453796387,
+          0.9897181987762451,
+          0.33106350898742676,
+          0.26605281233787537,
+          -0.7683704495429993,
+          0.05135857313871384,
+          -0.6841984987258911,
+          0.4817999303340912,
+          0.5498866438865662,
+          0.15793637931346893
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 2342,
+        "out": 2343,
+        "enabled": true,
+        "innovation": 4718,
+        "glue": [
+          -0.17394520342350006
+        ],
+        "glue_rank": 0
+      }
+    ]
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "double_pole.b0.out0",
+    "rung": 5,
+    "depth": 1,
+    "decompose_op": null,
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "dependency": true
+  },
+  "stats": {
+    "use_count": 2333,
+    "max_attributed_fitness": 1.0342512535047717
+  }
+}

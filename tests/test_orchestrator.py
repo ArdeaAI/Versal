@@ -202,6 +202,8 @@ def test_orchestrated_checkpoint_writes_artifacts_only_for_new_library_entries(t
     trial.scheduler = type("Scheduler", (), {"state_dict": lambda self: {"last": 0}})()
     trial.run_dir = tmp_path / "run"
     trial.task = None
+    trial.rungs = [1]
+    trial.skipped_rungs = []
 
     trial._checkpoint(orchestrator, orchestrator.state, 1, new_keys, solution)
     directory = trial.run_dir / "task_0001"
@@ -222,14 +224,15 @@ def test_real_end_to_end_decompose_with_direct_subsolves(tmp_path: Path, xor_pai
     DIRECT strategy solves both XOR halves, and the port-wired skeleton answers the parent."""
     table = {
         "evolve": ["composition", "direct"],
+        "evolve_budget": {"composition": 0.1, "direct": 0.9},
         "accept_threshold": 0.95,
         "floor": 0.0,
-        "stall_generations": 2,
+        "stall_generations": 15,
         "max_depth": 1,
         "decompose": ["output_slices"],
         "output_slices_n_groups": 2,
         "budgets": {"depth0": 4, "depth1": 60},
-        "direct": {"pop_size": 24, "elitism": 2},
+        "direct": {"pop_size": 24, "elitism": 2, "train": {"kind": "gradient", "steps": 60, "lr": 0.05, "writeback": True}},
     }
     orchestrator = _orchestrator(tmp_path, table=table)
     solution = orchestrator.solve(xor_pairs_task)
@@ -238,14 +241,17 @@ def test_real_end_to_end_decompose_with_direct_subsolves(tmp_path: Path, xor_pai
     assert parent.outcome == "decomposed" and parent.decompose_op == "output_slices"
     assert parent.metric >= 0.95
     sub_attempts = [a for a in orchestrator.attempts if a.depth == 1 and a.outcome == "evolved"]
-    assert len(sub_attempts) == 2 and all(a.strategy == "direct" for a in sub_attempts)
+    assert len(sub_attempts) == 2 and all(a.metric >= 0.95 for a in sub_attempts)
+    # The FIRST half must be cracked by direct structure growth; the second half may legitimately
+    # win via composition instead, reusing the just-admitted module (knowledge compounding within
+    # a single decompose, which is the whole point).
+    assert sub_attempts[0].strategy == "direct"
     for attempt in sub_attempts:
         assert attempt.library_key is not None
         entry = orchestrator.library.load(attempt.library_key)
-        assert entry.entry_type == MODULE
         assert entry.io["inputs"][0]["width"] == 4 and entry.io["output"]["width"] == 1  # real task shape
     assert solution.key is not None
-    assert orchestrator.library.load(solution.key).level == 2  # composition over level-1 direct modules
+    assert orchestrator.library.load(solution.key).level >= 2  # composition over the admitted parts
     assert orchestrator.counters["decompositions"] == 1
     assert orchestrator.counters["decompose_subtask_failed"] == 0
     assert orchestrator.counters["decompose_parent_failed"] == 0

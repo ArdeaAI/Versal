@@ -28,7 +28,7 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 200
+n_samples = 400
 support_fraction = 0.8
 
 [schedule]
@@ -47,14 +47,37 @@ stall_epsilon = 0.005
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
 library_dir = "library"       # persistent across runs: delete it to start the search space cold
+evolve = ["composition", "direct"]   # the evolve-strategy ladder: config order, first success wins,
+                                     # a stalled strategy's unspent generations roll into the next
 decompose = ["output_slices", "input_subsets", "time_windows"]
 output_slices_n_groups = 2
 input_subsets_n_subsets = 2
 time_windows_n_windows = 2
-  [orchestrator.budgets]      # evolve generations per recursion depth
-  depth0 = 120 # 240
-  depth1 = 80 # 120
-  depth2 = 40 # 60
+  [orchestrator.budgets]      # evolve generations per recursion depth (shared across strategies)
+  depth0 = 240
+  depth1 = 120
+  depth2 = 80
+  [orchestrator.evolve_budget]  # relative budget shares within one depth allocation
+  composition = 0.5
+  direct = 0.5
+  [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
+                              # fallback (two-spirals class) and the source of task-shaped modules.
+                              # TIME-axis tasks run through the stepped recurrent substrate here.
+  pop_size = 128
+  elitism = 2
+    [orchestrator.direct.train]  # single-task growth wants a stronger inner trainer than glue fitting
+    kind = "gradient"
+    steps = 120
+    lr = 0.03
+    writeback = true
+    weight_decay = 0.0002
+
+[library]                     # admission policy: what earns a place on the shelf
+admission = "default"         # "accept_all" = legacy behavior (everything above accept_threshold)
+min_metric = 0.9              # quality floor on the accept metric
+min_robustness = 0.0          # weight-robustness floor (raise once the library is healthy)
+per_signature_cap = 3         # max live entries per exact io shape; better candidates replace
+                              # (tombstone, never delete) the weakest; dependencies are exempt
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]
@@ -64,7 +87,7 @@ recurrent = true              # permits recurrent genes (inert under the flat de
 
 [evolution]
 loop = "hierarchical"
-pop_size = 128                 # module population fallback (overridden by [evolution.modules].pop_size)
+pop_size = 256                 # module population fallback (overridden by [evolution.modules].pop_size)
 elitism = 1
   [evolution.init]
   kind = "minimal"
@@ -76,8 +99,10 @@ elitism = 1
   kind = "neat"
   rate = 0.2
   [evolution.mutation]        # the MODULE population's operators (the proven phase-1 recipe plus
-                              # the new primitives: product gating, recurrence)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection"]
+                              # the new primitives: product gating, recurrence, and library reuse:
+                              # add_library_module inlines a found network as evolvable structure,
+                              # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -89,6 +114,9 @@ elitism = 1
   mutate_aggregation_prob = 0.05
   mutate_aggregation_max_fan_in = 4
   add_recurrent_connection_prob = 0.04
+  add_library_module_prob = 0.05
+  add_macro_node_prob = 0.05
+  add_macro_node_max_outputs = 16
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
   steps = 40
@@ -112,6 +140,9 @@ elitism = 1
   pop_size = 12
   elitism = 2
   max_inline_depth = 4
+  glue_rank = 8               # NEW glue factorizes to rank 8 when in*out exceeds the threshold
+  glue_rank_threshold = 4096  # (a width-784 dense edge is 614k floats; rank 8 is 12.5k)
+  catalog_width_tolerance = -1  # -1 = expose every library entry to comp mutations (glue adapts)
     [evolution.composition.selection]
     kind = "tournament"
     tournament_size = 2
@@ -138,6 +169,8 @@ elitism = 1
   decay = 0.95
   offspring_discount = 0.9
   seed_fraction = 0.25        # fraction of the module pool grafted from the library at run start
+  absorb_top_k = 2            # at each lookup miss, graft up to this many NEW library entries over
+                              # the worst non-champions: found structures join the soup mid-run
 
 [fitness]
 components = ["negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]

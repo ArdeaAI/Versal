@@ -127,6 +127,10 @@ class HierarchicalLoop:
     glue_scale: float | None
     glue_rank: int
     glue_rank_threshold: int
+    # -1 exposes every library entry to comp mutations (glue adapts any widths); >= 0 keeps only
+    # entries within that many columns of the task's I/O or the module port shape, which focuses
+    # the catalog once the library grows large.
+    catalog_width_tolerance: int
     module_pop_size: int
     module_elitism: int
     in_ports: int
@@ -185,12 +189,19 @@ class HierarchicalLoop:
 
     # --- ref plumbing -------------------------------------------------------------------------------
 
-    def ref_catalog(self, state: HierarchicalState) -> list[RefSpec]:
+    def ref_catalog(self, state: HierarchicalState, spec: CompTaskSpec | None = None) -> list[RefSpec]:
         catalog = [RefSpec(f"live:{species_id}", self.in_ports, self.out_ports) for species_id in sorted(state.species_champions)]
         if self.library is not None:
+            tolerance = self.catalog_width_tolerance
             for entry in self.library.query():
                 in_width = sum(item["width"] for item in entry.io["inputs"])
-                catalog.append(RefSpec(f"library:{entry.key}", in_width, entry.io["output"]["width"]))
+                out_width = int(entry.io["output"]["width"])
+                if tolerance >= 0 and spec is not None:
+                    in_ok = abs(in_width - spec.n_inputs) <= tolerance or abs(in_width - self.in_ports) <= tolerance
+                    out_ok = abs(out_width - spec.output_width) <= tolerance or abs(out_width - self.out_ports) <= tolerance
+                    if not (in_ok and out_ok):
+                        continue
+                catalog.append(RefSpec(f"library:{entry.key}", in_width, out_width))
         return catalog
 
     def _repair_refs(self, comp: CompositionGenome, state: HierarchicalState) -> CompositionGenome:
@@ -557,6 +568,7 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         glue_scale=float(comp_cfg["glue_scale"]) if "glue_scale" in comp_cfg else None,
         glue_rank=int(comp_cfg.get("glue_rank", 0)),
         glue_rank_threshold=int(comp_cfg.get("glue_rank_threshold", 0)),
+        catalog_width_tolerance=int(comp_cfg.get("catalog_width_tolerance", -1)),
         module_pop_size=int(modules_cfg.get("pop_size", evolution.get("pop_size", 32))),
         module_elitism=int(modules_cfg.get("elitism", evolution.get("elitism", 1))),
         in_ports=int(modules_cfg.get("in_ports", 4)),
