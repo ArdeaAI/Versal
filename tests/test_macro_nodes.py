@@ -175,6 +175,42 @@ def test_add_macro_node_samples_ctx_library_not_disk(tmp_path: Path, linear_geno
     assert child.macros == []
 
 
+def test_add_macro_node_uses_genome_node_count_not_io_width(tmp_path: Path) -> None:
+    """Regression: a TEMPORAL module is admitted with a FLATTENED io width that differs from its
+    genome's per-step input/output NODE count. add_macro_node must size the placement from the node
+    count (what decode validates), not the io width, or decode raises a shape mismatch mid-run."""
+    inner = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.INPUT, "identity"),
+            2: NodeGene(2, NodeKind.INPUT, "identity"),
+            3: NodeGene(3, NodeKind.OUTPUT, "identity"),
+            4: NodeGene(4, NodeKind.OUTPUT, "identity"),
+        },
+        connections=[ConnectionGene(0, 3, 1.0, True, 0), ConnectionGene(1, 3, 1.0, True, 1), ConnectionGene(2, 4, 1.0, True, 2)],
+    )
+    library = ModuleLibrary(tmp_path / "lib")
+    flattened_io = {"inputs": [{"signature": "CONTINUOUS|C,T", "width": 5}], "output": {"signature": "CONTINUOUS|C", "width": 7}}  # 5/7 != genome 3/2
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(inner), io=flattened_io, provenance={})
+
+    host = Genome(
+        nodes={
+            **{i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(5)},
+            5: NodeGene(5, NodeKind.BIAS, "identity"),
+            6: NodeGene(6, NodeKind.OUTPUT, "identity"),
+        },
+        connections=[ConnectionGene(0, 6, 0.1, True, 0)],
+    )
+    ctx = MutationContext(innovations=InnovationTracker(_next_node_id=100), activations=["identity"], default_activation="identity", library=library)
+    child = add_macro_node(host, ctx, rng=random.Random(0), prob=1.0)
+    assert len(child.macros) == 1
+    macro = child.macros[0]
+    assert macro.ref == f"library:{key}"
+    assert len(macro.input_node_ids) == 3 and len(macro.output_node_ids) == 2  # genome node counts, NOT io 5/7
+    module = decode(child, 5, 1, macro_resolver=macro_resolver(library))  # no shape-mismatch ValueError
+    assert module(torch.zeros((2, 5))).shape == (2, 1)
+
+
 def test_mutators_never_target_macro_stubs(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
     from ardevo.evolution.mutation import add_connection, add_deep_node, add_recurrent_connection, mutate_activation, mutate_aggregation
 

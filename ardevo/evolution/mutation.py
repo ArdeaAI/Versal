@@ -357,8 +357,13 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         return genome
     candidates = []
     for entry in library.query(entry_type=MODULE_ENTRY):
-        k = sum(item["width"] for item in entry.io["inputs"])
-        m = int(entry.io["output"]["width"])
+        # k/m are the inner genome's actual INPUT/OUTPUT NODE counts (what the macro decode validates
+        # against), NOT the io widths: a temporal module's io width is the FLATTENED width (e.g. 24)
+        # while its genome has only per-step input nodes (e.g. 3), and trusting io would wire a macro
+        # the decoder rejects with a shape mismatch.
+        nodes = entry.payload.get("nodes", [])
+        k = sum(1 for node in nodes if node.get("kind") == "input")
+        m = sum(1 for node in nodes if node.get("kind") == "output")
         if 1 <= k <= len(host_sources) and 1 <= m <= max_outputs:
             candidates.append((entry, k, m))
     if not candidates:

@@ -1,5 +1,153 @@
 [
   {
+    "key": "c2_0ab5783bd22c",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6666666865348816,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "m2",
+      "L2"
+    ],
+    "stats": {
+      "use_count": 185,
+      "max_attributed_fitness": 3.099012131755333
+    }
+  },
+  {
+    "key": "c3_411956eebf41",
+    "entry_type": "composition",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "m1",
+      "L3"
+    ],
+    "stats": {
+      "use_count": 90,
+      "max_attributed_fitness": 2.0631891114702934
+    }
+  },
+  {
+    "key": "m1_46b89b1c2394",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6666666865348816,
+    "retired": false,
+    "dependency": true,
+    "behavior": [],
+    "stats": {
+      "use_count": 246,
+      "max_attributed_fitness": 3.070156078029094
+    }
+  },
+  {
+    "key": "m1_acb1060852c7",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 0.9750000238418579,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_adf47e7bd116",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
     "key": "m1_f64d7961ab56",
     "entry_type": "module",
     "level": 1,
@@ -27,8 +175,34 @@
       "flat"
     ],
     "stats": {
-      "use_count": 80,
-      "max_attributed_fitness": 2.997613244336302
+      "use_count": 881,
+      "max_attributed_fitness": 3.1633332699071817
+    }
+  },
+  {
+    "key": "m2_f5d185abe3ab",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": true,
+    "behavior": [],
+    "stats": {
+      "use_count": 106,
+      "max_attributed_fitness": 2.1325157225256897
     }
   }
 ]
