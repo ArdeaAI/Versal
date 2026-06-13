@@ -73,10 +73,22 @@ class Genome:
     # feedforward pass (the default decode path is byte-identical). Evolved by `tweak_refine_steps`;
     # only meaningful once the genome also carries recurrent edges to thread state between passes.
     refine_steps: int = 1
+    # Per-genome mutation-operator probabilities (the ACI "mutation as a meta-parameter"): when
+    # self-adaptive rates are on, each genome carries its own {operator_name: prob} which is perturbed
+    # and inherited (Evolution-Strategy self-adaptation), so the search tunes its own operator mix and
+    # selection on the genome implicitly selects good rates. None = use the config base rates (the
+    # default; the flat path is byte-identical until self-adaptation is enabled).
+    operator_rates: dict[str, float] | None = None
 
     def clone(self) -> "Genome":
         # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
-        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros), refine_steps=self.refine_steps)
+        return Genome(
+            nodes=dict(self.nodes),
+            connections=list(self.connections),
+            macros=list(self.macros),
+            refine_steps=self.refine_steps,
+            operator_rates=dict(self.operator_rates) if self.operator_rates else None,
+        )
 
     def ids_of(self, kind: NodeKind) -> list[int]:
         return sorted(node.id for node in self.nodes.values() if node.kind is kind)
@@ -293,7 +305,13 @@ def make_acyclic(genome: Genome) -> Genome:
         else:
             kept.connections.append(conn)
             repaired.append(conn)
-    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps)
+    return Genome(
+        nodes=dict(genome.nodes),
+        connections=repaired,
+        macros=list(genome.macros),
+        refine_steps=genome.refine_steps,
+        operator_rates=dict(genome.operator_rates) if genome.operator_rates else None,
+    )
 
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
@@ -318,6 +336,7 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
             for macro in genome.macros
         ],
         "refine_steps": genome.refine_steps,
+        "operator_rates": genome.operator_rates,
     }
 
 
@@ -342,4 +361,6 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         )
         for item in data.get("macros", [])
     ]
-    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)))
+    operator_rates = data.get("operator_rates")
+    rates = {str(name): float(rate) for name, rate in operator_rates.items()} if operator_rates else None
+    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)), operator_rates=rates)

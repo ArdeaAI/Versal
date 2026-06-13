@@ -16,8 +16,8 @@
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_ladder"
-clearml = true
+experiment = "phase6_gate_baseline"
+clearml = false
 machine = "MonadMetal"
 seed = 0
 log_level = "INFO"
@@ -28,53 +28,37 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 400
+n_samples = 60
 support_fraction = 0.8
 
-[schedule]
+[schedule]                    # GATE: rung 3 (two_spirals) only, a handful of fresh instances
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
-tasks_per_rung = 100
-shuffle = true
+rungs = [3]
+tasks_per_rung = 4
+shuffle = false
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
-accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
+tasks = 3                      # 3 two_spirals instances: enough to read the metric ceiling
+accept_metric = "query_accuracy"
 accept_threshold = 0.95
-floor = 0.35                  # below this at half budget = early stall
+floor = 0.35
 stall_generations = 28
 stall_epsilon = 0.005
-max_depth = 2                 # recursion cap for decomposition
+max_depth = 0                 # GATE: no decompose, isolate the A+B lever
 quick_eval_top_k = 5
-library_dir = "library"       # persistent across runs: delete it to start the search space cold
-evolve = ["direct", "composition"]   # DIRECT-FIRST (phase 5): direct grows structure and wins ~43% of
-                                     # attempts vs composition's ~15%, and routes TIME-axis tasks through
-                                     # the recurrent substrate so temporal modules stop degenerating into
-                                     # flat pass-throughs. Composition runs second to catch glue-reuse
-                                     # cases (config order, first success wins, unspent budget rolls on).
-decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
-output_slices_n_groups = 2
-input_subsets_n_subsets = 2
-time_windows_n_windows = 2
-spatial_patches_n_patches = 2    # grid->grid: tile a band of the spatial axis (the ARC-portable split)
-decompose_solvability_floor = 0.6   # skip a decompose op whose probed subtasks cannot fit support this far
-decompose_probe_generations = 6     # short evolve to probe each subtask before committing the budget
-  [orchestrator.budgets]      # evolve generations per recursion depth (shared across strategies)
-  depth0 = 240
-  depth1 = 120
-  depth2 = 80
-  [orchestrator.evolve_budget]  # relative budget shares within one depth allocation (direct leads)
-  direct = 0.6
-  composition = 0.4
-  [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
-                              # fallback (two-spirals class) and the source of task-shaped modules.
-                              # TIME-axis tasks run through the stepped recurrent substrate here.
-  pop_size = 64
+library_dir = "_phase6_gate_baseline_library"   # scratch: never touch the real library
+evolve = ["direct"]           # GATE: direct only (where two_spirals is solved); isolate the lever
+decompose = []
+  [orchestrator.budgets]
+  depth0 = 140
+  [orchestrator.evolve_budget]
+  direct = 1.0
+  [orchestrator.direct]
+  pop_size = 48
   elitism = 2
-    [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
-                                 # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
+    [orchestrator.direct.train]
     kind = "gradient_refine"
-    steps = 120
+    steps = 80
     lr = 0.03
     writeback = true
     weight_decay = 0.0002
@@ -88,9 +72,6 @@ per_niche_cap = 2             # max entries per (io shape, behavior niche): dist
                               # coexist (small/deep, recurrent/refining, gated, macro) for recombination
 max_per_signature = 12        # total live entries per io shape across all niches; the weakest is
                               # tombstoned (never deleted) when full, so existing refs keep assembling
-refine_depth_threshold = 0.85 # phase 6: admit deep-refine (refine_steps>1) stepping stones at this
-                              # lower bar so the recursion niche can bootstrap from zero (it adds
-                              # diversity, not a marginally higher metric); other niches keep min_metric
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]
@@ -115,7 +96,7 @@ elitism = 1
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
                               # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "enable_refinement", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -163,13 +144,13 @@ elitism = 1
   c_disjoint = 1.0
   c_weight = 0.5
 
-  [evolution.novelty]         # phase 6: functional novelty / quality-diversity SELECTION pressure.
+  [evolution.novelty]  # BASELINE: off         # phase 6: functional novelty / quality-diversity SELECTION pressure.
                               # Selection blends true fitness with the sparseness of a genome's
                               # FUNCTIONAL behavior (its outputs on the support set) against a per-
                               # evolve archive, so the search diverges through stepping stones instead
                               # of collapsing onto the deceptive optimum (two_spirals). Elitism and the
                               # champion still use TRUE fitness. enabled=false keeps the flat path exact.
-  enabled = true
+  enabled = false
   weight = 0.5                # 0 = pure fitness, 1 = pure novelty
   k = 10                      # k-nearest behaviors for the sparseness measure
   archive_max = 200           # bounded behavior archive (oldest evicts first)

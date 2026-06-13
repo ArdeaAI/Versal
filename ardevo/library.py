@@ -81,7 +81,9 @@ def _build_default(*, min_metric: float = 0.0, min_robustness: float = 0.0, per_
 
 
 @LIBRARY_ADMISSION.register("archive")
-def _build_archive(*, min_metric: float = 0.0, min_robustness: float = 0.0, per_niche_cap: int = 2, max_per_signature: int = 12, **_params: object) -> "AdmissionPolicy":
+def _build_archive(
+    *, min_metric: float = 0.0, min_robustness: float = 0.0, per_niche_cap: int = 2, max_per_signature: int = 12, refine_depth_threshold: float | None = None, **_params: object
+) -> "AdmissionPolicy":
     """Open-ended stepping-stone archive (the DGM idea): keep BEHAVIORALLY DIVERSE solutions instead
     of only the top few by metric. Entries are niched by (io shape, behavior descriptor), where the
     behavior descriptor is a coarse structural fingerprint the orchestrator stamps in provenance
@@ -96,12 +98,16 @@ def _build_archive(*, min_metric: float = 0.0, min_robustness: float = 0.0, per_
     def policy(library: "ModuleLibrary", *, entry_type: str, io: dict[str, Any], provenance: dict[str, Any]) -> AdmissionDecision:
         metric = float(provenance.get("accepted_metric", 0.0))
         robustness = float(provenance.get("weight_robustness", 0.0))
-        if metric < min_metric:
-            return AdmissionDecision(admit=False, reason=f"metric {metric:.3f} below min_metric {min_metric}")
+        behavior = list(provenance.get("behavior", []))
+        # Deep-refine (refine_steps>1) stepping stones admit at a lower bar so the recursion niche can
+        # bootstrap from zero: these are expensive-to-find structures whose value is the diversity they
+        # add, not a marginally higher metric. The floor only relaxes for the refine niche.
+        floor = min(min_metric, refine_depth_threshold) if (refine_depth_threshold is not None and "refine" in behavior) else min_metric
+        if metric < floor:
+            return AdmissionDecision(admit=False, reason=f"metric {metric:.3f} below floor {floor}")
         if robustness < min_robustness:
             return AdmissionDecision(admit=False, reason=f"robustness {robustness:.3f} below min_robustness {min_robustness}")
         candidate = (robustness, metric)
-        behavior = list(provenance.get("behavior", []))
         group = library.signature_group(entry_type, io)
         niche = [summary for summary in group if list(summary.get("behavior", [])) == behavior]
         retire: tuple[str, ...] = ()

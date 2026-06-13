@@ -33,15 +33,17 @@ def test_build_evolver_resolves_all_stages():
     assert _op_name(evolver.selection_op) == "tournament"
     assert _op_name(evolver.crossover_op) == "asexual"
     assert _op_name(evolver.train_op) == "gradient"
-    assert [_op_name(op) for op in evolver.mutation.operators] == ["perturb_weights", "add_node"]
+    assert [name for name, _op in evolver.mutation.operators] == ["perturb_weights", "add_node"]
     assert [_op_name(component) for component, _weight in evolver.fitness.components] == ["query_accuracy", "complexity_penalty"]
 
 
 def test_mutation_params_bound_by_prefix():
     evolver = build_evolver(_CONFIG)
-    perturb = evolver.mutation.operators[0]
+    name, perturb = evolver.mutation.operators[0]
+    assert name == "perturb_weights"
     assert isinstance(perturb, functools.partial)
     assert perturb.keywords == {"prob": 0.5}
+    assert evolver.mutation.base_rates == {"perturb_weights": 0.5, "add_node": 0.1}
 
 
 def test_unknown_operator_raises():

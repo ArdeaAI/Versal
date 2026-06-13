@@ -18,11 +18,12 @@ if TYPE_CHECKING:
     from ardevo.library import ModuleLibrary
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
-from ardevo.evaluation import evaluate
+from ardevo.evaluation import behavior_descriptor, evaluate
 from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
+from ardevo.evolution.novelty import NoveltyConfig
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 
@@ -69,6 +70,12 @@ class Assessed:
     metrics: dict[str, float]
     fitness: float
     module: SubstrateModule  # the exact trained network that produced these metrics (for faithful saving)
+    # Functional behavior fingerprint + its sparseness, populated only when novelty selection is on.
+    # `effective_fitness` is the fitness/novelty blend that drives speciation and parent selection;
+    # `fitness` (true) still governs elitism and champion tracking. Default to fitness via the loop.
+    behavior: tuple[float, ...] = ()
+    novelty: float = 0.0
+    effective_fitness: float = 0.0
 
 
 @dataclass
@@ -82,6 +89,9 @@ class EvolverState:
     # Per-generation {species_id: size} snapshots, for the speciation chart.
     species_history: list[dict[int, int]] = field(default_factory=list)
     best: Assessed | None = None
+    # Behavior archive for novelty search. Per-evolve (per-task) scope: a fresh seed_state starts it
+    # empty, so it is ephemeral and needs no cross-task checkpointing.
+    novelty_archive: list[tuple[float, ...]] = field(default_factory=list)
 
 
 GenerationHook = Callable[[int, Assessed, float], None]
@@ -115,6 +125,9 @@ class Evolver:
     # flat path; the orchestrator's direct strategy sets it to the attached library. Without this the
     # mutators fall back to a by-path cache that can diverge from the resolver and dangle a macro ref.
     library: "ModuleLibrary | None" = None
+    # Functional novelty / quality-diversity selection (config [evolution.novelty]). None or disabled
+    # keeps the pure-fitness path byte-identical.
+    novelty: NoveltyConfig | None = None
     # Mirror of the species history and of the latest batched-training stats, for trial logging.
     species_history: list[dict[int, int]] = field(default_factory=list)
     assess_stats: dict[str, float] = field(default_factory=dict)
@@ -122,12 +135,18 @@ class Evolver:
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
 
+    def _behavior(self, module: SubstrateModule, adapter: Adapter) -> tuple[float, ...]:
+        """Functional fingerprint for novelty selection; empty (skipping the extra forward) when off."""
+        if not (self.novelty and self.novelty.enabled):
+            return ()
+        return behavior_descriptor(module, adapter.encoded, max_dim=self.novelty.descriptor_dim)
+
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""
         module = self._decode(genome, adapter)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
         metrics = self.evaluate_op(genome, module, adapter)
-        return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+        return Assessed(genome, metrics, self.fitness(genome, metrics), module, behavior=self._behavior(module, adapter))
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
@@ -154,7 +173,7 @@ class Evolver:
         assessed = []
         for genome, module in pairs:
             metrics = self.evaluate_op(genome, module, adapter)
-            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), module))
+            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), module, behavior=self._behavior(module, adapter)))
         return assessed
 
     @staticmethod
@@ -204,6 +223,24 @@ class Evolver:
         best = state.best
         return final_best if best is None or final_best.fitness > best.fitness else best
 
+    def _novelty_score(self, assessed: list[Assessed], fitnesses: list[float], state: EvolverState) -> Callable[[Assessed], float]:
+        """Return the per-genome score speciation and selection use this generation. When novelty is
+        on, compute each genome's behavioral sparseness, blend it with fitness into effective_fitness,
+        and grow the per-evolve behavior archive; the returned getter reads effective_fitness. When
+        off, the getter reads true fitness, so the caller is numerically unchanged."""
+        if not (self.novelty and self.novelty.enabled):
+            return lambda item: item.fitness
+        from ardevo.evolution import novelty as novelty_mod
+
+        behaviors = [item.behavior for item in assessed]
+        novelties = novelty_mod.novelty_scores(behaviors, state.novelty_archive, self.novelty.k)
+        effective = novelty_mod.blend(fitnesses, novelties, self.novelty.weight)
+        for item, novelty_value, effective_value in zip(assessed, novelties, effective, strict=True):
+            item.novelty = novelty_value
+            item.effective_fitness = effective_value
+        novelty_mod.update_archive(state.novelty_archive, behaviors, novelties, rng=state.rng, archive_max=self.novelty.archive_max, add_prob=self.novelty.add_prob)
+        return lambda item: item.effective_fitness
+
     def _next_generation(
         self,
         assessed: list[Assessed],
@@ -213,7 +250,12 @@ class Evolver:
     ) -> list[Assessed]:
         genomes = [item.genome for item in assessed]
         fitnesses = [item.fitness for item in assessed]
-        plans = self.speciate(genomes, fitnesses, rng=state.rng, elitism=self.elitism, pop_size=self.pop_size)
+        # When novelty is on, speciation and parent selection run on an effective fitness that blends
+        # true fitness with behavioral novelty (the deceptive-landscape escape); elitism below still
+        # uses TRUE fitness so a novel-but-useless genome can never become an elite. When off, `score`
+        # is true fitness and this loop is byte-identical to the pure-fitness path.
+        score = self._novelty_score(assessed, fitnesses, state)
+        plans = self.speciate(genomes, [score(item) for item in assessed], rng=state.rng, elitism=self.elitism, pop_size=self.pop_size)
         state.species_history.append({plan.species_id: len(plan.members) for plan in plans})
 
         # Elites are carried forward UNCHANGED (re-training champions every generation overfits the
@@ -230,7 +272,7 @@ class Evolver:
                 continue
 
             species_genomes = [item.genome for item in members]
-            species_fitnesses = [item.fitness for item in members]
+            species_fitnesses = [score(item) for item in members]
             parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring)
             for k in range(plan.n_offspring):
                 child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)

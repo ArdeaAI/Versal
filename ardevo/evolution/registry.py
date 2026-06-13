@@ -59,6 +59,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     # while still triggering their @register side effects.
     from ardevo.evolution import crossover, evaluate, fitness, init, mutation, selection, speciation, train
     from ardevo.evolution.evolver import Evolver
+    from ardevo.evolution.novelty import NoveltyConfig
 
     evolution = config.get("evolution", {})
     substrate = config.get("substrate", {})
@@ -87,8 +88,16 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     )
 
     mutation_cfg = evolution.get("mutation", {})
-    mutators = [partial(mutation.MUTATION.get(name), **_bind_prefixed(mutation_cfg, name)) for name in mutation_cfg.get("operators", [])]
-    mutation_pipeline = mutation.MutationPipeline(mutators)
+    operator_names = mutation_cfg.get("operators", [])
+    named_mutators = [(name, partial(mutation.MUTATION.get(name), **_bind_prefixed(mutation_cfg, name))) for name in operator_names]
+    base_rates = {name: float(_bind_prefixed(mutation_cfg, name)["prob"]) for name in operator_names if "prob" in _bind_prefixed(mutation_cfg, name)}
+    adaptive = mutation.AdaptiveRates(
+        enabled=bool(mutation_cfg.get("adaptive_rates", False)),
+        sigma=float(mutation_cfg.get("adaptive_rate_sigma", 0.1)),
+        min_rate=float(mutation_cfg.get("adaptive_rate_min", 0.01)),
+        max_rate=float(mutation_cfg.get("adaptive_rate_max", 0.5)),
+    )
+    mutation_pipeline = mutation.MutationPipeline(named_mutators, base_rates=base_rates, adaptive=adaptive)
 
     train_cfg = evolution.get("train", {})
     train_kind = train_cfg.get("kind", "none")
@@ -119,6 +128,9 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     speciation_cfg = evolution.get("speciation", {})
     speciate = speciation.SPECIATION.get(speciation_cfg.get("kind", "none"))(**{k: v for k, v in speciation_cfg.items() if k != "kind"})
 
+    novelty_cfg = evolution.get("novelty", {})
+    novelty = NoveltyConfig(**{key: value for key, value in novelty_cfg.items()}) if novelty_cfg else None
+
     return Evolver(
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
@@ -135,4 +147,5 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         speciate=speciate,
         activations=activations,
         default_activation=default_activation,
+        novelty=novelty,
     )

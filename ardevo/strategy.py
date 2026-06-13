@@ -180,18 +180,35 @@ class DirectStrategy:
         finally:
             self.evolver.init_op = original_init
         stop = runtime.stall_factory(budget)
-        best: Assessed = max(state.population, key=lambda item: item.fitness)
+        # Novelty search keeps diverging through behavior space while the accept METRIC sits on the
+        # deceptive plateau, so the fitness-plateau stall would cut it off exactly when it is doing its
+        # job. With novelty on, run the full budget (the accept-threshold early-exit on a real solve
+        # still fires); the Entity layer later evolves a smarter novelty-aware budget.
+        novelty_on = bool(self.evolver.novelty and self.evolver.novelty.enabled)
+
+        # The champion is the best TASK SOLVER (highest accept metric), tie-broken by fitness for
+        # robustness/parsimony, NOT the highest composite fitness. Fitness drives evolution (selection),
+        # but it blends bounded loss and structural penalties, so its argmax is not the genome that best
+        # solves the task: on two_spirals the fitness-champion fit 0.55 of the support while a non-
+        # champion the search had already found fit 0.64. Reporting/admitting by the accept metric
+        # surfaces that genome (and is what novelty search needs to actually move the wall).
+        def _champion_key(item: Assessed) -> tuple[float, float]:
+            return (runtime.metric_of(item), item.fitness)
+
+        best: Assessed = max(state.population, key=_champion_key)
         generations = 0
         for generation in range(budget):
-            generation_best = max(state.population, key=lambda item: item.fitness)
-            if generation_best.fitness > best.fitness:
+            generation_best = max(state.population, key=_champion_key)
+            if _champion_key(generation_best) > _champion_key(best):
                 best = generation_best
             if runtime.on_generation is not None:
                 mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
                 runtime.on_generation(self.name, generation, generation_best, mean_fitness)
             runtime.state.generation += 1  # the global clock spans strategies for monotonic logging
             generations = generation + 1
-            if runtime.metric_of(best) >= runtime.accept_threshold or stop(generation, best):
+            if runtime.metric_of(best) >= runtime.accept_threshold:
+                break
+            if not novelty_on and stop(generation, best):
                 break
             self.evolver.advance(state, adapter)
 

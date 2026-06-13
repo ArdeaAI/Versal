@@ -9,7 +9,7 @@ hands out fresh node ids / innovation numbers and the activation palette.
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Callable
 
 from ardevo.evolution.genome import (
@@ -48,15 +48,54 @@ class MutationContext:
 
 
 @dataclass
-class MutationPipeline:
-    """Applies an ordered list of bound mutators in sequence."""
+class AdaptiveRates:
+    """Self-adaptive operator rates (the ACI "mutation as a meta-parameter"). Disabled by default so
+    the pipeline is byte-identical to fixed config rates."""
 
-    operators: Sequence[Mutator]
+    enabled: bool = False
+    sigma: float = 0.1  # log-normal perturbation strength on each rate per generation
+    min_rate: float = 0.01
+    max_rate: float = 0.5
+
+
+@dataclass
+class MutationPipeline:
+    """Applies an ordered list of bound mutators in sequence.
+
+    Each operator is carried as `(name, bound_op)`. With self-adaptation off the pipeline just runs
+    the bound operators (fixed config rates), so it is byte-identical to the pre-phase-6 behavior.
+    With it on, the genome carries its own per-operator probabilities: they are perturbed (Evolution-
+    Strategy log-normal self-adaptation) and then each operator is invoked with the genome's own rate,
+    so the rates are inherited by offspring and selection on the genome selects good rates for free.
+    """
+
+    operators: Sequence[tuple[str, Mutator]]
+    base_rates: dict[str, float] = field(default_factory=dict)
+    adaptive: AdaptiveRates | None = None
 
     def __call__(self, genome: Genome, ctx: MutationContext, *, rng: random.Random) -> Genome:
-        for operator in self.operators:
-            genome = operator(genome, ctx, rng=rng)
+        adaptive_on = bool(self.adaptive and self.adaptive.enabled)
+        if adaptive_on:
+            genome = self._adapt_rates(genome, rng)
+        for name, operator in self.operators:
+            if adaptive_on and genome.operator_rates is not None and name in genome.operator_rates:
+                genome = operator(genome, ctx, rng=rng, prob=genome.operator_rates[name])
+            else:
+                genome = operator(genome, ctx, rng=rng)
         return genome
+
+    def _adapt_rates(self, genome: Genome, rng: random.Random) -> Genome:
+        """Inherit the parent's rates (or seed from the config base rates), then perturb each
+        log-normally and clamp. Mutating the strategy parameters BEFORE applying the operators is the
+        Evolution-Strategy self-adaptation order: the rates that produced good offspring survive."""
+        assert self.adaptive is not None
+        child = genome.clone()
+        rates = dict(child.operator_rates) if child.operator_rates else dict(self.base_rates)
+        for name, base in self.base_rates.items():
+            rate = rates.get(name, base) * math.exp(self.adaptive.sigma * rng.gauss(0.0, 1.0))
+            rates[name] = min(self.adaptive.max_rate, max(self.adaptive.min_rate, rate))
+        child.operator_rates = rates
+        return child
 
 
 @MUTATION.register("perturb_weights")
@@ -393,6 +432,34 @@ def tweak_refine_steps(genome: Genome, ctx: MutationContext, *, rng: random.Rand
         return genome
     child = genome.clone()
     child.refine_steps = max(min_steps, min(max_steps, child.refine_steps + rng.choice((-1, 1))))
+    return child
+
+
+@MUTATION.register("enable_refinement")
+def enable_refinement(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.02, max_steps: int = 8) -> Genome:
+    """Break the TRM catch-22 in ONE atomic step: add a recurrent self-loop AND raise refine_steps to
+    at least 2 together, so the recursion goes live on the very next decode (RefineGraphNet).
+
+    add_recurrent_connection (prob ~0.04) and tweak_refine_steps (prob ~0.06) must CO-OCCUR for either
+    to matter: a recurrent edge is phenotypically inert until refine_steps>1 threads state across
+    passes, and extra passes do nothing without a recurrent edge to carry state. Their joint
+    probability per generation (~0.0024) is far below the stall window, so every recurrent-only
+    intermediate is culled with no fitness signal and the depth lever is never reached. Firing both at
+    once produces a genome the trainer can immediately backprop through. The self-loop lands on a
+    hidden node when one exists (the latent z that TRM carries between passes); on a minimal genome it
+    lands on an output (TRM's answer-feedback y). Small init weight so the new recursion starts gentle.
+    """
+    if rng.random() >= prob:
+        return genome
+    loop_candidates = [node_id for node_id in genome.hidden_ids if node_id not in genome.macro_output_ids]
+    node = rng.choice(loop_candidates) if loop_candidates else (rng.choice(genome.output_ids) if genome.output_ids else None)
+    if node is None:
+        return genome
+    child = genome.clone()
+    if not child.has_connection(node, node, recurrent=True):
+        innovation = ctx.innovations.innovation(node, node, recurrent=True)
+        child.connections.append(ConnectionGene(node, node, rng.gauss(0.0, 0.1), True, innovation, recurrent=True))
+    child.refine_steps = min(max_steps, max(2, child.refine_steps + 1))
     return child
 
 

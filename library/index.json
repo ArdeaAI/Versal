@@ -24,7 +24,7 @@
       "L2"
     ],
     "stats": {
-      "use_count": 730,
+      "use_count": 1000,
       "max_attributed_fitness": 3.1961538553237916
     }
   },
@@ -53,7 +53,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 619,
+      "use_count": 858,
       "max_attributed_fitness": 3.2007841286183303
     }
   },
@@ -82,7 +82,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 248,
+      "use_count": 479,
       "max_attributed_fitness": 3.0633830918240674
     }
   },
@@ -111,8 +111,37 @@
       "L4"
     ],
     "stats": {
-      "use_count": 179,
-      "max_attributed_fitness": 3.033421247393972
+      "use_count": 432,
+      "max_attributed_fitness": 3.0507261939916446
+    }
+  },
+  {
+    "key": "c4_9a46a4ac3c84",
+    "entry_type": "composition",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "m1",
+      "L4"
+    ],
+    "stats": {
+      "use_count": 175,
+      "max_attributed_fitness": 2.5755683322618617
     }
   },
   {
@@ -137,7 +166,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 842,
+      "use_count": 1156,
       "max_attributed_fitness": 3.1161538553237915
     }
   },
@@ -265,7 +294,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 507,
+      "use_count": 786,
       "max_attributed_fitness": 3.116127152799449
     }
   },
@@ -297,7 +326,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 1448,
+      "use_count": 1731,
       "max_attributed_fitness": 3.1633332699071817
     }
   },
@@ -329,7 +358,7 @@
       "macro"
     ],
     "stats": {
-      "use_count": 491,
+      "use_count": 749,
       "max_attributed_fitness": 3.1309829374728175
     }
   },
@@ -361,7 +390,7 @@
       "macro"
     ],
     "stats": {
-      "use_count": 186,
+      "use_count": 454,
       "max_attributed_fitness": 3.1376030119636233
     }
   },
@@ -387,7 +416,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 276,
+      "use_count": 582,
       "max_attributed_fitness": 3.1375034188744144
     }
   },
@@ -413,8 +442,34 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 715,
+      "use_count": 1027,
       "max_attributed_fitness": 3.165840822198498
+    }
+  },
+  {
+    "key": "m3_a69c97f6bbbd",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": true,
+    "behavior": [],
+    "stats": {
+      "use_count": 189,
+      "max_attributed_fitness": 2.7394061487375847
     }
   }
 ]

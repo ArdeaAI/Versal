@@ -8,7 +8,7 @@ import torch
 
 from ardevo.evaluation import support_loss, support_loss_deep
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
-from ardevo.evolution.mutation import MutationContext, tweak_refine_steps
+from ardevo.evolution.mutation import MutationContext, enable_refinement, tweak_refine_steps
 from ardevo.evolution.train import gradient_refine
 from ardevo.substrate import GraphNet, RefineGraphNet, decode, decode_refine
 
@@ -122,3 +122,50 @@ def test_gradient_refine_falls_back_for_non_refine(xor_adapter, linear_genome: G
     _genome, module = gradient_refine(linear_genome, module, xor_adapter.encoded, rng=random.Random(0), steps=50, lr=0.05, writeback=False)
     after = float(support_loss(module, xor_adapter.encoded).detach())
     assert after < before  # behaves exactly like the standard gradient op
+
+
+def _ctx() -> MutationContext:
+    return MutationContext(innovations=InnovationTracker(_next_node_id=100), activations=["tanh", "identity"], default_activation="tanh")
+
+
+def test_enable_refinement_adds_recurrence_and_raises_steps_atomically(solving_genome: Genome) -> None:
+    # The catch-22 breaker must do BOTH in one fire: a recurrent edge AND refine_steps>=2, so the
+    # recursion is live on the next decode rather than waiting on two independent rare mutations.
+    child = enable_refinement(solving_genome, _ctx(), rng=random.Random(0), prob=1.0)
+    assert child.refine_steps >= 2
+    assert any(conn.recurrent for conn in child.connections)
+    self_loops = [conn for conn in child.connections if conn.recurrent and conn.in_id == conn.out_id]
+    assert self_loops, "expected a recurrent self-loop"
+    assert solving_genome.refine_steps == 1 and not any(conn.recurrent for conn in solving_genome.connections)  # parent untouched
+
+
+def test_enable_refinement_self_loops_a_hidden_node_when_available(solving_genome: Genome) -> None:
+    child = enable_refinement(solving_genome, _ctx(), rng=random.Random(1), prob=1.0)
+    loop = next(conn for conn in child.connections if conn.recurrent and conn.in_id == conn.out_id)
+    assert child.nodes[loop.in_id].kind is NodeKind.HIDDEN  # the latent z carrier, not an output
+
+
+def test_enable_refinement_self_loops_output_on_minimal_genome(linear_genome: Genome) -> None:
+    # No hidden node: the self-loop must land on an output (TRM answer-feedback y) so even a minimal
+    # genome can begin refining.
+    child = enable_refinement(linear_genome, _ctx(), rng=random.Random(0), prob=1.0)
+    assert child.refine_steps >= 2
+    loop = next(conn for conn in child.connections if conn.recurrent and conn.in_id == conn.out_id)
+    assert child.nodes[loop.in_id].kind is NodeKind.OUTPUT
+
+
+def test_enable_refinement_result_decodes_to_refine_substrate(xor_adapter, solving_genome: Genome) -> None:
+    child = enable_refinement(solving_genome, _ctx(), rng=random.Random(2), prob=1.0)
+    assert isinstance(xor_adapter.decode(child), RefineGraphNet)
+
+
+def test_enable_refinement_respects_probability(solving_genome: Genome) -> None:
+    unchanged = enable_refinement(solving_genome, _ctx(), rng=random.Random(0), prob=0.0)
+    assert unchanged.refine_steps == 1 and not any(conn.recurrent for conn in unchanged.connections)
+
+
+def test_enable_refinement_repeats_without_exploding(solving_genome: Genome) -> None:
+    genome = solving_genome
+    for seed in range(20):
+        genome = enable_refinement(genome, _ctx(), rng=random.Random(seed), prob=1.0, max_steps=8)
+    assert genome.refine_steps == 8  # caps at max_steps, never runs away

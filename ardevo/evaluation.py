@@ -116,6 +116,21 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
     return split_metrics_from_raw(raw, target, mask, descriptor, encoder)
 
 
+def behavior_descriptor(module: torch.nn.Module, encoded: EncodedTask, *, max_dim: int = 64) -> tuple[float, ...]:
+    """A cheap FUNCTIONAL fingerprint of what a module computes: its raw outputs on the support input,
+    flattened and deterministically subsampled to a bounded length. Two genomes computing the same
+    function get nearby descriptors regardless of topology, which is exactly what novelty search needs
+    to escape DECEPTIVE landscapes (structural diversity does not). One no-grad forward; the caller
+    only invokes this when novelty selection is enabled."""
+    with torch.no_grad():
+        x, _descriptor = encoded.support_input
+        out = module(x).reshape(-1)
+    count = int(out.shape[0])
+    if count > max_dim:
+        out = out[torch.linspace(0, count - 1, steps=max_dim).round().long()]
+    return tuple(float(value) for value in out.tolist())
+
+
 def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder) -> dict[str, float]:
     """Support- and query-set metrics. Support fit rewards capacity (structure improves it even when
     the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization."""

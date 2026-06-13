@@ -17,9 +17,12 @@ MODULE entries (with the exact trained weights that scored) and the composition 
 reference them, so library entries never dangle across runs.
 """
 
+import hashlib
 import math
 from dataclasses import dataclass, replace
 from typing import Any, Callable
+
+import torch
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.decompose import Subtask, build_decomposers
@@ -403,6 +406,11 @@ class Orchestrator:
         signature/widths (not the ANY-port snapshot shape), so lookups hit it exactly and the
         composition strategy can reference it through the catalog immediately."""
         assert result.champion_genome is not None
+        io = task_io(task)
+        behavior = _genome_behavior(result.champion_genome)
+        functional = _functional_token(result.champion_genome, io)
+        if functional is not None:
+            behavior = behavior + [functional]
         provenance = {
             "task": task.meta.name,
             "rung": task.meta.rung,
@@ -410,10 +418,10 @@ class Orchestrator:
             "strategy": result.strategy,
             "accepted_metric": result.metric,
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
-            "behavior": _genome_behavior(result.champion_genome),
+            "behavior": behavior,
         }
         level = module_level(result.champion_genome, self.library)
-        return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
+        return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=io, provenance=provenance, level=level, dependency=depth > 0)
 
     def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
@@ -561,6 +569,35 @@ def _genome_behavior(genome: Genome) -> list[str]:
 def _comp_behavior(comp: CompositionGenome, level: int) -> list[str]:
     """Structural niche for a composition: how many modules it wires and at what level."""
     return [f"m{min(len(comp.module_ids), 6)}", f"L{level}"]
+
+
+def _functional_token(genome: Genome, io: dict[str, Any], *, probe_size: int = 8, max_dims: int = 8) -> str | None:
+    """A FUNCTIONAL niche token for the QD archive: run the module on a FIXED probe derived from its io
+    signature and bucket the mean output sign per dimension. The probe is deterministic per io
+    signature, so entries of the SAME io shape are comparable, and two modules that compute DIFFERENT
+    functions land in different niches and coexist as stepping stones instead of collapsing into one
+    structural niche (the cross-task-compounding deepener: structural diversity alone keeps near-twins).
+    Returns None (structural niche only) for TIME-axis io, whose static probe does not apply; the
+    decode mirrors the Evolver's cycle-repair so a recombined champion never crashes admission."""
+    in_descriptor = io["inputs"][0]
+    if "T" in in_descriptor["signature"].split("|")[-1].split(","):
+        return None
+    in_width, out_width = int(in_descriptor["width"]), int(io["output"]["width"])
+    if in_width <= 0 or out_width <= 0:
+        return None
+    seed = int(hashlib.sha1(in_descriptor["signature"].encode()).hexdigest()[:8], 16)
+    probe = torch.randn(probe_size, in_width, generator=torch.Generator().manual_seed(seed))
+    try:
+        module = decode_module(genome, in_width, out_width)
+    except ValueError:
+        from ardevo.evolution.genome import make_acyclic
+
+        module = decode_module(make_acyclic(genome), in_width, out_width)
+    with torch.no_grad():
+        # Per-probe-point outputs (NOT their mean: a zero-mean probe averages a linear map back to ~0,
+        # erasing the function); the sign pattern across probe points is the function's fingerprint.
+        outputs = module(probe).reshape(-1)
+    return "fp" + "".join("p" if value > 0.05 else "n" if value < -0.05 else "z" for value in outputs[:max_dims].tolist())
 
 
 def _identity_glue(in_width: int, out_width: int) -> tuple[float, ...]:
