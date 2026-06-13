@@ -43,6 +43,10 @@ class ConnectionGene:
     # Recurrent edges are TIME-DELAYED: they read the previous step's value, so they are exempt from
     # the acyclicity rules (the forward graph stays a DAG) and are inert under the plain GraphNet.
     recurrent: bool = False
+    # Weight-tying tag: edges sharing a `share_group` decode to ONE shared parameter (a convolution
+    # kernel reused across tiled placements). None = an independent per-edge weight (the default; the
+    # substrate is byte-identical until a weight-tied motif is actually grown).
+    share_group: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +332,15 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
             for node in genome.nodes.values()
         ],
         "connections": [
-            {"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation, "recurrent": conn.recurrent}
+            {
+                "in": conn.in_id,
+                "out": conn.out_id,
+                "weight": conn.weight,
+                "enabled": conn.enabled,
+                "innovation": conn.innovation,
+                "recurrent": conn.recurrent,
+                "share_group": conn.share_group,
+            }
             for conn in genome.connections
         ],
         "macros": [
@@ -348,7 +360,15 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         coordinate = tuple(node["coordinate"]) if node.get("coordinate") is not None else None
         nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate, node.get("aggregation", "sum"))
     connections = [
-        ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"]), bool(conn.get("recurrent", False)))
+        ConnectionGene(
+            int(conn["in"]),
+            int(conn["out"]),
+            float(conn["weight"]),
+            bool(conn["enabled"]),
+            int(conn["innovation"]),
+            bool(conn.get("recurrent", False)),
+            None if conn.get("share_group") is None else int(conn["share_group"]),
+        )
         for conn in data["connections"]
     ]
     macros = [

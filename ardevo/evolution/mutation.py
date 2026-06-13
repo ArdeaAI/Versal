@@ -587,3 +587,40 @@ def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random
         for output in outputs:
             child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
     return child
+
+
+@MUTATION.register("add_conv_motif")
+def add_conv_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, kernel: int = 4, copies: int = 4) -> Genome:
+    """Grow a WEIGHT-TIED convolutional feature detector: ONE shared kernel tiled across the coordinate
+    grid. Unlike add_shared_motif (which replicates a motif with INDEPENDENT weights), the input->
+    feature edge at a given relative offset SHARES one weight across every tile, so the kernel is
+    learned once and reused everywhere: the parameter efficiency a flat dense readout cannot match on
+    high-dimensional grids (a width-784 image needs hundreds of dense edges per feature; a tied kernel
+    needs `kernel`). Each tile's readout to the outputs stays independent (the classifier head). The
+    shared groups are fresh innovation markers so they never collide with another motif's kernel.
+    No-op without coordinates (the flat/non-grid path leaves it to the non-local operators)."""
+    if rng.random() >= prob:
+        return genome
+    coordinated = [node_id for node_id in genome.input_ids if genome.nodes[node_id].coordinate is not None]
+    outputs = genome.output_ids
+    if len(coordinated) < kernel or not outputs:
+        return genome
+    child = genome.clone()
+    groups = [ctx.innovations.new_marker() for _ in range(kernel)]  # one shared weight per kernel tap
+    for anchor in rng.sample(coordinated, min(copies, len(coordinated))):
+        anchor_coordinate = child.nodes[anchor].coordinate
+        if anchor_coordinate is None:
+            continue
+        field_coords = {node_id: coord for node_id in _nearest(child, anchor_coordinate, coordinated, kernel) if (coord := child.nodes[node_id].coordinate) is not None}
+        if len(field_coords) < kernel:
+            continue  # an edge anchor without a full neighborhood: skip so taps stay aligned across tiles
+        # Order the receptive field by RELATIVE OFFSET so tap k is the same spatial position at every
+        # anchor: that is what makes the shared weight a coherent convolution kernel, not a random tie.
+        field = sorted(field_coords, key=lambda node_id: tuple(round(c - a, 3) for c, a in zip(field_coords[node_id], anchor_coordinate)))
+        new_id = ctx.innovations.new_node_id()
+        child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, ctx.default_activation, _centroid(list(field_coords.values())))
+        for tap, source in enumerate(field):
+            child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id), share_group=groups[tap]))
+        for output in outputs:
+            child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 0.3), True, ctx.innovations.innovation(new_id, output)))
+    return child

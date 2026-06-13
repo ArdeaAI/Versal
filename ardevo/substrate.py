@@ -85,12 +85,37 @@ class GraphNet(SubstrateModule):
         mask = torch.zeros(self.n, self.n, dtype=torch.bool)
         incoming: dict[int, list[int]] = defaultdict(list)
         self._edge_positions: list[tuple[int, int, int, int]] = []
+        share_edges: dict[int, list[tuple[int, int, float]]] = defaultdict(list)
         for conn in genome.forward_connections():
             source, target = position[conn.in_id], position[conn.out_id]
             weight_matrix[source, target] = conn.weight
             mask[source, target] = True
             incoming[target].append(source)
             self._edge_positions.append((conn.in_id, conn.out_id, source, target))
+            if conn.share_group is not None:
+                share_edges[conn.share_group].append((source, target, conn.weight))
+
+        # Weight-tying: edges sharing a group decode to ONE shared parameter (a convolution kernel
+        # reused across tiled placements). Their per-edge matrix entries are zeroed; the shared value
+        # is scattered into the masked matrix at forward time, so autograd accumulates a single gradient
+        # per kernel weight across every placement. No shared edges -> the scatter is skipped and the
+        # forward is byte-identical to the per-edge path.
+        share_flat: list[int] = []
+        share_group_index: list[int] = []
+        shared_init: list[float] = []
+        self._shared_lookup: dict[tuple[int, int], int] = {}
+        for group_index, group in enumerate(sorted(share_edges)):
+            members = share_edges[group]
+            shared_init.append(sum(weight for _source, _target, weight in members) / len(members))
+            for source, target, _weight in members:
+                weight_matrix[source, target] = 0.0
+                share_flat.append(source * self.n + target)
+                share_group_index.append(group_index)
+                self._shared_lookup[(source, target)] = group_index
+        self._share_flat_index: torch.Tensor = torch.tensor(share_flat, dtype=torch.long)
+        self._share_group_index: torch.Tensor = torch.tensor(share_group_index, dtype=torch.long)
+        if shared_init:
+            self.shared_weights = nn.Parameter(torch.tensor(shared_init))
 
         self.weights = nn.Parameter(weight_matrix)
         # Plain typed attributes (not buffers): the module is never moved off CPU here, and buffers
@@ -190,6 +215,15 @@ class GraphNet(SubstrateModule):
                 input_positions = torch.tensor([position[node_id] for node_id in macro.input_node_ids], dtype=torch.long)
                 self._macro_entries[level].append((local_indices, input_positions, inner))
 
+    def _masked_weights(self) -> torch.Tensor:
+        """The forward weight matrix, with any weight-tied (shared-group) edges scattered in from the
+        shared parameter bank. With no shared edges this is exactly `self.weights * self.mask`."""
+        masked = self.weights * self.mask
+        if self._share_flat_index.numel():
+            scattered = masked.reshape(-1).index_copy(0, self._share_flat_index, self.shared_weights[self._share_group_index])
+            masked = scattered.reshape(self.n, self.n)
+        return masked
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
         values = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
@@ -198,7 +232,7 @@ class GraphNet(SubstrateModule):
         if self.bias_pos.numel():
             values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x.dtype, device=x.device))
 
-        masked = self.weights * self.mask
+        masked = self._masked_weights()
         for (level_positions, activation_groups), products, macros in zip(self._levels, self._product_entries, self._macro_entries):
             pre_activation = values @ masked[:, level_positions]
             for local_index, node_position, source_positions in products:
@@ -219,14 +253,20 @@ class GraphNet(SubstrateModule):
         return bool(self.mask.any())
 
     def export_weights(self) -> dict[tuple[int, int, bool], float]:
-        """Current edge weights keyed by (in_id, out_id, recurrent), for Lamarckian writeback."""
+        """Current edge weights keyed by (in_id, out_id, recurrent), for Lamarckian writeback. A
+        weight-tied edge reports its shared kernel value, so every placement writes back consistently."""
         detached = self.weights.detach()
-        return {(in_id, out_id, False): float(detached[source, target]) for in_id, out_id, source, target in self._edge_positions}
+        shared = self.shared_weights.detach() if hasattr(self, "shared_weights") else None
+        exported: dict[tuple[int, int, bool], float] = {}
+        for in_id, out_id, source, target in self._edge_positions:
+            group = self._shared_lookup.get((source, target))
+            exported[(in_id, out_id, False)] = float(shared[group]) if group is not None and shared is not None else float(detached[source, target])
+        return exported
 
     def core(self) -> tuple["GraphNet | None", "torch.Tensor | None"]:
-        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time; product and
-        # macro entries change the math; all fall back to the sequential path).
-        if type(self) is GraphNet and not any(self._product_entries) and not any(self._macro_entries):
+        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time; product, macro,
+        # and weight-tied entries change the math; all fall back to the sequential path).
+        if type(self) is GraphNet and not any(self._product_entries) and not any(self._macro_entries) and not self._share_flat_index.numel():
             return self, None
         return None, None
 
@@ -289,7 +329,7 @@ class RecurrentGraphNet(GraphNet):
         if x.dim() != 3:
             raise ValueError(f"RecurrentGraphNet expects [batch, time, features], got shape {tuple(x.shape)}")
         batch, steps, _features = x.shape
-        masked = self.weights * self.mask
+        masked = self._masked_weights()
         recurrent_masked = self.recurrent_weights * self.recurrent_mask
         previous = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
         outputs: list[torch.Tensor] = []
