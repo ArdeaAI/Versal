@@ -2,18 +2,26 @@
 name = "ardevo"
 version = "0.1.0"
 description = "Playground for evolution experimentation"
+authors = [{ name = "John Gardner (Sinjhin)", email = "john@ardea.io" }]
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "clearml>=1.16",
     "datasets>=5.0.0",
     "evosax>=0.2.0",
+    "matplotlib>=3.9",
+    "networkx>=3",
+    "psutil>=6.0",
     "rich",
     "torch>=2.12.0",
 ]
 
 [project.scripts]
 app = "ardevo.main:main"
+rung_doctor = "ardevo.tools.rung_doctor:main"
+render = "ardevo.tools.net_gallery:main"
+benchmark = "ardevo.tools.bench_throughput:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,6 +41,8 @@ dev = [
 [tool.ruff]
 line-length = 180
 target-version = "py312"
+# Vendored, generated single-file runtime; edit upstream in the Icarus-Dataset repo, not here.
+extend-exclude = ["ardevo/dataset/icarus.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
