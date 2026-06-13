@@ -55,6 +55,23 @@ def negative_support_loss(genome: Genome, metrics: dict[str, float]) -> float:
     return -float(metrics.get("support_loss", 0.0))
 
 
+# Bounded loss components: map an unbounded loss in [0, inf) to (0, 1] via 1/(1+loss) (1 at zero
+# loss, decaying toward 0). Raw `negative_support_loss` in (-inf, 0] otherwise DOMINATES the weighted
+# sum and drowns out support_accuracy [0,1] and weight_robustness [-1,1], so selection optimizes
+# brittle low-loss modules that then fail the robustness gate. Use these on the orchestrated/library
+# path where module robustness and transfer matter; the raw variants stay for the tuned flat configs.
+
+
+@FITNESS.register("bounded_negative_support_loss")
+def bounded_negative_support_loss(genome: Genome, metrics: dict[str, float]) -> float:
+    return 1.0 / (1.0 + max(float(metrics.get("support_loss", 0.0)), 0.0))
+
+
+@FITNESS.register("bounded_negative_query_loss")
+def bounded_negative_query_loss(genome: Genome, metrics: dict[str, float]) -> float:
+    return 1.0 / (1.0 + max(float(metrics.get("query_loss", 0.0)), 0.0))
+
+
 # --- weight-robustness components (metrics produced by the weight_samples / hybrid evaluate ops) ---
 # All default to 0.0 when the metric is absent so a misconfigured combo degrades instead of crashing.
 

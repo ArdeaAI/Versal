@@ -150,7 +150,9 @@ def _live_comp(species_id: int, in_width: int, out_width: int) -> CompositionGen
     return CompositionGenome(nodes=nodes, edges=edges)
 
 
-def test_attribution_credits_champion_and_decays_the_rest() -> None:
+def test_attribution_credits_champion_spares_referenced_decays_unreferenced() -> None:
+    """The champion of a referenced species takes the attributed value; its non-champion members are
+    SPARED (live stepping stones in an active species); only UNREFERENCED species decay."""
     loop = build_loop(_config())
     state = loop.fresh_state(random.Random(0))
     species_id = sorted(state.species_champions)[0]
@@ -160,8 +162,10 @@ def test_attribution_credits_champion_and_decays_the_rest() -> None:
     loop._attribute([item], state)
     champion_index = state.species_champion_index[species_id]
     assert state.modules[champion_index].fitness == 0.7
-    others = [index for members in state.species_members.values() for index in members if index != champion_index]
-    assert all(abs(state.modules[index].fitness - 0.45) < 1e-9 for index in others)  # 0.5 * decay
+    referenced_others = [index for index in state.species_members[species_id] if index != champion_index]
+    assert all(abs(state.modules[index].fitness - 0.5) < 1e-9 for index in referenced_others)  # spared
+    unreferenced = [index for sid, members in state.species_members.items() if sid != species_id for index in members]
+    assert all(abs(state.modules[index].fitness - 0.45) < 1e-9 for index in unreferenced)  # 0.5 * decay
 
 
 def test_decay_never_rewards_negative_fitness() -> None:

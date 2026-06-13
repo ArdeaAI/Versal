@@ -69,7 +69,9 @@ def gradient(
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss(module, encoded)
-        if not loss.requires_grad:
+        # Stop on no-grad (frozen params) OR a non-finite loss: Adam does not filter NaN/Inf grads,
+        # so stepping on them would silently corrupt every weight in the candidate.
+        if not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
         optimizer.step()
@@ -152,7 +154,7 @@ def gradient_batched(
                 # The P multiplier turns the folded MEAN into the SUM of per-candidate losses: each
                 # candidate's gradient (and Adam update) is exactly what the sequential path computes.
                 loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
-                if not loss.requires_grad:
+                if not loss.requires_grad or not torch.isfinite(loss):
                     break
                 loss.backward()
                 optimizer.step()

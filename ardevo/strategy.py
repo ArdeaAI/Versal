@@ -162,6 +162,10 @@ class DirectStrategy:
         seed_comps: list | None = None,
     ) -> StrategyResult:
         adapter = self._adapter(task)
+        # The direct population's library-reading mutators must sample from the SAME library the
+        # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
+        # can graft a macro ref that decode cannot satisfy -> a hard KeyError mid-search.
+        self.evolver.library = runtime.library
         # Grid tasks get coordinates stamped on the seed population so the geometry-biased
         # mutators (add_local_node and friends) can grow local receptive fields.
         grid = self._grid_shape(task) if not isinstance(adapter, TemporalTaskAdapter) else None

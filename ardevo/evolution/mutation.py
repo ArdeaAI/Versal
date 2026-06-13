@@ -319,8 +319,13 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
             )
         )
 
-    for port in (id_map[node_id] for node_id in source.input_ids):
-        source_node = rng.choice(host_sources)
+    # Sample DISTINCT host sources for the inlined module's input ports (without replacement) so the
+    # ports receive different signals; cycle only when the module has more ports than the host has
+    # sources. Wiring every port from one source would defeat the point of inlining found structure.
+    ports = [id_map[node_id] for node_id in source.input_ids]
+    distinct_sources = rng.sample(host_sources, min(len(ports), len(host_sources)))
+    for offset, port in enumerate(ports):
+        source_node = distinct_sources[offset % len(distinct_sources)]
         child.connections.append(ConnectionGene(source_node, port, 1.0, True, ctx.innovations.innovation(source_node, port)))
     for port in (id_map[node_id] for node_id in source.output_ids):
         for output in host_outputs:

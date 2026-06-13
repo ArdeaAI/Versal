@@ -165,6 +165,16 @@ def test_add_macro_node_places_and_wires(tmp_path: Path, solving_genome: Genome,
     assert add_macro_node(linear_genome, ctx, rng=random.Random(0), prob=1.0, max_outputs=0).macros == []
 
 
+def test_add_macro_node_samples_ctx_library_not_disk(tmp_path: Path, linear_genome: Genome) -> None:
+    """Regression for the empty-run crash: with an EMPTY ctx.library, add_macro_node must add no
+    macro (it samples ctx.library, never falling back to the on-disk "library" dir). Otherwise the
+    direct population grafts a macro ref the decode-time resolver cannot satisfy -> a hard KeyError."""
+    empty = ModuleLibrary(tmp_path / "empty_lib")
+    ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh"], default_activation="tanh", library=empty)
+    child = add_macro_node(linear_genome, ctx, rng=random.Random(0), prob=1.0)
+    assert child.macros == []
+
+
 def test_mutators_never_target_macro_stubs(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
     from ardevo.evolution.mutation import add_connection, add_deep_node, add_recurrent_connection, mutate_activation, mutate_aggregation
 

@@ -8,7 +8,9 @@ capped, so checkpoints are written only when a task admits novel library entries
 """
 
 import datetime
+import json
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,6 +51,10 @@ class OrchestratedTrial(Proctor):
         rungs_cfg = schedule_cfg.get("rungs", [1, 2, 3, 4, 5])
         self.rungs = list(range(1, 19)) if rungs_cfg == "all" else [int(rung) for rung in rungs_cfg]
         self.tasks_to_run = int(table.get("tasks", 20))
+        # Resume state is persisted every `checkpoint_every` tasks (default 1 = bit-stable resume);
+        # the per-task run_summary record is always written regardless of this cadence.
+        self.checkpoint_every = max(1, int(table.get("checkpoint_every", 1)))
+        self.task_records: list[dict[str, Any]] = []
 
         report = build_pool_report(
             source=config["dataset"],
@@ -86,6 +92,7 @@ class OrchestratedTrial(Proctor):
         if self.resume_dir:
             self.run_dir = Path(self.resume_dir)
             state, task_cursor, attempts, counters = self._restore()
+            self.task_records = self._load_prior_records()
             console.rule(f"[bold]Resuming orchestrated run at task {task_cursor} ({self.run_dir})")
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -93,28 +100,47 @@ class OrchestratedTrial(Proctor):
             self.run_dir.mkdir(parents=True, exist_ok=True)
             state = self.loop.fresh_state(random.Random(int(self.config.get("seed", 0))))
             task_cursor, attempts, counters = 0, [], None
+            self.task_records = []
             console.rule(f"[bold]Orchestrated run: rungs {self.rungs}, {len(self.pool)} tasks, library {self.library.root} -> {self.run_dir}")
 
-        orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
-        orchestrator.attempts = attempts
-        if counters:
-            orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
+        # A durable record exists before the first task so a crash during setup or task 0 leaves a
+        # diagnosable run_summary.json instead of an empty directory (the silent-failure mode we kill).
+        orchestrator: Orchestrator | None = None
+        try:
+            orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
+            orchestrator.attempts = attempts
+            if counters:
+                orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
+            self._write_run_summary(orchestrator, state, task_cursor, status="running")
+            while task_cursor < self.tasks_to_run:
+                index = self.scheduler.next_index(self.pool, state.rng)
+                entry = self.pool[index]
+                console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
+                library_keys_before = set(self.library.keys())
+                solution = orchestrator.solve(entry.task)
+                task_cursor += 1
+                new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
+                attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
+                outcome = attempt.outcome if attempt is not None else "unknown"
+                label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
+                console.print(f"  -> {label} (library size {len(self.library)})")
+                self._log_task(orchestrator, state, task_cursor)
+                # Durable record EVERY task, regardless of admission: a run is now measurable and
+                # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
+                self._record_task(entry, attempt, new_library_keys, len(self.library))
+                self._write_run_summary(orchestrator, state, task_cursor, status="running")
+                if task_cursor % self.checkpoint_every == 0:
+                    self._persist_resume_state(orchestrator, state, task_cursor)
+                if new_library_keys:
+                    self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
+        except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
+            self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
+            if orchestrator is not None:
+                self._persist_resume_state(orchestrator, state, task_cursor)
+            raise
 
-        while task_cursor < self.tasks_to_run:
-            index = self.scheduler.next_index(self.pool, state.rng)
-            entry = self.pool[index]
-            console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
-            library_keys_before = set(self.library.keys())
-            solution = orchestrator.solve(entry.task)
-            task_cursor += 1
-            new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
-            outcome = orchestrator.attempts[-1].outcome if orchestrator.attempts else "unknown"
-            label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
-            console.print(f"  -> {label} (library size {len(self.library)})")
-            self._log_task(orchestrator, state, task_cursor)
-            if new_library_keys:
-                self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
-
+        self._persist_resume_state(orchestrator, state, task_cursor)
+        self._write_run_summary(orchestrator, state, task_cursor, status="done")
         self.results = {
             "tasks_attempted": task_cursor,
             "library_size": len(self.library),
@@ -128,15 +154,85 @@ class OrchestratedTrial(Proctor):
         return self.results
 
     def _restore(self) -> tuple[HierarchicalState, int, list[Any], dict[str, int]]:
-        directory = checkpoint.latest_task_checkpoint_dir(self.run_dir)
+        # Prefer the rolling run-root checkpoint (written EVERY task, so it is the true latest
+        # state); fall back to the newest per-admission task_*/ checkpoint for pre-Phase-5 runs.
+        if (self.run_dir / "checkpoint.json").exists():
+            directory: Path | None = self.run_dir
+        else:
+            directory = checkpoint.latest_task_checkpoint_dir(self.run_dir)
         if directory is None:
-            raise FileNotFoundError(f"no task checkpoint found under {self.run_dir}")
+            raise FileNotFoundError(f"no checkpoint found under {self.run_dir}")
         data = checkpoint.read_checkpoint(directory)
         rng = checkpoint.deserialize_rng(data["rng"])
         state = state_from_dict(data["loop_state"], rng)
         self.scheduler.load_state_dict(data["schedule"])
         cast(Any, self.loop.evolver.speciate).load_state_dict(data["speciation"])
         return state, int(data["task_cursor"]), attempts_from_dicts(data["attempts"]), {k: int(v) for k, v in data["counters"].items()}
+
+    def _load_prior_records(self) -> list[dict[str, Any]]:
+        """On resume, recover the per-task records already written so run_summary.json stays
+        cumulative across resumes (best-effort: a malformed/absent summary just starts empty)."""
+        summary_path = self.run_dir / "run_summary.json"
+        if not summary_path.exists():
+            return []
+        try:
+            return list(json.loads(summary_path.read_text()).get("tasks", []))
+        except (ValueError, OSError):
+            return []
+
+    def _record_task(self, entry: TaskEntry, attempt: Any, new_library_keys: list[str], library_size: int) -> None:
+        self.task_records.append(
+            {
+                "rung": entry.rung,
+                "task": entry.name,
+                "outcome": attempt.outcome if attempt is not None else "unknown",
+                "metric": attempt.metric if attempt is not None else 0.0,
+                "strategy": attempt.strategy if attempt is not None else None,
+                "generations": attempt.generations if attempt is not None else 0,
+                "depth": attempt.depth if attempt is not None else 0,
+                "decompose_op": attempt.decompose_op if attempt is not None else None,
+                "failure_stage": attempt.failure_stage if attempt is not None else None,
+                "new_library_keys": list(new_library_keys),
+                "library_size": library_size,
+            }
+        )
+
+    def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:
+        """The always-on, cheap, durable record of a run: one row per attempted task plus aggregate
+        counters. Written every task and on crash, so a run is never an empty directory again.
+        Tolerates `orchestrator=None` so a crash during orchestrator construction is still recorded."""
+        outcomes = Counter(record["outcome"] for record in self.task_records)
+        summary = {
+            "run_dir": str(self.run_dir),
+            "status": status,
+            "rungs": self.rungs,
+            "tasks_attempted": task_cursor,
+            "tasks_to_run": self.tasks_to_run,
+            "library_size": len(self.library),
+            "library_keys": self.library.keys(),
+            "counters": dict(orchestrator.counters) if orchestrator is not None else {},
+            "outcomes": dict(outcomes),
+            "generations_run": state.generation,
+            "skipped_rungs": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
+            "tasks": self.task_records,
+        }
+        (self.run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
+
+    def _persist_resume_state(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
+        """Rolling resumable checkpoint at the run root, written every task (not gated on admission),
+        so a resume restores the EXACT latest state and RNG/scheduler never desync."""
+        checkpoint.write_checkpoint(
+            self.run_dir,
+            checkpoint.build_orchestrated_payload(
+                task_cursor=task_cursor,
+                rng=state.rng,
+                scheduler=self.scheduler,
+                speciator=self.loop.evolver.speciate,
+                loop_state=state_to_dict(state),
+                attempts=attempts_to_dicts(orchestrator.attempts),
+                counters=orchestrator.counters,
+            ),
+        )
 
     def _log_task(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
         for series, value in orchestrator.counters.items():

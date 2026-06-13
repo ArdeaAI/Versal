@@ -12,7 +12,10 @@ population forward) and checkpoint/resume the run.
 
 import random
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
+
+if TYPE_CHECKING:
+    from ardevo.library import ModuleLibrary
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
 from ardevo.evaluation import evaluate
@@ -104,12 +107,17 @@ class Evolver:
     # population trainer is already batched). Candidates are independent and assessment never
     # draws from the shared rng, so results are order-preserving and stream-identical.
     parallel_assess: int = 0
+    # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so
+    # they sample the SAME entries the decode-time macro resolver resolves. Left None on the pure
+    # flat path; the orchestrator's direct strategy sets it to the attached library. Without this the
+    # mutators fall back to a by-path cache that can diverge from the resolver and dangle a macro ref.
+    library: "ModuleLibrary | None" = None
     # Mirror of the species history and of the latest batched-training stats, for trial logging.
     species_history: list[dict[int, int]] = field(default_factory=list)
     assess_stats: dict[str, float] = field(default_factory=dict)
 
     def _context(self, state: EvolverState) -> MutationContext:
-        return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation)
+        return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
 
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""

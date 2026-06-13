@@ -16,7 +16,7 @@ silently shredding a module other tasks rely on.
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
 from ardevo.evaluation import evaluate
@@ -256,7 +256,10 @@ class HierarchicalLoop:
         return AssessedComposition(comp=comp, metrics=metrics, fitness=fitness, net=net)
 
     def _train(self, comp: CompositionGenome, net: ComposedNet, spec: CompTaskSpec, state: HierarchicalState) -> tuple[CompositionGenome, ComposedNet]:
-        self.evolver.train_op(comp, net, spec.encoded, rng=state.rng, writeback=False)
+        # Honor the train-op contract by capturing its (genome, module) return rather than relying on
+        # in-place mutation (writeback is False here; the hierarchical loop routes module writeback).
+        # With writeback=False the op returns the SAME comp/net it was handed, so the cast is exact.
+        comp, net = cast(tuple[CompositionGenome, ComposedNet], self.evolver.train_op(comp, net, spec.encoded, rng=state.rng, writeback=False))
         return comp, net
 
     def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
@@ -292,8 +295,10 @@ class HierarchicalLoop:
                     for index in state.species_members[species_id]:
                         if index == champion:
                             state.modules[index].fitness = value
-                        else:
-                            state.modules[index].fitness = self._decayed(state.modules[index].fitness)
+                        # A non-champion member of an ACTIVELY REFERENCED species is a live stepping
+                        # stone (exploration around a useful champion); leave its fitness intact rather
+                        # than decaying it toward neutral as if its species were unused. Only truly
+                        # unreferenced species decay (the loop below). Preserves structural diversity.
             elif ref.startswith("library:") and self.library is not None:
                 self.library.bump_stats(ref.removeprefix("library:"), value)
         for species_id, members in state.species_members.items():

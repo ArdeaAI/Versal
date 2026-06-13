@@ -349,7 +349,9 @@ class ComposedNet(SubstrateModule):
             ]
             if not contributions:
                 combined = torch.zeros(x.shape[0], node.in_width, dtype=x.dtype, device=x.device)
-            elif node.aggregation == "product" and len(contributions) > 1:
+            elif node.aggregation == "product":
+                # Honor the aggregation mode independently of the contribution count: a single
+                # contribution is just the product/sum of one term (identical value, clearer intent).
                 combined = contributions[0]
                 for contribution in contributions[1:]:
                     combined = combined * contribution

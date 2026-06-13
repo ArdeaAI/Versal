@@ -93,6 +93,20 @@ def test_add_library_module_inlines_and_stays_decodable(tmp_path: Path, solving_
     assert out.shape == (2, 1)
 
 
+def test_add_library_module_wires_distinct_host_sources(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    """Bug-8 regression: the inlined module's input ports must read DISTINCT host sources (sampled
+    without replacement), not all the same signal, when the host has enough sources."""
+    library_path = tmp_path / "lib"
+    _module_entry(ModuleLibrary(library_path), solving_genome)
+    ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh"], default_activation="tanh")
+    child = add_library_module(linear_genome, ctx, rng=random.Random(0), prob=1.0, path=str(library_path))
+    host_sources = set(linear_genome.input_ids) | set(linear_genome.bias_ids) | set(linear_genome.hidden_ids)
+    new_ids = set(child.nodes) - set(linear_genome.nodes)
+    input_wires = [conn for conn in child.connections if conn.in_id in host_sources and conn.out_id in new_ids and conn.weight == 1.0]
+    sources = [conn.in_id for conn in input_wires]
+    assert len(sources) >= 2 and len(sources) == len(set(sources))  # distinct, no duplicate wiring
+
+
 def test_dedupe_refreshes_ranking_metadata(tmp_path: Path, solving_genome: Genome) -> None:
     """B7 regression: a re-admission is fresh evidence; ranking fields take the max."""
     library = ModuleLibrary(tmp_path / "lib")

@@ -20,8 +20,8 @@
     "retired": false,
     "dependency": false,
     "stats": {
-      "use_count": 161,
-      "max_attributed_fitness": 0.9649580497661373
+      "use_count": 363,
+      "max_attributed_fitness": 1.0152700987334538
     }
   },
   {
@@ -45,8 +45,8 @@
     "retired": false,
     "dependency": false,
     "stats": {
-      "use_count": 458,
-      "max_attributed_fitness": 0.9649672741706309
+      "use_count": 647,
+      "max_attributed_fitness": 1.0152654130203882
     }
   },
   {
@@ -70,8 +70,8 @@
     "retired": false,
     "dependency": false,
     "stats": {
-      "use_count": 227,
-      "max_attributed_fitness": 0.9637406433047727
+      "use_count": 437,
+      "max_attributed_fitness": 1.005294090521189
     }
   },
   {
@@ -95,8 +95,8 @@
     "retired": false,
     "dependency": true,
     "stats": {
-      "use_count": 443,
-      "max_attributed_fitness": 0.964590325182071
+      "use_count": 653,
+      "max_attributed_fitness": 1.015284122797966
     }
   },
   {
@@ -120,8 +120,8 @@
     "retired": false,
     "dependency": false,
     "stats": {
-      "use_count": 349,
-      "max_attributed_fitness": 0.9648890419793316
+      "use_count": 552,
+      "max_attributed_fitness": 1.0152491319119872
     }
   }
 ]
