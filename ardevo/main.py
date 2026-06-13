@@ -1,4 +1,5 @@
 import argparse
+import os
 from typing import Any
 
 from ardevo.trials.continuous_trial import ContinuousTrial
@@ -40,12 +41,30 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None, help="Resume a continuous run from its run directory (e.g. results/<ts>_continuous).")
     args = parser.parse_args()
 
-    config = Config(conf_path=args.config)
+    config_path = args.config
+    # A ClearML agent re-runs the entry point with no CLI args, so `--config` is lost. Recover the
+    # config chosen at enqueue time from the task (stored in Pipeline._create_task) before loading it.
+    if config_path is None and os.environ.get("CLEARML_TASK_ID"):
+        from clearml import Task
+
+        config_path = Task.get_task(task_id=os.environ["CLEARML_TASK_ID"]).get_parameter("General/config_path") or None
+
+    config = Config(conf_path=config_path)
+    config.current["config_path"] = config_path or str(Config.DEFAULT_CONFIG)
     if args.resume:
         config.current["resume"] = args.resume
     configure_torch_threads(config.current)
-    configure_macro_resolver(config.current)
     logger = Logger.get_logger()
+
+    # Entity level (the meta-GA over the search itself): when enabled, evolve the search-control knobs
+    # on a small task batch and run the orchestrated trial under the tuned policy. Off by default and
+    # skipped on resume, so the ordinary path is byte-identical.
+    if config.current.get("entity", {}).get("enabled") and not args.resume:
+        from ardevo.evolution.entity import run_entity_layer
+
+        logger.info("entity layer enabled: evolving the search policy before the main run")
+        config.current = run_entity_layer(config.current)
+    configure_macro_resolver(config.current)
 
     pipe = Pipeline(config.current, load_data=False)
     logger.info("pipeline: %s", pipe.get_pipeline_info())

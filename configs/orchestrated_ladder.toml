@@ -228,3 +228,18 @@ w_support_accuracy = 1.0
 w_weight_robustness = 0.5
 w_hidden_penalty = 0.05
 w_complexity_penalty = 0.01
+
+[entity]                      # phase 6: the ENTITY level, a meta-GA over the SEARCH ITSELF. When
+                              # enabled it evolves the search-control knobs (novelty weight, refine
+                              # prob, stall window, depth budget, solvability floor) on a small task
+                              # batch, then runs the orchestrated trial under the tuned policy. This is
+                              # the macro analogue of the per-genome self-adaptive operator rates (the
+                              # micro level): the whole search evolves how it searches. EXPENSIVE (each
+                              # Entity eval is a full mini-run), so off by default; the owner enables it
+                              # for a meta-run. enabled=false keeps the ordinary path byte-identical.
+enabled = false
+pop_size = 6
+generations = 4
+elitism = 1
+sigma = 0.2
+batch_size = 4                # tasks per Entity evaluation (small: each is a full orchestrated mini-run)

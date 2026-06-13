@@ -88,6 +88,11 @@ class Pipeline:
             output_uri=self.config.get("output_uri", False),
         )
         self.task.connect(self.config.get("hyperparameters", {}))
+        config_path = self.config.get("config_path")
+        if config_path:
+            # The remote clone re-runs with no CLI args; persist which config to load so main() can
+            # recover it on the agent (see ardevo/main.py).
+            self.task.set_parameter("General/config_path", str(config_path))
         branch = get_current_branch()
         if self.repo and branch:
             self.task.set_repo(repo=self.repo, branch=branch)

@@ -160,6 +160,27 @@ stepping stones coexist instead of collapsing to the top-k by metric, and the mo
 diverse niches first, which is the cross-task compounding engine. ARC-AGI-3 remains a portability
 CONSTRAINT, not a build target this phase.
 
+Phase 6 made the SEARCH ITSELF self-modifying, and surfaced a latent bug along the way. The deceptive
+nonlinear wall (two_spirals plateaus near chance because the data is fitness-deceptive) now gets
+FUNCTIONAL NOVELTY pressure: selection blends true fitness with the sparseness of a genome's actual
+OUTPUT behavior against a per-evolve archive, so the population diverges through stepping stones
+instead of converging on the deceptive optimum (true fitness still picks the elites and champion).
+The latent bug: the champion was the best COMPOSITE-fitness genome, not the best task-solver, so the
+system was admitting and reporting the wrong network (it fit 0.55 of two_spirals while the search had
+already found 0.64); the champion now tracks the accept metric. The TRM recurrence-refine catch-22
+(each half is inert without the other, and two independent rare mutations almost never co-occur) is
+broken by `enable_refinement`, one atomic mutation that adds a recurrent loop AND raises the refine
+depth together. "Mutation as a meta-parameter" became real: per-genome operator rates are now evolved
+genes (`adaptive_rates`), perturbed and inherited, so the search tunes its own operator mix. The
+image wall got TRUE weight-tied convolution (`share_group` edges decode to one shared kernel; the
+`add_conv_motif` mutator tiles it across the coordinate grid), not the untied prior. The library
+archive niches on a FUNCTIONAL fixed-probe fingerprint so functionally-distinct solutions coexist.
+And the ENTITY level (`[entity]`, default-off) is a meta-GA that evolves the search's own knobs
+across task batches, the macro analogue of the per-genome rates. Measured: novelty + the catch-22
+breaker + the champion fix moved two_spirals support 0.55 -> 0.64 (controlled, same task and seed);
+the wall moved but is not solved, and cracking 32x32 images stays an honest Phase-7 boundary. Every
+Phase-6 lever is byte-identical to Phase 5 when disabled.
+
 On the prior art: CoDeepNEAT's two-population idea survives here as composition-genomes-referencing-
 species and fitness attribution; WANN's weight-agnostic insight survives as the robustness metric
 and the `weight_samples`/`hybrid` evaluate stage. Neither is implemented literally. evox was
