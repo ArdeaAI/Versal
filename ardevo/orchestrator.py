@@ -142,6 +142,12 @@ class Orchestrator:
         self.stall_epsilon = float(table.get("stall_epsilon", 0.005))
         self.max_depth = int(table.get("max_depth", 2))
         self.quick_eval_top_k = int(table.get("quick_eval_top_k", 5))
+        # Decompose solvability gate: before committing the depth budget to a decomposition, probe
+        # each subtask with a short evolve and require it to fit its support past this floor. A floor
+        # of 0.0 disables the gate (legacy behavior). It is what stops I/O-axis slicing from burning
+        # the whole budget on unsolvable parts (the two_spirals-class 0-for-N decompose failures).
+        self.decompose_solvability_floor = float(table.get("decompose_solvability_floor", 0.0))
+        self.decompose_probe_generations = int(table.get("decompose_probe_generations", 6))
         budgets = table.get("budgets", {})
         self.budgets = {int(name.removeprefix("depth")): int(value) for name, value in budgets.items()} or {0: 120, 1: 60, 2: 30}
         self.decomposers = build_decomposers(table)
@@ -303,9 +309,13 @@ class Orchestrator:
         subtasks: list[Subtask] = []
         for op_name, op in self.decomposers:
             produced = op(task, rng=self.state.rng)
-            if len(produced) >= 2:
-                chosen_name, subtasks = op_name, produced
-                break
+            if len(produced) < 2:
+                continue
+            if not self._subtasks_promising(produced):
+                logger.info("decompose op %s produced subtasks that fail the solvability probe; skipping", op_name)
+                continue
+            chosen_name, subtasks = op_name, produced
+            break
         if not subtasks:
             return None
         self.counters["decompositions"] += 1
@@ -346,6 +356,20 @@ class Orchestrator:
         self._failure_stage = "parent_re_evolve"
         self._failure_op = chosen_name
         return None
+
+    def _subtasks_promising(self, subtasks: list[Subtask]) -> bool:
+        """Probe each subtask with a short evolve and require it to fit its support past the
+        solvability floor. Floor 0.0 disables the gate. This is what catches decompositions whose
+        parts carry no learnable signal (e.g. classifying an entangled task from one input slice)
+        BEFORE the depth budget is spent recursing on them."""
+        if self.decompose_solvability_floor <= 0.0:
+            return True
+        for subtask in subtasks:
+            spec = comp_task_spec(subtask.task)
+            probe = self._evolve(subtask.task, spec, self.decompose_probe_generations)
+            if probe.champion_metrics.get("support_accuracy", 0.0) < self.decompose_solvability_floor:
+                return False
+        return True
 
     # --- admission ----------------------------------------------------------------------------------
 

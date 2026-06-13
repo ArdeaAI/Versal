@@ -275,6 +275,39 @@ def test_decompose_forensics_record_where_it_died(tmp_path: Path, decomposable_t
     assert orchestrator2.attempts[-1].failure_stage == "parent_re_evolve"
 
 
+def test_solvability_gate_off_by_default_passes_all(tmp_path: Path, decomposable_task: Task) -> None:
+    from ardevo.decompose import output_slices
+
+    orchestrator = _orchestrator(tmp_path)
+    assert orchestrator.decompose_solvability_floor == 0.0  # legacy behavior: gate disabled
+    subtasks = output_slices(decomposable_task, rng=random.Random(0), n_groups=2)
+    assert orchestrator._subtasks_promising(subtasks) is True  # no probe run when the floor is 0
+
+
+def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposable_task: Task) -> None:
+    from ardevo.decompose import output_slices
+    from ardevo.strategy import StrategyResult
+
+    orchestrator = _orchestrator(tmp_path, table={"decompose_solvability_floor": 0.6, "decompose_probe_generations": 2})
+    subtasks = output_slices(decomposable_task, rng=random.Random(0), n_groups=2)
+
+    # Probe reports support that cannot be fit past the floor -> the decomposition is rejected.
+    setattr(
+        orchestrator,
+        "_evolve",
+        lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.3}),
+    )
+    assert orchestrator._subtasks_promising(subtasks) is False
+
+    # Probe reports a fittable support -> the decomposition is allowed through.
+    setattr(
+        orchestrator,
+        "_evolve",
+        lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.95}),
+    )
+    assert orchestrator._subtasks_promising(subtasks) is True
+
+
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.0, "decompose": [], "budgets": {"depth0": 1}})
     orchestrator.solve(decomposable_task)

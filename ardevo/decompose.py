@@ -178,6 +178,36 @@ def time_windows(task: Task, *, rng: random.Random, n_windows: int = 2) -> list[
     return subtasks
 
 
+@DECOMPOSE.register("spatial_patches")
+def spatial_patches(task: Task, *, rng: random.Random, n_patches: int = 2) -> list[Subtask]:
+    """Slice BOTH input and output along their first shared SPATIAL axis (HEIGHT, else WIDTH) into
+    n_patches aligned bands: the grid->grid analogue of `time_windows`, and the ARC-portable
+    decomposition. Each subtask transforms a contiguous band of the grid and the bands tile back
+    losslessly along that axis. Unlike I/O-flat slicing on entangled tasks, a local grid transform
+    genuinely decomposes, because a band's output depends only on the same band's input.
+
+    Returns one Subtask per band, or [] when input and output do not share a spatial axis of equal
+    length (e.g. a grid->label classification task, where the output carries no spatial axis).
+    """
+    first_input, first_output = task.support[0]
+    spatial = next((axis for axis in (Axis.HEIGHT, Axis.WIDTH) if axis in first_input.axes and axis in first_output.axes), None)
+    if spatial is None:
+        return []
+    input_position = first_input.axes.index(spatial)
+    output_position = first_output.axes.index(spatial)
+    length = first_input.data.shape[input_position]
+    if first_output.data.shape[output_position] != length or length < n_patches:
+        return []
+    subtasks: list[Subtask] = []
+    for group, (start, end) in enumerate(_chunk_bounds(length, n_patches)):
+        support = [(_slice_field(inp, input_position, start, end), _slice_field(out, output_position, start, end)) for inp, out in task.support]
+        query = [(_slice_field(inp, input_position, start, end), _slice_field(out, output_position, start, end)) for inp, out in task.query]
+        child = Task(meta=_child_meta(task.meta, f".{spatial.value.lower()}{group}"), support=support, query=query)
+        port = PortSpec(role="spatial_patch", offsets=(start, end), width=end - start, descriptor=_field_descriptor(support[0][1]))
+        subtasks.append(Subtask(task=child, port=port))
+    return subtasks
+
+
 def build_decomposers(table: dict[str, Any]) -> list[tuple[str, Callable[..., list[Subtask]]]]:
     """Resolve the configured decompose ops and bind their `{name}_{param}` prefixed params.
 

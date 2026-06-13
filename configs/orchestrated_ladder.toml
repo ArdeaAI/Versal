@@ -52,10 +52,13 @@ evolve = ["direct", "composition"]   # DIRECT-FIRST (phase 5): direct grows stru
                                      # the recurrent substrate so temporal modules stop degenerating into
                                      # flat pass-throughs. Composition runs second to catch glue-reuse
                                      # cases (config order, first success wins, unspent budget rolls on).
-decompose = ["output_slices", "input_subsets", "time_windows"]
+decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 input_subsets_n_subsets = 2
 time_windows_n_windows = 2
+spatial_patches_n_patches = 2    # grid->grid: tile a band of the spatial axis (the ARC-portable split)
+decompose_solvability_floor = 0.6   # skip a decompose op whose probed subtasks cannot fit support this far
+decompose_probe_generations = 6     # short evolve to probe each subtask before committing the budget
   [orchestrator.budgets]      # evolve generations per recursion depth (shared across strategies)
   depth0 = 240
   depth1 = 120
@@ -106,7 +109,7 @@ elitism = 1
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
                               # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps"]
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -123,6 +126,15 @@ elitism = 1
   add_macro_node_max_outputs = 16
   tweak_refine_steps_prob = 0.06   # TRM lever: nudge per-genome refinement depth (paired with recurrence)
   tweak_refine_steps_max_steps = 6
+  # Geometry operators: no-ops without coordinates (the flat/module path), but on grid tasks the
+  # direct strategy stamps axis coordinates, so these grow LOCAL receptive fields and repeated
+  # motifs (a structural convolution prior, untied weights) -- the lever for the high-dim image wall.
+  add_local_node_prob = 0.1
+  add_local_node_fan_in = 4
+  add_local_connection_prob = 0.1
+  add_local_connection_radius = 1.5
+  add_shared_motif_prob = 0.05
+  add_shared_motif_copies = 2
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
   steps = 40
