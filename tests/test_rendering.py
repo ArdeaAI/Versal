@@ -51,7 +51,7 @@ def test_genome_spec_basic(solving_genome: Genome) -> None:
     assert spec.width > 0 and spec.height > 0
 
 
-def test_genome_spec_expands_macro(tmp_path: Path, solving_genome: Genome) -> None:
+def test_genome_spec_expands_macro_as_callout(tmp_path: Path, solving_genome: Genome) -> None:
     library = ModuleLibrary(tmp_path / "lib")
     key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
     spec = build_genome_spec(_macro_host(key), resolve=library_resolver(library))
@@ -60,18 +60,23 @@ def test_genome_spec_expands_macro(tmp_path: Path, solving_genome: Genome) -> No
     container = spec.containers[0]
     assert not container.opaque
     assert key in container.label and "L1" in container.label
-    # Stubs are absorbed: 4 host nodes (stub excluded) + the 6 inner nodes.
-    assert spec.node_count == 4 + len(solving_genome.nodes)
-    # Inner edges + the host readout (stub -> output) + the 2 macro boundary edges.
-    assert len(spec.edges) == len(solving_genome.enabled_connections()) + 1 + 2
+    # All 5 host nodes (the stub stays, as the macro's green footprint) + the 6 inner nodes.
+    assert spec.node_count == 5 + len(solving_genome.nodes)
+    # Inner edges + the host readout (stub -> output) + 2 implied macro edges + 1 green callout line.
+    assert len(spec.edges) == len(solving_genome.enabled_connections()) + 1 + 2 + 1
     assert any(edge.color == THEME["edge_macro"] for edge in spec.edges)
+    # The callout box sits ABOVE the host network, green-lined to the footprint stub.
+    callout_lines = [edge for edge in spec.edges if edge.color == THEME["edge_callout"]]
+    footprints = [node for node in spec.nodes if node.color == THEME["node_module"]]
+    assert len(callout_lines) == 1 and len(footprints) == 1
+    assert container.y0 > footprints[0].y
 
 
 def test_macro_missing_ref_is_opaque_box(solving_genome: Genome) -> None:
     spec = build_genome_spec(_macro_host("m1_gone"), resolve=lambda key: None)
     assert len(spec.containers) == 1 and spec.containers[0].opaque
-    assert spec.node_count == 4  # host only, stub absorbed, nothing expanded
-    assert len(spec.edges) == 1 + 2  # readout + boundary edges routed to the box ports
+    assert spec.node_count == 5  # host only (incl the footprint stub), nothing expanded
+    assert len(spec.edges) == 1 + 2 + 1  # readout + implied macro edges + the green callout line
 
 
 def test_cycle_guard_stops_expansion() -> None:
@@ -115,10 +120,12 @@ def test_composition_spec_expands_nested_chain() -> None:
     library = ModuleLibrary(_FIXTURE_LIBRARY)
     entry = library.load("c3_87a6e67226b1")
     spec = build_entry_spec(entry, resolve=library_resolver(library))
-    own_plain_nodes = sum(1 for node in entry.payload["nodes"] if node["kind"] != "module")
     assert len(spec.containers) >= 2  # c3 -> c2 -> m1 chain
     assert sum(1 for container in spec.containers if not container.opaque) >= 2
-    assert spec.node_count > own_plain_nodes
+    assert spec.node_count > len(entry.payload["nodes"])
+    # Every module footprint node gets a green line up to its callout box.
+    assert any(edge.color == THEME["edge_callout"] for edge in spec.edges)
+    assert any(node.color == THEME["node_module"] for node in spec.nodes)
 
 
 def test_recurrent_edge_is_dashed_curved() -> None:

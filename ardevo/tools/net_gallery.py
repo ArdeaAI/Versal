@@ -1,11 +1,10 @@
-"""net_gallery: re-render every library network after the fact, plus one contact-sheet PNG.
+"""render: re-render every library network after the fact, one full-size PNG per entry.
 
-    uv run python -m ardevo.tools.net_gallery --library library --out library/gallery.png
-    uv run python -m ardevo.tools.net_gallery --library library --per-entry renders/
+    uv run render                                  # one <key>.png per entry -> library/images/
+    uv run render --images renders/ --gallery      # custom dir, plus a single contact-sheet PNG
 
-The gallery is the single-file artistic overview of everything on the shelf; `--per-entry` writes
-one full-size `<key>.png` per entry. Both go through `ardevo.rendering`, so nested networks expand
-inline and a broken entry degrades to a labeled box instead of killing the sheet.
+Everything goes through `ardevo.rendering`, so nested networks expand into callout boxes across the
+top of each image and a broken entry degrades to a labeled box instead of killing the batch.
 """
 
 import argparse
@@ -42,11 +41,11 @@ def render_all_entries(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Render the library: one gallery PNG, optionally one PNG per entry.")
+    parser = argparse.ArgumentParser(description="Render the library: one PNG per entry, optionally a gallery contact sheet.")
     parser.add_argument("--library", default="library", help="library dir to render")
-    parser.add_argument("--out", default=None, help="gallery output path (default: <library>/gallery.png)")
-    parser.add_argument("--per-entry", default=None, help="also write one <key>.png per entry into this directory")
-    parser.add_argument("--columns", type=int, default=4)
+    parser.add_argument("--images", default=None, help="per-entry output dir (default: <library>/images)")
+    parser.add_argument("--gallery", nargs="?", const="__default__", default=None, help="also write a contact-sheet PNG (default path: <library>/gallery.png)")
+    parser.add_argument("--columns", type=int, default=4, help="gallery columns")
     parser.add_argument("--include-retired", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-dependencies", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
@@ -57,16 +56,18 @@ def main() -> None:
         return
     library = ModuleLibrary(library_root)
 
-    out_path = Path(args.out) if args.out else library_root / "gallery.png"
-    gallery_path = render_library_gallery(library, out_path, columns=args.columns, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
+    images_dir = Path(args.images) if args.images else library_root / "images"
+    rows = render_all_entries(library, images_dir, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
 
-    rows: list[dict[str, Any]] = []
-    if args.per_entry:
-        rows = render_all_entries(library, Path(args.per_entry), include_retired=args.include_retired, include_dependencies=args.include_dependencies)
+    gallery_note = ""
+    if args.gallery is not None:
+        gallery_path = library_root / "gallery.png" if args.gallery == "__default__" else Path(args.gallery)
+        render_library_gallery(library, gallery_path, columns=args.columns, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
+        gallery_note = f" | gallery -> {gallery_path}"
 
     from rich.table import Table
 
-    table = Table(title=f"net gallery: {library_root} ({len(library)} entries) -> {gallery_path}")
+    table = Table(title=f"render: {library_root} ({len(library)} entries) -> {images_dir}{gallery_note}")
     columns = ["key", "entry_type", "level", "status", "path"]
     for column in columns:
         table.add_column(column)

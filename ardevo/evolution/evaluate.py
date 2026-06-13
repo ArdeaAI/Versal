@@ -87,7 +87,7 @@ def _sample_metrics(module: SubstrateModule, adapter: "Adapter", samples: Sequen
 
     Frozen parameters (macro inners, library entries inside compositions) are deliberately
     excluded: robustness measures exactly the surface evolution and training control. The stacked
-    fast path exists but DEFAULTS OFF: ai/bench_throughput.py measured it 0.2-0.4x at widths
+    fast path exists but DEFAULTS OFF: `uv run benchmark` measured it 0.2-0.4x at widths
     16-256 because the batched forward does full-width level math (D times the FLOPs of the
     serial path's per-level column slicing); enable it only if the bench shows a win for your
     population shape. Non-batchable modules (recurrent, product, composed) always use the serial

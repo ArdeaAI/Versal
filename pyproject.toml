@@ -19,6 +19,9 @@ dependencies = [
 
 [project.scripts]
 app = "ardevo.main:main"
+rung_doctor = "ardevo.tools.rung_doctor:main"
+render = "ardevo.tools.net_gallery:main"
+benchmark = "ardevo.tools.bench_throughput:main"
 
 [build-system]
 requires = ["hatchling"]

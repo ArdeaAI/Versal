@@ -1,10 +1,14 @@
 """Artistic recursive renders of evolved networks: the full nested detail, dark, in one image.
 
-Compositions expand their module nodes inline and macro genomes draw the referenced library network
-inside a labeled container, recursively (depth- and budget-guarded), so the picture shows what the
-JSON actually encodes. These renders are an artistic overview: the library JSON stays the ground
-truth, so every failure mode (missing ref, cycle, over budget, undeserializable payload) degrades to
-a labeled opaque box instead of raising. A render must never kill a run or a gallery.
+Nested networks render as CALLOUTS: the host network keeps its natural compact layout (a macro's
+output stubs and a composition's module nodes stay in place as green footprint nodes), and each
+referenced network is drawn fully inside a translucent container packed into rows across the top of
+the frame, with a green line from the box to the footprint nodes it occupies. Callouts recurse
+(depth- and budget-guarded): a nested network's own callouts ride along inside its box.
+
+These renders are an artistic overview: the library JSON stays the ground truth, so every failure
+mode (missing ref, cycle, over budget, undeserializable payload) degrades to a labeled opaque box
+instead of raising. A render must never kill a run or a gallery.
 
 The build/draw split keeps layout pure: builders produce a `RenderSpec` (flat primitive lists in one
 shared coordinate frame; children are translated and merged into the parent at placement, never
@@ -34,9 +38,11 @@ THEME: dict[str, Any] = {
     "edge_recurrent": "#e0af68",
     "edge_macro": "#bb9af7",
     "edge_glue": "#7dcfff",
+    "edge_callout": "#6fd08c",
     "node_input": "#7aa2f7",
     "node_bias": "#566190",
     "node_output": "#f7768e",
+    "node_module": "#6fd08c",
     "cmap": "viridis",
     "cmap_range": (0.25, 1.0),  # truncate the dark low end so layer-0 hidden nodes pop on the dark bg
 }
@@ -48,6 +54,7 @@ GALLERY_NODE_BUDGET = 400
 _H_GAP = 1.6
 _V_GAP = 0.7
 _PAD = 0.9
+_CALLOUT_GAP = 1.4  # vertical clearance between the host network and the callout band
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -119,12 +126,10 @@ class _Budget:
 
 @dataclass(slots=True)
 class _Built:
-    """A nested network in LOCAL coordinates (extent [0, width] x [0, height]), plus the boundary
-    anchor points cross-boundary edges attach to. The parent translates everything at placement."""
+    """A nested network in LOCAL coordinates (extent [0, width] x [0, height]). The parent translates
+    everything at placement; nothing crosses the boundary except the green callout line."""
 
     spec: RenderSpec
-    input_ports: list[tuple[float, float]]
-    output_ports: list[tuple[float, float]]
     label: str = ""
     opaque: bool = False
 
@@ -142,27 +147,23 @@ class _Built:
             box.y0 += dy
             box.x1 += dx
             box.y1 += dy
-        self.input_ports = [(x + dx, y + dy) for x, y in self.input_ports]
-        self.output_ports = [(x + dx, y + dy) for x, y in self.output_ports]
 
 
 @dataclass(slots=True)
 class _Item:
-    """One placeable thing in a layered layout: a plain node (1x1 cell) or a child container."""
+    """One placeable node cell in the layered host layout."""
 
-    key: tuple[str, int]
+    key: int
     layer: int
-    width: float
-    height: float
-    preds: list[tuple[str, int]]
+    preds: list[int]
     sort_rank: tuple[int, int]
 
 
-def _place_items(items: list[_Item]) -> tuple[dict[tuple[str, int], tuple[float, float]], float, float]:
-    """Layered layout: x = layer column (width = widest item), y = stacked with barycenter ordering.
+def _place_items(items: list[_Item]) -> tuple[dict[int, tuple[float, float]], float, float]:
+    """Layered layout: x = layer column, y = stacked with barycenter ordering to reduce crossings.
 
-    Columns are laid out top-down from y = height; the whole frame is then in [0, width] x [0, height]
-    with every column vertically centered. Returns (center positions, width, height)."""
+    The frame is [0, width] x [0, height] with every column vertically centered. Returns
+    (center positions, width, height)."""
     by_layer: dict[int, list[_Item]] = {}
     for item in items:
         by_layer.setdefault(item.layer, []).append(item)
@@ -170,15 +171,9 @@ def _place_items(items: list[_Item]) -> tuple[dict[tuple[str, int], tuple[float,
     if not layers:
         return {}, 1.0, 1.0
 
-    col_width = {k: max(item.width for item in by_layer[k]) for k in layers}
-    col_x: dict[int, float] = {}
-    previous: int | None = None
-    for k in layers:
-        col_x[k] = col_width[k] / 2 if previous is None else col_x[previous] + col_width[previous] / 2 + _H_GAP + col_width[k] / 2
-        previous = k
-
-    height = max(sum(item.height for item in by_layer[k]) + _V_GAP * (len(by_layer[k]) - 1) for k in layers)
-    centers: dict[tuple[str, int], tuple[float, float]] = {}
+    col_x = {k: index * (1.0 + _H_GAP) + 0.5 for index, k in enumerate(layers)}
+    height = max(len(by_layer[k]) + _V_GAP * (len(by_layer[k]) - 1) for k in layers)
+    centers: dict[int, tuple[float, float]] = {}
     for index, k in enumerate(layers):
         column = by_layer[k]
         if index == 0:
@@ -190,19 +185,18 @@ def _place_items(items: list[_Item]) -> tuple[dict[tuple[str, int], tuple[float,
                 return sum(placed) / len(placed) if placed else 0.0
 
             column.sort(key=barycenter, reverse=True)  # highest predecessor mass lands on top
-        total = sum(item.height for item in column) + _V_GAP * (len(column) - 1)
+        total = len(column) + _V_GAP * (len(column) - 1)
         cursor = height / 2 + total / 2
         for item in column:
-            centers[item.key] = (col_x[k], cursor - item.height / 2)
-            cursor -= item.height + _V_GAP
+            centers[item.key] = (col_x[k], cursor - 0.5)
+            cursor -= 1.0 + _V_GAP
 
-    width = col_x[layers[-1]] + col_width[layers[-1]] / 2
+    width = col_x[layers[-1]] + 0.5
     return centers, width, height
 
 
 def _opaque_built(label: str) -> _Built:
-    spec = RenderSpec(width=1.6, height=1.2)
-    return _Built(spec=spec, input_ports=[(0.0, 0.6)], output_ports=[(1.6, 0.6)], label=label, opaque=True)
+    return _Built(spec=RenderSpec(width=1.6, height=1.2), label=label, opaque=True)
 
 
 def _place_child(spec: RenderSpec, child: _Built, center: tuple[float, float], depth: int) -> None:
@@ -214,6 +208,50 @@ def _place_child(spec: RenderSpec, child: _Built, center: tuple[float, float], d
     spec.edges.extend(child.spec.edges)
     spec.containers.extend(child.spec.containers)
     spec.containers.append(SpecContainer(cx - half_w - _PAD, cy - half_h - _PAD, cx + half_w + _PAD, cy + half_h + _PAD, label=child.label, depth=depth, opaque=child.opaque))
+
+
+def _attach_callouts(spec: RenderSpec, callouts: list[tuple[_Built, list[tuple[float, float]]]], host_width: float, host_height: float, depth: int) -> tuple[float, float]:
+    """Pack the expanded child boxes into rows across the TOP of the host frame and draw a green
+    line from each box to the footprint nodes it occupies down in the host network. Returns the
+    combined (width, height) of host + callout band."""
+    if not callouts:
+        return host_width, host_height
+    boxes = [(child.spec.width + 2 * _PAD, child.spec.height + 2 * _PAD) for child, _ in callouts]
+    available = max(host_width, max(box_w for box_w, _ in boxes))
+
+    # Center the host under a wider callout band so the green lines hang symmetrically.
+    host_shift = (available - host_width) / 2
+    if host_shift > 0:
+        _Built(spec=spec).translate(host_shift, 0.0)
+        callouts = [(child, [(x + host_shift, y) for x, y in anchors]) for child, anchors in callouts]
+
+    rows: list[list[int]] = [[]]
+    cursor = 0.0
+    for index, (box_w, _box_h) in enumerate(boxes):
+        advance = box_w if not rows[-1] else box_w + _H_GAP
+        if rows[-1] and cursor + advance > available:
+            rows.append([index])
+            cursor = box_w
+        else:
+            rows[-1].append(index)
+            cursor += advance
+
+    row_base = host_height + _CALLOUT_GAP
+    for row in rows:
+        row_height = max(boxes[i][1] for i in row)
+        row_width = sum(boxes[i][0] for i in row) + _H_GAP * (len(row) - 1)
+        x_cursor = (available - row_width) / 2  # center each row over the host
+        for i in row:
+            box_w, box_h = boxes[i]
+            child, anchors = callouts[i]
+            cx, cy = x_cursor + box_w / 2, row_base + box_h / 2
+            _place_child(spec, child, (cx, cy), depth)
+            for anchor_x, anchor_y in anchors:
+                spec.edges.append(SpecEdge(cx, row_base, anchor_x, anchor_y, width=1.0, color=THEME["edge_callout"], alpha=0.55))
+            x_cursor += box_w + _H_GAP
+        row_base += row_height + _V_GAP
+
+    return available, row_base - _V_GAP
 
 
 def _build_ref(ref: str, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
@@ -260,7 +298,7 @@ def _layer_color(layer: int, max_layer: int) -> str:
 def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
     spec = RenderSpec()
     if not genome.nodes:
-        return _Built(spec=spec, input_ports=[], output_ports=[])
+        return _Built(spec=spec)
 
     # Layering: longest-path depth over forward + macro-implied edges. Cyclic genomes (crossover
     # artifacts) fall back to a pruned copy for LAYOUT only; edges still draw from the original.
@@ -281,12 +319,6 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
         layer[node_id] = 0 if not predecessors else 1 + max(layer[pred] for pred in predecessors)
 
     stub_ids = genome.macro_output_ids
-    stub_owner: dict[int, tuple[int, int]] = {}
-    for macro_index, macro in enumerate(genome.macros):
-        for position, stub_id in enumerate(macro.output_node_ids):
-            stub_owner[stub_id] = (macro_index, position)
-
-    children = [_build_ref(macro.ref, resolve=resolve, budget=budget, depth=depth, stack=stack) for macro in genome.macros]
 
     degree: dict[int, int] = {node_id: 0 for node_id in genome.nodes}
     for conn in genome.enabled_connections():
@@ -296,52 +328,21 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
         degree[source] = degree.get(source, 0) + 1
         degree[target] = degree.get(target, 0) + 1
 
-    def item_key(node_id: int) -> tuple[str, int]:
-        return ("macro", stub_owner[node_id][0]) if node_id in stub_ids else ("node", node_id)
-
-    preds_of: dict[int, list[tuple[str, int]]] = {}
-    for conn in genome.forward_connections():
-        if conn.out_id not in stub_ids:
-            preds_of.setdefault(conn.out_id, []).append(item_key(conn.in_id))
-
     kind_rank = {NodeKind.INPUT: 0, NodeKind.BIAS: 1, NodeKind.HIDDEN: 2, NodeKind.OUTPUT: 3}
-    items: list[_Item] = []
+    items = [_Item(key=node.id, layer=layer.get(node.id, 0), preds=incoming.get(node.id, []), sort_rank=(kind_rank[node.kind], node.id)) for node in genome.nodes.values()]
+    positions, host_width, host_height = _place_items(items)
+    budget.remaining -= len(genome.nodes)
+
+    drawn_max_layer = max(layer.values(), default=1) or 1
     for node in genome.nodes.values():
-        if node.id in stub_ids:
-            continue  # stubs participate in layering but are absorbed into the macro container
-        items.append(_Item(key=("node", node.id), layer=layer.get(node.id, 0), width=1.0, height=1.0, preds=preds_of.get(node.id, []), sort_rank=(kind_rank[node.kind], node.id)))
-    for macro_index, macro in enumerate(genome.macros):
-        child = children[macro_index]
-        macro_layer = 1 + max((layer.get(input_id, 0) for input_id in macro.input_node_ids), default=0)
-        macro_preds = [item_key(input_id) for input_id in macro.input_node_ids]
-        items.append(
-            _Item(
-                key=("macro", macro_index),
-                layer=macro_layer,
-                width=child.spec.width + 2 * _PAD,
-                height=child.spec.height + 2 * _PAD,
-                preds=macro_preds,
-                sort_rank=(2, 10_000 + macro_index),
-            )
-        )
-
-    centers, width, height = _place_items(items)
-    spec.width, spec.height = width, height
-    budget.remaining -= len(genome.nodes) - len(stub_ids)
-
-    for macro_index in range(len(genome.macros)):
-        _place_child(spec, children[macro_index], centers[("macro", macro_index)], depth + 1)
-
-    positions: dict[int, tuple[float, float]] = {}
-    drawn_max_layer = max((layer.get(node_id, 0) for node_id in genome.nodes if node_id not in stub_ids), default=1) or 1
-    for node in genome.nodes.values():
-        if node.id in stub_ids:
-            continue
-        x, y = centers[("node", node.id)]
-        positions[node.id] = (x, y)
+        x, y = positions[node.id]
         node_degree = degree.get(node.id, 0)
         isolated = node_degree == 0
-        if node.kind is NodeKind.INPUT:
+        if node.id in stub_ids:
+            # A macro's footprint in the host: a green hexagon (distinct from viridis hidden
+            # circles), matching the callout line up to its expansion.
+            color, marker, alpha = THEME["node_module"], "h", 1.0
+        elif node.kind is NodeKind.INPUT:
             color, marker, alpha = THEME["node_input"], "s", 1.0
         elif node.kind is NodeKind.BIAS:
             color, marker, alpha = THEME["node_bias"], "s", 0.7
@@ -352,18 +353,8 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
         size = 0.5 if isolated else min(1.0 + 0.15 * node_degree, 2.5)
         spec.nodes.append(SpecNode(x, y, color, size=size, marker=marker, alpha=0.25 if isolated else alpha))
 
-    def stub_position(stub_id: int) -> tuple[float, float] | None:
-        macro_index, position = stub_owner[stub_id]
-        ports = children[macro_index].output_ports
-        return ports[min(position, len(ports) - 1)] if ports else None
-
-    def endpoint(node_id: int) -> tuple[float, float] | None:
-        return stub_position(node_id) if node_id in stub_ids else positions.get(node_id)
-
     for conn in genome.enabled_connections():
-        if conn.out_id in stub_ids:
-            continue  # mutators never target stubs; skip defensively if one slipped in
-        source, target = endpoint(conn.in_id), endpoint(conn.out_id)
+        source, target = positions.get(conn.in_id), positions.get(conn.out_id)
         if source is None or target is None:
             continue
         if conn.recurrent:
@@ -372,24 +363,25 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
             )
         else:
             spec.edges.append(SpecEdge(source[0], source[1], target[0], target[1], width=_edge_width(conn.weight), color=THEME["edge_forward"], alpha=0.35))
-    for macro_index, macro in enumerate(genome.macros):
-        ports = children[macro_index].input_ports
-        for position, input_id in enumerate(macro.input_node_ids):
-            source = endpoint(input_id)
-            if source is None or not ports:
-                continue
-            target = ports[min(position, len(ports) - 1)]
-            spec.edges.append(SpecEdge(source[0], source[1], target[0], target[1], width=1.0, color=THEME["edge_macro"], alpha=0.5))
+    for source, target in macro_implied_edges(genome):
+        source_pos, target_pos = positions.get(source), positions.get(target)
+        if source_pos is None or target_pos is None:
+            continue
+        spec.edges.append(SpecEdge(source_pos[0], source_pos[1], target_pos[0], target_pos[1], width=1.0, color=THEME["edge_macro"], alpha=0.4))
 
-    input_ports = [positions[node_id] for node_id in genome.input_ids if node_id in positions]
-    output_ports = [positions[node_id] for node_id in genome.output_ids if node_id in positions]
-    return _Built(spec=spec, input_ports=input_ports, output_ports=output_ports)
+    callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
+    for macro in genome.macros:
+        child = _build_ref(macro.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
+        anchors = [positions[stub_id] for stub_id in macro.output_node_ids if stub_id in positions]
+        callouts.append((child, anchors))
+    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
+    return _Built(spec=spec)
 
 
 def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
     spec = RenderSpec()
     if not comp.nodes:
-        return _Built(spec=spec, input_ports=[], output_ports=[])
+        return _Built(spec=spec)
 
     layer: dict[int, int] = {}
     incoming: dict[int, list[int]] = {}
@@ -402,72 +394,43 @@ def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _
     except ValueError:
         layer = {node_id: 0 for node_id in comp.nodes}
 
-    module_nodes = [node for node in comp.nodes.values() if node.kind is CompNodeKind.MODULE]
-    children = {node.id: _build_ref(node.ref, resolve=resolve, budget=budget, depth=depth, stack=stack) for node in module_nodes}
-
-    def item_key(node_id: int) -> tuple[str, int]:
-        return ("module", node_id) if node_id in children else ("node", node_id)
-
-    preds_of: dict[int, list[tuple[str, int]]] = {}
-    for edge in comp.enabled_edges():
-        preds_of.setdefault(edge.out_id, []).append(item_key(edge.in_id))
-
-    items: list[_Item] = []
-    for node in comp.nodes.values():
-        if node.id in children:
-            child = children[node.id]
-            items.append(
-                _Item(
-                    key=("module", node.id),
-                    layer=layer.get(node.id, 0),
-                    width=child.spec.width + 2 * _PAD,
-                    height=child.spec.height + 2 * _PAD,
-                    preds=preds_of.get(node.id, []),
-                    sort_rank=(1, node.id),
-                )
-            )
-        else:
-            rank = 0 if node.kind is CompNodeKind.INPUT else 2
-            items.append(_Item(key=("node", node.id), layer=layer.get(node.id, 0), width=1.0, height=1.0, preds=preds_of.get(node.id, []), sort_rank=(rank, node.id)))
-
-    centers, width, height = _place_items(items)
-    spec.width, spec.height = width, height
-    budget.remaining -= len(comp.nodes) - len(children)
-
-    # Boundary anchors: glue is a width x width linear map, so each comp edge draws as ONE aggregate
-    # strand between container/node anchors, never a per-neuron fan-out.
-    left_anchor: dict[int, tuple[float, float]] = {}
-    right_anchor: dict[int, tuple[float, float]] = {}
-    for node_id, child in children.items():
-        cx, cy = centers[("module", node_id)]
-        _place_child(spec, child, (cx, cy), depth + 1)
-        half_w = child.spec.width / 2 + _PAD
-        left_anchor[node_id] = (cx - half_w, cy)
-        right_anchor[node_id] = (cx + half_w, cy)
+    kind_rank = {CompNodeKind.INPUT: 0, CompNodeKind.MODULE: 1, CompNodeKind.OUTPUT: 2}
+    items = [_Item(key=node.id, layer=layer.get(node.id, 0), preds=incoming.get(node.id, []), sort_rank=(kind_rank[node.kind], node.id)) for node in comp.nodes.values()]
+    positions, host_width, host_height = _place_items(items)
+    budget.remaining -= len(comp.nodes)
 
     for node in comp.nodes.values():
-        if node.id in children:
-            continue
-        x, y = centers[("node", node.id)]
-        left_anchor[node.id] = (x, y)
-        right_anchor[node.id] = (x, y)
-        if node.kind is CompNodeKind.INPUT:
+        x, y = positions[node.id]
+        if node.kind is CompNodeKind.MODULE:
+            color = THEME["node_module"]
+            marker = "h"  # hexagon: the footprint shape, matching the green callout line
+            size = 1.0 + math.log2(1 + max(node.in_width, node.out_width)) / 4
+        elif node.kind is CompNodeKind.INPUT:
             color = THEME["node_bias"] if node.ref == "__bias__" else THEME["node_input"]
+            marker = "s"
             size = 1.0 + math.log2(1 + node.out_width) / 4
         else:
             color = THEME["node_output"]
+            marker = "s"
             size = 1.0 + math.log2(1 + node.in_width) / 4
-        spec.nodes.append(SpecNode(x, y, color, size=size, marker="s"))
+        spec.nodes.append(SpecNode(x, y, color, size=size, marker=marker))
 
+    # Glue is a width x width linear map, so each comp edge draws as ONE aggregate strand between
+    # node centers, never a per-neuron fan-out.
     for edge in comp.enabled_edges():
-        source = right_anchor.get(edge.in_id)
-        target = left_anchor.get(edge.out_id)
+        source, target = positions.get(edge.in_id), positions.get(edge.out_id)
         if source is None or target is None:
             continue
         strength = max((abs(value) for value in edge.glue), default=0.0)
         spec.edges.append(SpecEdge(source[0], source[1], target[0], target[1], width=_edge_width(strength), color=THEME["edge_glue"], alpha=0.5))
 
-    return _Built(spec=spec, input_ports=[(0.0, height / 2)], output_ports=[(width, height / 2)])
+    callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
+    for node in comp.nodes.values():
+        if node.kind is CompNodeKind.MODULE:
+            child = _build_ref(node.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
+            callouts.append((child, [positions[node.id]]))
+    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
+    return _Built(spec=spec)
 
 
 # --- public builders -------------------------------------------------------------------------------
@@ -579,8 +542,8 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str) -> Path:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig_w = min(max(spec.width * 0.5, 6.0), 26.0)
-    fig_h = min(max(spec.height * 0.5, 4.5), 26.0)
+    fig_w = min(max(spec.width * 0.6, 6.0), 30.0)
+    fig_h = min(max(spec.height * 0.6, 4.5), 30.0)
     figure, axis = plt.subplots(figsize=(fig_w, fig_h))
     figure.patch.set_facecolor(THEME["background"])
     draw_spec(axis, spec, title=title)
@@ -592,13 +555,13 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str) -> Path:
 
 
 def render_network(directory: Path, genome: Genome, *, title: str, library: ModuleLibrary | None = None) -> Path:
-    """Render a flat genome (macros expanded when a library is supplied) to `net.png`."""
+    """Render a flat genome (macros expand into callouts when a library is supplied) to `net.png`."""
     resolve = library_resolver(library) if library is not None else None
     return _render_spec_png(directory / "net.png", build_genome_spec(genome, resolve=resolve), title)
 
 
 def render_composition_network(directory: Path, comp: CompositionGenome, *, title: str, library: ModuleLibrary | None = None) -> Path:
-    """Render a composition (module refs expanded when a library is supplied) to `net.png`."""
+    """Render a composition (module refs expand into callouts when a library is supplied) to `net.png`."""
     resolve = library_resolver(library) if library is not None else None
     return _render_spec_png(directory / "net.png", build_composition_spec(comp, resolve=resolve), title)
 

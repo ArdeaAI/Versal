@@ -104,13 +104,14 @@ admits novel library entries, its checkpoint (`task_<NNNN>/`), net image, specia
 ledger, library growth, and module-pool stats land in stats.json and ClearML (`Orchestrator/*`,
 `Modules/*`, `Fitness/comp_*`, `Robustness/*`).
 
-Net images are recursive and dark (`ardevo/rendering.py`): a composition draws each referenced
-library entry's full inner structure inside a labeled container, and a macro draws its embedded
-network inline, nested to depth 4 (anything unresolvable degrades to a labeled opaque box). Re-render
-everything after the fact, including one gallery contact sheet of the whole library:
+Net images are recursive and dark (`ardevo/rendering.py`): the host network keeps its compact
+layout with green hexagon footprints where nested networks plug in, and each referenced library
+entry draws fully inside a translucent callout box packed across the top of the frame, green-lined
+to its footprint, nested to depth 4 (anything unresolvable degrades to a labeled opaque box).
+Re-render everything after the fact:
 
 ```bash
-uv run python -m ardevo.tools.net_gallery --per-entry renders/   # library/gallery.png + one PNG per entry
+uv run render             # one library/images/<key>.png per entry (--gallery adds a contact sheet)
 ```
 
 New substrate primitives make layered complexity EXPRESSIBLE while staying grown-from-minimal:
@@ -135,7 +136,7 @@ per-signature cap that tombstones, never deletes), readmission-refreshing dedupe
 queries. Decompose failures now say WHERE they died (`failure_stage`, per-stage counters), skipped
 rungs are loud (stats + console + `ardevo/tools/rung_doctor.py`), and compositions can carry
 factored rank-r glue (`glue_rank_threshold`) so wide rungs do not explode entry sizes. Honest
-throughput note from `ai/bench_throughput.py`: thread-parallel assessment and stacked sample-eval
+throughput note from `uv run benchmark` (`ardevo/tools/bench_throughput.py`): thread-parallel assessment and stacked sample-eval
 measured SLOWER at current kernel sizes and ship default-off; the partitioned `gradient_batched`
 trainer (1.5x CPU / 2.1x MPS at pop 48) is the lever that pays, and the direct strategy can use it.
 
@@ -206,7 +207,11 @@ ardevo/
 ├── orchestrator.py     # the escalation-ladder policy: lookup -> evolve -> decompose/recurse -> admit
 ├── checkpoint.py       # serialize/restore continuous + orchestrated runs for --resume
 ├── results.py          # per-run local artifacts (stats, model, speciation chart)
-├── rendering.py        # recursive dark network renders: compositions/macros expand library refs inline
+├── rendering.py        # recursive dark network renders: nested networks as callout boxes over the host
+├── tools/
+│   ├── rung_doctor.py      # uv run rung_doctor: probe rung loadability/shapes without a run
+│   ├── net_gallery.py      # uv run render: re-render the library to library/images/<key>.png
+│   └── bench_throughput.py # uv run benchmark: measured throughput truths
 ├── trials/
 │   ├── xor_trial.py        # EvolutionTrial(Proctor): runs + logs one rung
 │   ├── continuous_trial.py # ContinuousTrial(Proctor): one topology across interleaved rungs
