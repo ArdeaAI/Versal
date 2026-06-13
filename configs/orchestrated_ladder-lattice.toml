@@ -37,6 +37,21 @@ rungs = [1, 2, 3, 4, 5] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]
 tasks_per_rung = 100
 shuffle = true
 
+[entity]                      # phase 6: the ENTITY level, a meta-GA over the SEARCH ITSELF. When
+                              # enabled it evolves the search-control knobs (novelty weight, refine
+                              # prob, stall window, depth budget, solvability floor) on a small task
+                              # batch, then runs the orchestrated trial under the tuned policy. This is
+                              # the macro analogue of the per-genome self-adaptive operator rates (the
+                              # micro level): the whole search evolves how it searches. EXPENSIVE (each
+                              # Entity eval is a full mini-run), so off by default; the owner enables it
+                              # for a meta-run. enabled=false keeps the ordinary path byte-identical.
+enabled = true
+pop_size = 6
+generations = 4
+elitism = 1
+sigma = 0.2
+batch_size = 4                # tasks per Entity evaluation (small: each is a full orchestrated mini-run)
+
 [orchestrator]
 tasks = 400                    # how many scheduled tasks this run attempts
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
@@ -88,6 +103,9 @@ per_niche_cap = 2             # max entries per (io shape, behavior niche): dist
                               # coexist (small/deep, recurrent/refining, gated, macro) for recombination
 max_per_signature = 12        # total live entries per io shape across all niches; the weakest is
                               # tombstoned (never deleted) when full, so existing refs keep assembling
+refine_depth_threshold = 0.85 # phase 6: admit deep-refine (refine_steps>1) stepping stones at this
+                              # lower bar so the recursion niche can bootstrap from zero (it adds
+                              # diversity, not a marginally higher metric); other niches keep min_metric
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]
@@ -112,7 +130,7 @@ elitism = 1
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
                               # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "enable_refinement", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "add_conv_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -124,6 +142,9 @@ elitism = 1
   mutate_aggregation_prob = 0.05
   mutate_aggregation_max_fan_in = 4
   add_recurrent_connection_prob = 0.04
+  enable_refinement_prob = 0.03   # phase 6: ONE atomic recurrent-self-loop + refine_steps>=2 mutation
+                                  # that breaks the TRM catch-22 (the two halves are inert apart, and
+                                  # their independent co-occurrence ~0.0024 never clears the stall window)
   add_library_module_prob = 0.05
   add_macro_node_prob = 0.05
   add_macro_node_max_outputs = 16
@@ -138,6 +159,12 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
+  # add_conv_motif: a WEIGHT-TIED kernel tiled across the grid (true convolution; one shared weight per
+  # tap reused at every tile). The image-wall lever proper: untied motifs above cannot scale to full
+  # grids, a shared kernel can. No-op on non-grid tasks (no coordinates).
+  add_conv_motif_prob = 0.06
+  add_conv_motif_kernel = 4
+  add_conv_motif_copies = 6
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
   steps = 40
@@ -156,6 +183,19 @@ elitism = 1
   c_excess = 1.0
   c_disjoint = 1.0
   c_weight = 0.5
+
+  [evolution.novelty]         # phase 6: functional novelty / quality-diversity SELECTION pressure.
+                              # Selection blends true fitness with the sparseness of a genome's
+                              # FUNCTIONAL behavior (its outputs on the support set) against a per-
+                              # evolve archive, so the search diverges through stepping stones instead
+                              # of collapsing onto the deceptive optimum (two_spirals). Elitism and the
+                              # champion still use TRUE fitness. enabled=false keeps the flat path exact.
+  enabled = true
+  weight = 0.5                # 0 = pure fitness, 1 = pure novelty
+  k = 10                      # k-nearest behaviors for the sparseness measure
+  archive_max = 200           # bounded behavior archive (oldest evicts first)
+  add_prob = 0.1              # chance to also archive a random individual each generation
+  descriptor_dim = 64         # cap on the functional descriptor length (bounded for image widths)
 
   [evolution.composition]     # the per-task composition population (level 2+)
   pop_size = 48
