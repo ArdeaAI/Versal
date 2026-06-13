@@ -26,7 +26,7 @@ from torch import nn
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, make_acyclic
 from ardevo.evolution.registry import Registry
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
-from ardevo.substrate import SubstrateModule, decode
+from ardevo.substrate import SubstrateModule, decode_module
 
 BIAS_REF = "__bias__"
 
@@ -194,10 +194,10 @@ class AssemblyContext:
 def _decode_ref_module(genome: Genome, n_inputs: int, n_outputs: int, library: ModuleLibrary | None = None) -> SubstrateModule:
     resolver = macro_resolver(library) if library is not None else None
     try:
-        return decode(genome, n_inputs, n_outputs, macro_resolver=resolver)
+        return decode_module(genome, n_inputs, n_outputs, macro_resolver=resolver)
     except ValueError as error:
         try:
-            return decode(make_acyclic(genome), n_inputs, n_outputs, macro_resolver=resolver)
+            return decode_module(make_acyclic(genome), n_inputs, n_outputs, macro_resolver=resolver)
         except ValueError as repaired_error:
             raise CompositionAssemblyError(str(repaired_error)) from error
 

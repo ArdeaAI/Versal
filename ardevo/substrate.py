@@ -335,6 +335,43 @@ class RecurrentGraphNet(GraphNet):
         return exported
 
 
+class RefineGraphNet(RecurrentGraphNet):
+    """Iterative-refinement decode (the TRM idea: recursion is effective depth without parameters).
+
+    Re-applies the network to a STATIC input `steps` times, threading node state across passes via
+    the genome's recurrent edges: hidden->hidden recurrent edges carry the latent reasoning `z`, and
+    output->hidden recurrent edges feed the current answer back in (TRM's `y`). The readout after the
+    last pass is the refined answer. `steps == 1` is exactly one feedforward pass (the previous state
+    is zero, so recurrent edges are inert), which is why the adapter keeps plain `decode` at steps 1
+    and the flat path stays byte-identical. Refinement only does work once the genome evolves
+    recurrent edges to thread state between passes (`add_recurrent_connection`)."""
+
+    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, steps: int, *, macro_resolver: MacroResolver | None = None) -> None:
+        super().__init__(genome, n_inputs, n_outputs, "last", macro_resolver=macro_resolver)
+        if steps < 1:
+            raise ValueError(f"refine steps must be >= 1, got {steps}")
+        self.steps = steps
+
+    def _repeat(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 2:
+            raise ValueError(f"RefineGraphNet expects a static [batch, features] input, got shape {tuple(x.shape)}")
+        return x.unsqueeze(1).expand(x.shape[0], self.steps, x.shape[1])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return super().forward(self._repeat(x))  # mode="last": the final refined readout [batch, n_outputs]
+
+    def refine_trace(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-pass readouts `[batch, steps, n_outputs]` for DEEP SUPERVISION (a loss at every pass,
+        the signal that makes deep recursion train well in the small-data regime)."""
+        saved_mode = self.mode
+        self.mode = "all"
+        try:
+            flat = super().forward(self._repeat(x))  # [batch, steps * n_outputs], t-major
+        finally:
+            self.mode = saved_mode
+        return flat.reshape(x.shape[0], self.steps, self.output_pos.numel())
+
+
 def decode(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
     """Build the torch module for a genome."""
     return GraphNet(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
@@ -343,3 +380,19 @@ def decode(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: Mac
 def decode_recurrent(genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last", *, macro_resolver: MacroResolver | None = None) -> RecurrentGraphNet:
     """Build the stepped (time-axis) torch module for a genome."""
     return RecurrentGraphNet(genome, n_inputs, n_outputs, mode, macro_resolver=macro_resolver)
+
+
+def decode_refine(genome: Genome, n_inputs: int, n_outputs: int, *, steps: int | None = None, macro_resolver: MacroResolver | None = None) -> RefineGraphNet:
+    """Build the iterative-refinement module for a genome (static input, re-applied `steps` times)."""
+    resolved = genome.refine_steps if steps is None else steps
+    return RefineGraphNet(genome, n_inputs, n_outputs, resolved, macro_resolver=macro_resolver)
+
+
+def decode_module(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
+    """Decode honoring the genome's evolved refinement depth: refine substrate when refine_steps > 1,
+    plain feedforward otherwise. Use this at every STATIC-task decode site that evaluates or reuses a
+    genome (adapter, library lookup re-eval, composition inner), so a module that needs its refine
+    passes keeps working wherever it is reused, never silently collapsing to a single pass."""
+    if genome.refine_steps > 1:
+        return decode_refine(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
+    return decode(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)

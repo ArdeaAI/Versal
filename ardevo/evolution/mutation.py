@@ -379,6 +379,18 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
     return child
 
 
+@MUTATION.register("tweak_refine_steps")
+def tweak_refine_steps(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, min_steps: int = 1, max_steps: int = 8) -> Genome:
+    """Nudge the genome's refinement depth +/-1 within [min_steps, max_steps] (the TRM lever: more
+    passes = more effective depth without more parameters). Inert until the genome also carries
+    recurrent edges to thread state across passes, so it pairs with add_recurrent_connection."""
+    if rng.random() >= prob:
+        return genome
+    child = genome.clone()
+    child.refine_steps = max(min_steps, min(max_steps, child.refine_steps + rng.choice((-1, 1))))
+    return child
+
+
 # --- geometry-biased operators -------------------------------------------------------------------
 # These read the axis-coordinates the multi-task substrate stamps on input/hidden nodes and bias
 # growth toward LOCAL structure (receptive fields, repeated motifs). `coordinate_distance` returns

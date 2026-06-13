@@ -24,7 +24,7 @@ from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
 from ardevo.evolution.speciation import SpeciesPlan
-from ardevo.substrate import GraphNet, SubstrateModule, decode
+from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 
 
 class Adapter(Protocol):
@@ -54,7 +54,10 @@ class TaskAdapter:
     n_outputs: int
 
     def decode(self, genome: Genome) -> GraphNet:
-        return decode(genome, self.n_inputs, self.n_outputs)
+        # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
+        # same static input re-applied with state carried across passes); steps == 1 keeps the exact
+        # feedforward path, so the flat search is unchanged until refinement is actually evolved.
+        return decode_module(genome, self.n_inputs, self.n_outputs)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
         return evaluate(module, self.encoded, self.encoder)

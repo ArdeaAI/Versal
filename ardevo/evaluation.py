@@ -6,9 +6,12 @@ tensors. Dispatch on `value_type` lives entirely in the Icarus `loss_fn`/`Level0
 nothing here special-cases a rung.
 """
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
+
+if TYPE_CHECKING:
+    from ardevo.substrate import RefineGraphNet
 
 from ardevo.dataset.icarus import (
     EncodedTask,
@@ -62,6 +65,26 @@ def support_loss(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
     target, mask, descriptor = encoded.support_target
     raw = as_logits(module(x), descriptor, target_positions(target))
     return loss_fn(raw, target, descriptor, mask)
+
+
+def support_loss_deep(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
+    """Deep-supervised support loss for the refine substrate (TRM): a loss at EVERY refinement pass
+    against the same target, weighted toward the later (more refined) passes and normalized so the
+    scale matches the single-pass loss. Backprop flows through the full recursion. Requires a module
+    exposing `refine_trace` (RefineGraphNet); callers fall back to `support_loss` otherwise."""
+    x, _descriptor = encoded.support_input
+    target, mask, descriptor = encoded.support_target
+    trace = cast("RefineGraphNet", module).refine_trace(x)  # [batch, steps, n_outputs]
+    steps = trace.shape[1]
+    total = torch.zeros((), dtype=trace.dtype)
+    weight_sum = 0.0
+    positions = target_positions(target)
+    for step in range(steps):
+        weight = float(step + 1)  # later passes carry more weight: the answer should keep improving
+        raw = as_logits(trace[:, step], descriptor, positions)
+        total = total + weight * loss_fn(raw, target, descriptor, mask)
+        weight_sum += weight
+    return total / weight_sum
 
 
 def split_metrics_from_raw(raw: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None, descriptor, encoder: DecodingEncoder) -> tuple[float, float]:

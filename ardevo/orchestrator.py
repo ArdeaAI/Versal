@@ -29,7 +29,7 @@ from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, Hierarchica
 from ardevo.evolution.train import _writeback
 from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, task_io
 from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
-from ardevo.substrate import decode, decode_recurrent
+from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
 from ardevo.utils.logging import Logger
 
@@ -287,7 +287,7 @@ class Orchestrator:
                 metrics = adapter.evaluate(module)
                 return self._metric(AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None))
             if entry.entry_type == MODULE:
-                module = decode(genome_from_dict(entry.payload), spec.n_inputs, spec.output_width)
+                module = decode_module(genome_from_dict(entry.payload), spec.n_inputs, spec.output_width)
             else:
                 comp = comp_from_dict(entry.payload)
                 ctx = AssemblyContext(bank_columns=dict(spec.bank_columns), library=self.library, max_inline_depth=self.loop.max_inline_depth)

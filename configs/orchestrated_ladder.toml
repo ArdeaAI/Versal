@@ -68,8 +68,9 @@ time_windows_n_windows = 2
                               # TIME-axis tasks run through the stepped recurrent substrate here.
   pop_size = 64
   elitism = 2
-    [orchestrator.direct.train]  # single-task growth wants a stronger inner trainer than glue fitting
-    kind = "gradient"
+    [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
+                                 # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
+    kind = "gradient_refine"
     steps = 120
     lr = 0.03
     writeback = true
@@ -105,7 +106,7 @@ elitism = 1
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
                               # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node"]
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -120,6 +121,8 @@ elitism = 1
   add_library_module_prob = 0.05
   add_macro_node_prob = 0.05
   add_macro_node_max_outputs = 16
+  tweak_refine_steps_prob = 0.06   # TRM lever: nudge per-genome refinement depth (paired with recurrence)
+  tweak_refine_steps_max_steps = 6
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
   steps = 40

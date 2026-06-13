@@ -68,10 +68,15 @@ class Genome:
     nodes: dict[int, NodeGene] = field(default_factory=dict)
     connections: list[ConnectionGene] = field(default_factory=list)
     macros: list[MacroGene] = field(default_factory=list)
+    # How many times the refine substrate re-applies this network to a STATIC input, carrying node
+    # state across passes (the TRM idea: recursion = effective depth without parameters). 1 = a plain
+    # feedforward pass (the default decode path is byte-identical). Evolved by `tweak_refine_steps`;
+    # only meaningful once the genome also carries recurrent edges to thread state between passes.
+    refine_steps: int = 1
 
     def clone(self) -> "Genome":
         # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
-        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros))
+        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros), refine_steps=self.refine_steps)
 
     def ids_of(self, kind: NodeKind) -> list[int]:
         return sorted(node.id for node in self.nodes.values() if node.kind is kind)
@@ -288,7 +293,7 @@ def make_acyclic(genome: Genome) -> Genome:
         else:
             kept.connections.append(conn)
             repaired.append(conn)
-    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros))
+    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps)
 
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
@@ -312,6 +317,7 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
             {"ref": macro.ref, "inputs": list(macro.input_node_ids), "outputs": list(macro.output_node_ids), "innovation": macro.innovation, "trainable": macro.trainable}
             for macro in genome.macros
         ],
+        "refine_steps": genome.refine_steps,
     }
 
 
@@ -336,4 +342,4 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         )
         for item in data.get("macros", [])
     ]
-    return Genome(nodes=nodes, connections=connections, macros=macros)
+    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)))
