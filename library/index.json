@@ -1,33 +1,8 @@
 [
   {
-    "key": "c2_1543e6adc5c9",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 24
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 3
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.0,
-    "retired": false,
-    "dependency": false,
-    "stats": {
-      "use_count": 363,
-      "max_attributed_fitness": 1.0152700987334538
-    }
-  },
-  {
-    "key": "c2_199bcb423e22",
-    "entry_type": "composition",
-    "level": 2,
+    "key": "m1_f64d7961ab56",
+    "entry_type": "module",
+    "level": 1,
     "io": {
       "inputs": [
         {
@@ -41,87 +16,19 @@
       }
     },
     "accepted_metric": 1.0,
-    "weight_robustness": 0.5,
+    "weight_robustness": 0.3651638342708421,
     "retired": false,
     "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
     "stats": {
-      "use_count": 647,
-      "max_attributed_fitness": 1.0152654130203882
-    }
-  },
-  {
-    "key": "c2_c89c003d8492",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "CONTINUOUS|C,T",
-          "width": 32
-        }
-      ],
-      "output": {
-        "signature": "CONTINUOUS|C",
-        "width": 4
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.0,
-    "retired": false,
-    "dependency": false,
-    "stats": {
-      "use_count": 437,
-      "max_attributed_fitness": 1.005294090521189
-    }
-  },
-  {
-    "key": "m1_eb0d307c4e11",
-    "entry_type": "module",
-    "level": 1,
-    "io": {
-      "inputs": [
-        {
-          "signature": "ANY",
-          "width": 4
-        }
-      ],
-      "output": {
-        "signature": "ANY",
-        "width": 2
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.5,
-    "retired": false,
-    "dependency": true,
-    "stats": {
-      "use_count": 653,
-      "max_attributed_fitness": 1.015284122797966
-    }
-  },
-  {
-    "key": "m2_bf0905e045a1",
-    "entry_type": "module",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.6153846383094788,
-    "retired": false,
-    "dependency": false,
-    "stats": {
-      "use_count": 552,
-      "max_attributed_fitness": 1.0152491319119872
+      "use_count": 80,
+      "max_attributed_fitness": 2.997613244336302
     }
   }
 ]

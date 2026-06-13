@@ -140,6 +140,26 @@ throughput note from `uv run benchmark` (`ardevo/tools/bench_throughput.py`): th
 measured SLOWER at current kernel sizes and ship default-off; the partitioned `gradient_batched`
 trainer (1.5x CPU / 2.1x MPS at pop 48) is the lever that pays, and the direct strategy can use it.
 
+Phase 5 made the run measurable, then pushed on the ceilings the data exposed. The orchestrated
+trial now writes a `run_summary.json` row for EVERY task and a rolling resume checkpoint regardless
+of admission, so a run is never an empty directory and resume restores the exact latest state (the
+silent-state-loss bug). The evolve ladder went DIRECT-FIRST (`["direct", "composition"]`: direct
+grows structure ~43% of the time vs composition's ~15%, and routes TIME-axis tasks through the
+recurrent substrate so temporal modules stop degenerating into flat pass-throughs); loss components
+are bounded to (0,1] so selection weighs accuracy and robustness instead of being swamped by raw
+loss. The headline new capability is RECURSIVE DEPTH (TRM, *Less is More*): `decode_refine`
+re-applies a tiny network to a static input `refine_steps` times, threading a latent and an answer
+back through recurrent edges, deep-supervised by `gradient_refine` through full BPTT, so the search
+buys effective depth without parameters (`refine_steps = 1` is byte-identical to a feedforward pass).
+For the high-dimensional image wall the coordinate-geometry operators (a structural convolution
+prior, `add_shared_motif`) are now wired into the direct path, and `spatial_patches` gives a valid
+grid->grid decomposition; a decompose solvability gate probes subtasks before recursing so I/O-axis
+slicing stops burning the budget on unsolvable parts. The library became an OPEN-ENDED ARCHIVE
+(`admission = "archive"`): entries niche by (io shape, a structural behavior descriptor) so diverse
+stepping stones coexist instead of collapsing to the top-k by metric, and the module pool absorbs
+diverse niches first, which is the cross-task compounding engine. ARC-AGI-3 remains a portability
+CONSTRAINT, not a build target this phase.
+
 On the prior art: CoDeepNEAT's two-population idea survives here as composition-genomes-referencing-
 species and fitness attribution; WANN's weight-agnostic insight survives as the robustness metric
 and the `weight_samples`/`hybrid` evaluate stage. Neither is implemented literally. evox was
@@ -160,14 +180,15 @@ register one new function in the matching registry; the loop itself never change
 | init | `[evolution.init]` | `minimal` |
 | selection | `[evolution.selection]` | `tournament`, `truncation` |
 | crossover | `[evolution.crossover]` | `none`, `neat` |
-| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_local_node` / `add_local_connection` / `add_shared_motif` (coordinate-aware locality), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `mutate_aggregation` (sum/product flip), `add_recurrent_connection` (time-delayed memory), `add_library_module` (graft a stored mini-model), `perturb_weights` |
-| train | `[evolution.train]` | `none`, `gradient` (params `steps`, `lr`, `writeback`, `weight_decay`), `gradient_batched` (whole generation in one tensor program; `device`, `max_padded_nodes`) |
+| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_local_node` / `add_local_connection` / `add_shared_motif` (coordinate-aware locality / structural conv prior), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `mutate_aggregation` (sum/product flip), `add_recurrent_connection` (time-delayed memory), `tweak_refine_steps` (TRM recursion depth), `add_library_module` (graft a stored mini-model), `add_macro_node` (frozen whole network), `perturb_weights` |
+| train | `[evolution.train]` | `none`, `gradient` (params `steps`, `lr`, `writeback`, `weight_decay`), `gradient_refine` (deep-supervised BPTT for refine genomes), `gradient_batched` (whole generation in one tensor program; `device`, `max_padded_nodes`) |
 | evaluate | `[evolution.evaluate]` | `standard`, `weight_samples` (weight-agnostic scoring), `hybrid` (trained metrics + robustness) |
 | speciation | `[evolution.speciation]` | `none`, `neat` (compatibility threshold auto-targets a species count) |
 | schedule | `[schedule]` | `random`, `round_robin`, `interleave_rungs` (continuous run only; picks the next task) |
 | comp mutation | `[evolution.composition.mutation]` | `add_module_node`, `switch_ref`, `add_comp_edge`, `toggle_comp_edge`, `perturb_glue` (crossover: `none`, `comp_neat`) |
-| decompose | `[orchestrator] decompose` | `output_slices`, `input_subsets`, `time_windows` |
-| fitness | `[fitness]` | `support_accuracy`, `query_accuracy`, `negative_support_loss`, `negative_query_loss`, `mean_sample_accuracy`, `max_sample_accuracy`, `weight_robustness`, `negative_mean_sample_loss`, `complexity_penalty`, `hidden_penalty` |
+| decompose | `[orchestrator] decompose` | `output_slices`, `input_subsets`, `time_windows`, `spatial_patches` (grid->grid bands) |
+| library admission | `[library] admission` | `accept_all` (legacy), `default` (floors + flat per-signature cap), `archive` (open-ended QD: per-(io, behavior-niche) diversity) |
+| fitness | `[fitness]` | `support_accuracy`, `query_accuracy`, `negative_support_loss`, `negative_query_loss`, `bounded_negative_support_loss` / `bounded_negative_query_loss` ((0,1] so loss does not swamp the rest), `mean_sample_accuracy`, `max_sample_accuracy`, `weight_robustness`, `negative_mean_sample_loss`, `complexity_penalty`, `hidden_penalty` |
 
 Notes from getting this to actually grow useful topologies: `add_rich_node` only widens a layer, so depth-needing
 tasks (two-spirals) require `add_deep_node`; `toggle_connection` is the only operator that prunes, so a complexity
