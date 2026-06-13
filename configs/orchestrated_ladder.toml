@@ -80,11 +80,14 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
     weight_decay = 0.0002
 
 [library]                     # admission policy: what earns a place on the shelf
-admission = "default"         # "accept_all" = legacy behavior (everything above accept_threshold)
+admission = "archive"         # open-ended QD archive: keep BEHAVIORALLY DIVERSE stepping stones, not
+                              # just the top-k by metric ("default" = flat cap; "accept_all" = legacy)
 min_metric = 0.9              # quality floor on the accept metric
 min_robustness = 0.0          # weight-robustness floor (raise once the library is healthy)
-per_signature_cap = 3         # max live entries per exact io shape; better candidates replace
-                              # (tombstone, never delete) the weakest; dependencies are exempt
+per_niche_cap = 2             # max entries per (io shape, behavior niche): distinct KINDS of solution
+                              # coexist (small/deep, recurrent/refining, gated, macro) for recombination
+max_per_signature = 12        # total live entries per io shape across all niches; the weakest is
+                              # tombstoned (never deleted) when full, so existing refs keep assembling
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]

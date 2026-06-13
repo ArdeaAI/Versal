@@ -80,6 +80,47 @@ def _build_default(*, min_metric: float = 0.0, min_robustness: float = 0.0, per_
     return policy
 
 
+@LIBRARY_ADMISSION.register("archive")
+def _build_archive(*, min_metric: float = 0.0, min_robustness: float = 0.0, per_niche_cap: int = 2, max_per_signature: int = 12, **_params: object) -> "AdmissionPolicy":
+    """Open-ended stepping-stone archive (the DGM idea): keep BEHAVIORALLY DIVERSE solutions instead
+    of only the top few by metric. Entries are niched by (io shape, behavior descriptor), where the
+    behavior descriptor is a coarse structural fingerprint the orchestrator stamps in provenance
+    (complexity bucket, recurrence, refinement, product gating, macros). Each niche holds up to
+    `per_niche_cap`; many niches coexist up to `max_per_signature` total. This preserves the
+    diversity that recombination (compositions, macros, pool grafting) feeds on, which the `default`
+    policy's flat top-k cap destroys. Tombstoning (never deletion) keeps existing refs assembling."""
+
+    def rank(summary: dict[str, Any]) -> tuple[float, float]:
+        return (float(summary["weight_robustness"]), float(summary["accepted_metric"]))
+
+    def policy(library: "ModuleLibrary", *, entry_type: str, io: dict[str, Any], provenance: dict[str, Any]) -> AdmissionDecision:
+        metric = float(provenance.get("accepted_metric", 0.0))
+        robustness = float(provenance.get("weight_robustness", 0.0))
+        if metric < min_metric:
+            return AdmissionDecision(admit=False, reason=f"metric {metric:.3f} below min_metric {min_metric}")
+        if robustness < min_robustness:
+            return AdmissionDecision(admit=False, reason=f"robustness {robustness:.3f} below min_robustness {min_robustness}")
+        candidate = (robustness, metric)
+        behavior = list(provenance.get("behavior", []))
+        group = library.signature_group(entry_type, io)
+        niche = [summary for summary in group if list(summary.get("behavior", [])) == behavior]
+        retire: tuple[str, ...] = ()
+        if len(niche) >= per_niche_cap:
+            worst = min(niche, key=rank)
+            if candidate <= rank(worst):
+                return AdmissionDecision(admit=False, reason=f"niche cap {per_niche_cap} reached by stronger entries")
+            retire = (worst["key"],)
+        remaining = [summary for summary in group if summary["key"] not in retire]
+        if len(remaining) >= max_per_signature:
+            globally_weakest = min(remaining, key=rank)
+            if candidate <= rank(globally_weakest):
+                return AdmissionDecision(admit=False, reason=f"signature archive full ({max_per_signature}) of stronger entries")
+            retire = retire + (globally_weakest["key"],)
+        return AdmissionDecision(admit=True, retire=retire, reason="diverse stepping stone" if not retire else f"replaces {retire}")
+
+    return policy
+
+
 def descriptor_signature(value_type: str, axes: tuple[str, ...]) -> str:
     """The bank-signature scheme shared with `multitask.task_entry`: value_type plus axis letters."""
     return f"{value_type}|{','.join(axes)}"
@@ -222,6 +263,7 @@ class ModuleLibrary:
             "weight_robustness": float(provenance.get("weight_robustness", 0.0)),
             "retired": False,
             "dependency": bool(provenance.get("dependency", False)),
+            "behavior": list(provenance.get("behavior", [])),  # QD niche descriptor (archive policy)
             "stats": entry.stats,
         }
         self._write_index()

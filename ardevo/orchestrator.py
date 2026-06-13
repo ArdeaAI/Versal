@@ -24,7 +24,7 @@ from typing import Any, Callable
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.decompose import Subtask, build_decomposers
 from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, comp_from_dict, comp_to_dict
-from ardevo.evolution.genome import genome_from_dict, genome_to_dict
+from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.train import _writeback
 from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, task_io
@@ -410,6 +410,7 @@ class Orchestrator:
             "strategy": result.strategy,
             "accepted_metric": result.metric,
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
+            "behavior": _genome_behavior(result.champion_genome),
         }
         level = module_level(result.champion_genome, self.library)
         return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
@@ -463,6 +464,7 @@ class Orchestrator:
             "decompose_op": decompose_op,
             "accepted_metric": metric,
             "weight_robustness": best.metrics.get("weight_robustness", 0.0),
+            "behavior": _comp_behavior(detached, level),
         }
         return self._gated_add(entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
 
@@ -540,6 +542,25 @@ class Orchestrator:
             self.proctor.log_scalar("Fitness", f"{strategy}_best", best.fitness, self.state.generation)
             self.proctor.log_scalar("Fitness", f"{strategy}_mean", mean_fitness, self.state.generation)
             self.proctor.log_scalar("Robustness", "weight_robustness", best.metrics.get("weight_robustness", 0.0), self.state.generation)
+
+
+def _genome_behavior(genome: Genome) -> list[str]:
+    """A coarse structural fingerprint that niches a flat module in the QD archive: distinct KINDS of
+    solution (small vs deep, feedforward vs recurrent vs refining, summed vs gated, with/without
+    macros) land in different niches and so coexist as diverse stepping stones instead of the
+    top-k-by-metric collapse. Cheap (no re-evaluation); functional fingerprinting is a later refinement."""
+    return [
+        f"h{min(len(genome.hidden_ids) // 4, 6)}",
+        "rec" if genome.recurrent_connections() else "ff",
+        "refine" if genome.refine_steps > 1 else "single",
+        "prod" if any(node.aggregation == "product" for node in genome.nodes.values()) else "sum",
+        "macro" if genome.macros else "flat",
+    ]
+
+
+def _comp_behavior(comp: CompositionGenome, level: int) -> list[str]:
+    """Structural niche for a composition: how many modules it wires and at what level."""
+    return [f"m{min(len(comp.module_ids), 6)}", f"L{level}"]
 
 
 def _identity_glue(in_width: int, out_width: int) -> tuple[float, ...]:

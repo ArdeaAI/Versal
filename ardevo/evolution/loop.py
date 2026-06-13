@@ -391,9 +391,17 @@ class HierarchicalLoop:
             return 0
         from ardevo.library import graft
 
-        candidates = [entry for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports) if entry.key not in state.absorbed_keys][
-            : self.absorb_top_k
-        ]
+        ranked = [entry for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports) if entry.key not in state.absorbed_keys]
+        # Graft BEHAVIORALLY DIVERSE entries first: one per unseen niche by rank, then fill. A pool of
+        # varied building blocks recombines into more than a cluster of near-duplicate top-metric ones.
+        seen_niches: set[tuple[str, ...]] = set()
+        primary: list[Any] = []
+        secondary: list[Any] = []
+        for entry in ranked:
+            niche = tuple(entry.provenance.get("behavior", []))
+            (primary if niche not in seen_niches else secondary).append(entry)
+            seen_niches.add(niche)
+        candidates = (primary + secondary)[: self.absorb_top_k]
         if not candidates:
             return 0
         protected = set(state.species_champion_index.values())
