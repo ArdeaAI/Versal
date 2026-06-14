@@ -1,0 +1,460 @@
+[
+  {
+    "key": "m1_1b26cb1acf22",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 0.9833333492279053,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_756972f5930f",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 0.9750000238418579,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_7a4fe0b16899",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat",
+      "fpnpppnnnn"
+    ],
+    "stats": {
+      "use_count": 903,
+      "max_attributed_fitness": 3.0221832903289574
+    }
+  },
+  {
+    "key": "m1_99672198ca7a",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5181721204719517,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "rec",
+      "single",
+      "prod",
+      "flat",
+      "fpnnnppnpp"
+    ],
+    "stats": {
+      "use_count": 899,
+      "max_attributed_fitness": 3.0020836282990917
+    }
+  },
+  {
+    "key": "m2_309a419d0c55",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h4",
+      "ff",
+      "single",
+      "sum",
+      "macro",
+      "fppnpppnpp"
+    ],
+    "stats": {
+      "use_count": 737,
+      "max_attributed_fitness": 2.0594835153497826
+    }
+  },
+  {
+    "key": "m2_45a5e69dd93e",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.35438697384455164,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h3",
+      "rec",
+      "single",
+      "sum",
+      "macro",
+      "fppnpnnnpp"
+    ],
+    "stats": {
+      "use_count": 44,
+      "max_attributed_fitness": 1.9215396394102155
+    }
+  },
+  {
+    "key": "m2_4f57965707b4",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4566004684667205,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "rec",
+      "single",
+      "sum",
+      "macro",
+      "fpnppppnpn"
+    ],
+    "stats": {
+      "use_count": 567,
+      "max_attributed_fitness": 2.1034894435561893
+    }
+  },
+  {
+    "key": "m2_51b555519d1a",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.3333333432674408,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h2",
+      "ff",
+      "single",
+      "sum",
+      "macro",
+      "fppnpnnpzp"
+    ],
+    "stats": {
+      "use_count": 793,
+      "max_attributed_fitness": 2.1032156608885666
+    }
+  },
+  {
+    "key": "m2_6cb5c921664e",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.49697350137694446,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h6",
+      "rec",
+      "single",
+      "prod",
+      "macro",
+      "fpnpnnpnpp"
+    ],
+    "stats": {
+      "use_count": 668,
+      "max_attributed_fitness": 2.1413438174489436
+    }
+  },
+  {
+    "key": "m2_b923a9f0e81f",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 0.987500011920929,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m2_ee52129f140f",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m2_f23c3afbc685",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.305870067826824,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h4",
+      "rec",
+      "single",
+      "sum",
+      "macro",
+      "fpnpnpnpnp"
+    ],
+    "stats": {
+      "use_count": 500,
+      "max_attributed_fitness": 2.0644335838369736
+    }
+  },
+  {
+    "key": "m3_6c40daf471bd",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.2543655067816563,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h5",
+      "ff",
+      "single",
+      "sum",
+      "macro",
+      "fppppnnppn"
+    ],
+    "stats": {
+      "use_count": 390,
+      "max_attributed_fitness": 1.9954562198473518
+    }
+  },
+  {
+    "key": "m3_8d573ba46129",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5160773662793028,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h5",
+      "ff",
+      "single",
+      "sum",
+      "macro",
+      "fpppnnpnnn"
+    ],
+    "stats": {
+      "use_count": 126,
+      "max_attributed_fitness": 1.9505046518826399
+    }
+  }
+]

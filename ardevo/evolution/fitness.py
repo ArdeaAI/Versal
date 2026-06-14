@@ -5,11 +5,16 @@ Each component is a registered `(genome, metrics) -> float`. `FitnessAggregator`
 purely from config.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
+
+# A degenerate genome (non-finite metric, e.g. an exploding refine recursion) gets this floor instead
+# of NaN/inf, so it is the worst in selection without poisoning speciation's offspring-share math.
+_FITNESS_FLOOR = -1.0e9
 
 # Components receive either a flat `Genome` or a `CompositionGenome`; both expose the structural
 # surface the components read (`hidden_ids`, `complexity()`), so the alias stays duck-typed.
@@ -105,4 +110,6 @@ class FitnessAggregator:
     components: list[tuple[FitnessComponent, float]]
 
     def __call__(self, genome: Any, metrics: dict[str, float]) -> float:
-        return sum(weight * component(genome, metrics) for component, weight in self.components)
+        total = sum(weight * component(genome, metrics) for component, weight in self.components)
+        # Never let a non-finite component (a degenerate genome) reach selection: floor it to the worst.
+        return total if math.isfinite(total) else _FITNESS_FLOOR

@@ -45,7 +45,7 @@ shuffle = true
                               # micro level): the whole search evolves how it searches. EXPENSIVE (each
                               # Entity eval is a full mini-run), so off by default; the owner enables it
                               # for a meta-run. enabled=false keeps the ordinary path byte-identical.
-enabled = true
+enabled = false
 pop_size = 6
 generations = 4
 elitism = 1

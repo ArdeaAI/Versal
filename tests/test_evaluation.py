@@ -1,6 +1,20 @@
+import math
 import random
 
+import torch
+
+from ardevo.evaluation import split_metrics_from_raw
 from ardevo.evolution.train import gradient
+
+
+def test_split_metrics_sanitizes_non_finite_output(xor_adapter, xor_encoder) -> None:
+    """Phase-6 regression: an exploded forward (NaN logits) must score as the WORST (zero accuracy,
+    huge finite loss), not propagate a NaN into fitness/speciation."""
+    target, mask, descriptor = xor_adapter.encoded.support_target
+    raw = torch.full(target.shape, float("nan"))
+    accuracy, loss = split_metrics_from_raw(raw, target, mask, descriptor, xor_encoder)
+    assert math.isfinite(accuracy) and math.isfinite(loss)  # neither poisons fitness/speciation
+    assert loss >= 1.0e9  # the non-finite loss is floored to the worst
 
 
 def test_linear_genome_cannot_solve_xor(linear_genome, xor_adapter):

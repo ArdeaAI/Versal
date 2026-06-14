@@ -11,6 +11,15 @@ from ardevo.evolution.fitness import (
 )
 
 
+def test_aggregator_floors_non_finite_to_a_finite_worst() -> None:
+    """Phase-6 regression: a degenerate genome can make a component non-finite; the aggregate must
+    stay finite (the worst), or a NaN propagates into speciation and crashes the run."""
+    aggregator = FitnessAggregator([(support_accuracy, 1.0)])
+    assert aggregator(None, {"support_accuracy": float("nan")}) == -1.0e9
+    assert aggregator(None, {"support_accuracy": float("inf")}) == -1.0e9
+    assert aggregator(None, {"support_accuracy": 0.9}) == 0.9  # finite values pass through unchanged
+
+
 def test_bounded_support_loss_maps_to_unit_range() -> None:
     assert bounded_negative_support_loss(None, {"support_loss": 0.0}) == 1.0
     assert bounded_negative_support_loss(None, {"support_loss": 1.0}) == 0.5

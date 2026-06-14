@@ -6,6 +6,7 @@ tensors. Dispatch on `value_type` lives entirely in the Icarus `loss_fn`/`Level0
 nothing here special-cases a rung.
 """
 
+import math
 from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
@@ -105,7 +106,12 @@ def split_metrics_from_raw(raw: torch.Tensor, target: torch.Tensor, mask: torch.
         accuracy = (correct & valid).sum().float() / valid.sum().clamp_min(1.0)
     else:
         accuracy = correct.float().mean()
-    return float(accuracy), float(loss)
+    # A genome whose forward blew up (e.g. an exploding refine self-loop) yields a non-finite loss; it
+    # is a degenerate genome, not a crash, so report it as the WORST (zero accuracy, huge loss) and let
+    # selection cull it. Without this a single NaN propagates into fitness -> speciation -> a hard stop.
+    loss_value = float(loss)
+    accuracy_value = float(accuracy)
+    return (accuracy_value if math.isfinite(accuracy_value) else 0.0), (loss_value if math.isfinite(loss_value) else 1e9)
 
 
 def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target: tuple, encoder: DecodingEncoder) -> tuple[float, float]:

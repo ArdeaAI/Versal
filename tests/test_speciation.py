@@ -37,6 +37,17 @@ def test_no_speciation_is_one_global_group(linear_genome):
     assert plans[0].n_offspring == 8
 
 
+def test_neat_speciation_survives_non_finite_fitness(linear_genome, solving_genome):
+    """Phase-6 regression: a degenerate genome (e.g. an exploding refine recursion) can yield a
+    non-finite fitness; the offspring-share math must NOT crash on it (it crashed a 400-task run)."""
+    speciator = NeatSpeciation(threshold=0.5, c_excess=1.0, c_disjoint=1.0, c_weight=0.5)
+    genomes = [linear_genome.clone() for _ in range(3)] + [solving_genome.clone() for _ in range(3)]
+    fitnesses = [1.0, float("nan"), 0.5, 2.0, float("inf"), 0.7]
+    plans = speciator(genomes, fitnesses, rng=random.Random(0), elitism=1, pop_size=6)
+    assert plans  # produced a valid plan instead of raising ValueError
+    assert all(plan.n_offspring >= 0 for plan in plans)
+
+
 def test_neat_speciation_splits_distinct_structures(linear_genome, solving_genome):
     speciator = NeatSpeciation(threshold=0.5, c_excess=1.0, c_disjoint=1.0, c_weight=0.5)
     genomes = [linear_genome.clone() for _ in range(5)] + [solving_genome.clone() for _ in range(5)]

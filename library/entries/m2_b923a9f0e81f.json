@@ -1,0 +1,345 @@
+{
+  "key": "m2_b923a9f0e81f",
+  "entry_type": "module",
+  "level": 2,
+  "io": {
+    "inputs": [
+      {
+        "signature": "CONTINUOUS|C,T",
+        "width": 32
+      }
+    ],
+    "output": {
+      "signature": "CONTINUOUS|C",
+      "width": 4
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 0,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 1,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 3,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 4,
+        "kind": "bias",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 5,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 6,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 7,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 8,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 10,
+        "kind": "hidden",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      }
+    ],
+    "connections": [
+      {
+        "in": 0,
+        "out": 5,
+        "weight": 0.22642572224140167,
+        "enabled": true,
+        "innovation": 0,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 0,
+        "out": 6,
+        "weight": 0.18014779686927795,
+        "enabled": true,
+        "innovation": 1,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 0,
+        "out": 7,
+        "weight": -0.48999452590942383,
+        "enabled": true,
+        "innovation": 2,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 0,
+        "out": 8,
+        "weight": 0.1158435121178627,
+        "enabled": true,
+        "innovation": 3,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 1,
+        "out": 5,
+        "weight": 0.23359715938568115,
+        "enabled": true,
+        "innovation": 4,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 1,
+        "out": 6,
+        "weight": 0.7142553329467773,
+        "enabled": true,
+        "innovation": 5,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 1,
+        "out": 7,
+        "weight": 0.699160635471344,
+        "enabled": true,
+        "innovation": 6,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 1,
+        "out": 8,
+        "weight": -0.25129783153533936,
+        "enabled": true,
+        "innovation": 7,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 2,
+        "out": 5,
+        "weight": -0.2610303461551666,
+        "enabled": true,
+        "innovation": 8,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 2,
+        "out": 6,
+        "weight": 0.23518060147762299,
+        "enabled": true,
+        "innovation": 9,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 2,
+        "out": 7,
+        "weight": 0.24757559597492218,
+        "enabled": true,
+        "innovation": 10,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 2,
+        "out": 8,
+        "weight": 0.3617572784423828,
+        "enabled": true,
+        "innovation": 11,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 3,
+        "out": 5,
+        "weight": 0.3162805438041687,
+        "enabled": true,
+        "innovation": 12,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 3,
+        "out": 6,
+        "weight": -0.5849586129188538,
+        "enabled": true,
+        "innovation": 13,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 3,
+        "out": 7,
+        "weight": 1.1449366807937622,
+        "enabled": true,
+        "innovation": 14,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 3,
+        "out": 8,
+        "weight": 0.6739476323127747,
+        "enabled": true,
+        "innovation": 15,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 4,
+        "out": 5,
+        "weight": 0.27938833832740784,
+        "enabled": true,
+        "innovation": 16,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 4,
+        "out": 6,
+        "weight": 0.2158547192811966,
+        "enabled": true,
+        "innovation": 17,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 4,
+        "out": 7,
+        "weight": -0.27007612586021423,
+        "enabled": true,
+        "innovation": 18,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 4,
+        "out": 8,
+        "weight": 0.04065176099538803,
+        "enabled": true,
+        "innovation": 19,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 10,
+        "out": 5,
+        "weight": -0.23313255608081818,
+        "enabled": true,
+        "innovation": 29,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 10,
+        "out": 6,
+        "weight": 0.10741807520389557,
+        "enabled": true,
+        "innovation": 30,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 10,
+        "out": 7,
+        "weight": -0.2243167906999588,
+        "enabled": true,
+        "innovation": 31,
+        "recurrent": false,
+        "share_group": null
+      },
+      {
+        "in": 10,
+        "out": 8,
+        "weight": 0.05858849734067917,
+        "enabled": true,
+        "innovation": 32,
+        "recurrent": false,
+        "share_group": null
+      }
+    ],
+    "macros": [
+      {
+        "ref": "library:m1_7a4fe0b16899",
+        "inputs": [
+          4,
+          0
+        ],
+        "outputs": [
+          10
+        ],
+        "innovation": 28,
+        "trainable": false
+      }
+    ],
+    "refine_steps": 1,
+    "operator_rates": null
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "pole.b0",
+    "rung": 4,
+    "depth": 0,
+    "strategy": "direct",
+    "accepted_metric": 0.987500011920929,
+    "weight_robustness": 0.0,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ]
+  },
+  "stats": {
+    "use_count": 0,
+    "max_attributed_fitness": 0.0
+  }
+}
