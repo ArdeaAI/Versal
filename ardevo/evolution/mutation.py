@@ -10,7 +10,8 @@ import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Callable
+from functools import partial
+from typing import TYPE_CHECKING, Callable, cast
 
 from ardevo.evolution.genome import (
     ConnectionGene,
@@ -84,6 +85,25 @@ class MutationPipeline:
                 genome = operator(genome, ctx, rng=rng)
         return genome
 
+    def with_boosted_rates(self, boosts: dict[str, float]) -> "MutationPipeline":
+        """A copy with the named operators' `prob` raised to the given values (a stall escalation).
+
+        Rebinds each named operator's bound `prob` (preserving its other params, e.g. fan_in) and
+        records the new value in base_rates, so an escalated pipeline fires depth/recursion mutations
+        more often for the rest of a stalled search. Operators not named keep their rates."""
+        rebound: list[tuple[str, Mutator]] = []
+        new_base = dict(self.base_rates)
+        for name, operator in self.operators:
+            if name in boosts:
+                keywords = dict(operator.keywords) if isinstance(operator, partial) else {}
+                base: Mutator = cast(Mutator, operator.func) if isinstance(operator, partial) else operator
+                boosted: Mutator = partial(base, **{**keywords, "prob": boosts[name]})
+                new_base[name] = boosts[name]
+                rebound.append((name, boosted))
+            else:
+                rebound.append((name, operator))
+        return MutationPipeline(rebound, base_rates=new_base, adaptive=self.adaptive)
+
     def _adapt_rates(self, genome: Genome, rng: random.Random) -> Genome:
         """Inherit the parent's rates (or seed from the config base rates), then perturb each
         log-normally and clamp. Mutating the strategy parameters BEFORE applying the operators is the
@@ -146,13 +166,18 @@ def add_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: 
 
 
 @MUTATION.register("add_rich_node")
-def add_rich_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4) -> Genome:
+def add_rich_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4, init_zero_edges: bool = False) -> Genome:
     """Add a hidden node wired from up to `fan_in` random sources and to every output.
 
     Unlike `add_node` (a single-edge split, which yields a one-input node that adds no capacity on
     tasks like parity), this node sees several inputs immediately, so gradient training can make it
     useful right away. Acyclic by construction: it draws sources from inputs/bias/hidden (never
     outputs) and feeds only outputs.
+
+    `init_zero_edges` initializes the OUTGOING (readout) weights at zero, so adding the node is
+    identity-preserving: it does not perturb the already-trained function, and gradient training grows
+    it from zero instead of injecting random noise that resets accumulated weight leverage. Default
+    False keeps the rng stream and weights byte-identical to the pre-fold behavior.
     """
     if rng.random() >= prob:
         return genome
@@ -166,18 +191,23 @@ def add_rich_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
     for source in rng.sample(sources, min(fan_in, len(sources))):
         child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
     for output in outputs:
-        child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+        weight = 0.0 if init_zero_edges else rng.gauss(0.0, 1.0)
+        child.connections.append(ConnectionGene(new_id, output, weight, True, ctx.innovations.innovation(new_id, output)))
     return child
 
 
 @MUTATION.register("add_deep_node")
-def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4, fan_out: int = 3) -> Genome:
+def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4, fan_out: int = 3, init_zero_edges: bool = False) -> Genome:
     """Add a hidden node that feeds OTHER hidden nodes (plus the outputs), building depth.
 
     `add_rich_node` only wires new nodes to the outputs, so it can only widen a single hidden layer.
     Tasks like two-spirals need depth (hidden -> hidden). This node draws from `fan_in` sources and
     feeds every output (a guaranteed readout) plus up to `fan_out` existing hidden nodes, skipping any
     target that would create a cycle.
+
+    `init_zero_edges` zero-initializes every OUTGOING edge (to outputs and to downstream hidden nodes)
+    so the insertion is identity-preserving and trains up from zero, instead of resetting the trained
+    body with random readouts. Default False is byte-identical to the pre-fold behavior.
     """
     if rng.random() >= prob:
         return genome
@@ -191,7 +221,8 @@ def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
     for source in rng.sample(sources, min(fan_in, len(sources))):
         child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
     for output in outputs:
-        child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+        weight = 0.0 if init_zero_edges else rng.gauss(0.0, 1.0)
+        child.connections.append(ConnectionGene(new_id, output, weight, True, ctx.innovations.innovation(new_id, output)))
     hidden_targets = [node_id for node_id in child.hidden_ids if node_id != new_id and node_id not in child.macro_output_ids]
     rng.shuffle(hidden_targets)
     added = 0
@@ -200,7 +231,8 @@ def add_deep_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, p
             break
         if child.has_connection(new_id, target) or would_create_cycle(child, new_id, target):
             continue
-        child.connections.append(ConnectionGene(new_id, target, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, target)))
+        weight = 0.0 if init_zero_edges else rng.gauss(0.0, 1.0)
+        child.connections.append(ConnectionGene(new_id, target, weight, True, ctx.innovations.innovation(new_id, target)))
         added += 1
     return child
 

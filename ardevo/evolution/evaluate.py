@@ -144,6 +144,36 @@ def weight_samples(
     return {**per_sample[best_index], **robustness}
 
 
+@EVALUATE.register("depth_scaled")
+def depth_scaled(
+    genome: Genome,
+    module: SubstrateModule,
+    adapter: "Adapter",
+    *,
+    low_depth: int = 2,
+    high_depth: int = 8,
+    **_params: object,
+) -> dict[str, float]:
+    """Standard metrics at HIGH depth, plus a `depth_scaling_score` = (high minus low accuracy): does
+    re-running the recursion deeper actually improve the answer? Re-runs the cached module at two
+    iteration (equilibrium) or refine-step counts with NO retrain, then restores the configured depth.
+    A module with no tunable depth (plain feedforward) scores 0.0, so this is the missing selection
+    pressure that makes recursion BUY depth instead of `refine_steps` drifting back to 1."""
+    depth_attr = "max_iters" if hasattr(module, "max_iters") else ("steps" if hasattr(module, "steps") else None)
+    if depth_attr is None:
+        return {**adapter.evaluate(module), "depth_scaling_score": 0.0}
+    saved = getattr(module, depth_attr)
+    try:
+        setattr(module, depth_attr, max(1, low_depth))
+        low = adapter.evaluate(module)
+        setattr(module, depth_attr, max(low_depth, high_depth))
+        high = adapter.evaluate(module)
+    finally:
+        setattr(module, depth_attr, saved)
+    key = _accuracy_key(high)
+    return {**high, "depth_scaling_score": float(high[key] - low[key])}
+
+
 @EVALUATE.register("hybrid")
 def hybrid(
     genome: Genome,

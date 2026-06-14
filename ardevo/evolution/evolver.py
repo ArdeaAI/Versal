@@ -12,20 +12,20 @@ population forward) and checkpoint/resume the run.
 
 import random
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from ardevo.library import ModuleLibrary
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
-from ardevo.evaluation import behavior_descriptor, evaluate
+from ardevo.evaluation import behavior_descriptor, evaluate, restrict_support, support_fold
 from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
 from ardevo.evolution.novelty import NoveltyConfig
 from ardevo.evolution.speciation import SpeciesPlan
-from ardevo.substrate import GraphNet, SubstrateModule, decode_module
+from ardevo.substrate import GraphNet, SubstrateModule, decode_equilibrium, decode_module
 
 
 class Adapter(Protocol):
@@ -47,21 +47,43 @@ class Adapter(Protocol):
 
 @dataclass
 class TaskAdapter:
-    """Injects task specifics (encoded tensors, widths) so the Evolver stays task-agnostic."""
+    """Injects task specifics (encoded tensors, widths) so the Evolver stays task-agnostic.
+
+    `validation_fraction > 0` carves an INNER fold out of the support set: the trainer fits only
+    `train_encoded` (the inner-train rows) and evaluate scores `holdout_encoded` as support_holdout_*,
+    a leakage-free generalization signal that never touches the real query/accept set. 0.0 leaves
+    `train_encoded == encoded` and `holdout_encoded` None, so the path is byte-identical."""
 
     encoded: EncodedTask
     encoder: Level0Encoder
     n_inputs: int
     n_outputs: int
+    validation_fraction: float = 0.0
+    # Phase 7 (Pillar D): equilibrium decode params (tol/damping/max_iters). When set, a genome with
+    # recurrent edges decodes to the fixed-point substrate (test-time-tunable depth) instead of the
+    # gene-fixed refine substrate; None keeps the decode_module routing (byte-identical).
+    equilibrium: dict[str, Any] | None = None
+    train_encoded: EncodedTask = field(init=False)
+    holdout_encoded: EncodedTask | None = field(init=False, default=None)
+
+    def __post_init__(self) -> None:
+        inner_train, holdout = support_fold(self.encoded, self.validation_fraction)
+        if holdout:
+            self.train_encoded = restrict_support(self.encoded, inner_train)
+            self.holdout_encoded = restrict_support(self.encoded, holdout)
+        else:
+            self.train_encoded = self.encoded
 
     def decode(self, genome: Genome) -> GraphNet:
-        # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
-        # same static input re-applied with state carried across passes); steps == 1 keeps the exact
-        # feedforward path, so the flat search is unchanged until refinement is actually evolved.
+        # With equilibrium on, ANY genome carrying a recurrent edge iterates to a fixed point (depth
+        # severed from refine_steps). Otherwise: refine_steps > 1 decodes the iterative-refinement
+        # substrate and steps == 1 keeps the exact feedforward path, so the flat search is unchanged.
+        if self.equilibrium is not None and genome.recurrent_connections():
+            return decode_equilibrium(genome, self.n_inputs, self.n_outputs, **self.equilibrium)
         return decode_module(genome, self.n_inputs, self.n_outputs)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
-        return evaluate(module, self.encoded, self.encoder)
+        return evaluate(module, self.train_encoded, self.encoder, holdout=self.holdout_encoded)
 
 
 @dataclass
@@ -141,10 +163,17 @@ class Evolver:
             return ()
         return behavior_descriptor(module, adapter.encoded, max_dim=self.novelty.descriptor_dim)
 
+    @staticmethod
+    def _train_encoded(adapter: Adapter) -> EncodedTask:
+        """The task view the trainer fits on: the inner-train fold when the adapter carries one (the
+        generalization-fold path), else the full encoded task. Non-folding adapters (multitask /
+        temporal) lack the attribute and stay byte-identical."""
+        return getattr(adapter, "train_encoded", adapter.encoded)
+
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""
         module = self._decode(genome, adapter)
-        genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
+        genome, module = self.train_op(genome, module, self._train_encoded(adapter), rng=state.rng)
         metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self.fitness(genome, metrics), module, behavior=self._behavior(module, adapter))
 
@@ -166,7 +195,7 @@ class Evolver:
             with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
                 return list(pool.map(lambda genome: self.assess(genome, adapter, state), genomes))
         modules = [self._decode(genome, adapter) for genome in genomes]
-        pairs = self.train_population_op(genomes, modules, adapter.encoded, rng=state.rng)
+        pairs = self.train_population_op(genomes, modules, self._train_encoded(adapter), rng=state.rng)
         from ardevo.evolution import train as train_stage
 
         self.assess_stats = dict(train_stage.last_batch_stats)

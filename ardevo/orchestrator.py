@@ -156,6 +156,9 @@ class Orchestrator:
         self.decomposers = build_decomposers(table)
         library_cfg = config.get("library", {}) or {}
         self.admission = LIBRARY_ADMISSION.get(library_cfg.get("admission", "accept_all"))(**{k: v for k, v in library_cfg.items() if k != "admission"})
+        # Pillar G: with the hindsight policy, a failed top-level attempt re-admits its best genome as a
+        # synthetic dependency stepping stone instead of discarding all that search. Off otherwise.
+        self._hindsight_enabled = bool(library_cfg.get("admission") == "hindsight")
         self.strategies = build_strategies(config)
         shares = table.get("evolve_budget", {})
         self.evolve_shares = {name: float(shares.get(name, 1.0)) for name, _strategy in self.strategies}
@@ -206,6 +209,9 @@ class Orchestrator:
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
             if solution is not None:
                 return solution
+
+        if depth == 0 and self._hindsight_enabled:
+            self._admit_hindsight(result, task, depth)
 
         self.counters["failures"] += 1
         self._record(
@@ -422,6 +428,29 @@ class Orchestrator:
         }
         level = module_level(result.champion_genome, self.library)
         return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=io, provenance=provenance, level=level, dependency=depth > 0)
+
+    def _admit_hindsight(self, result: StrategyResult, task: Task, depth: int) -> str | None:
+        """Pillar G: re-admit the best FAILED genome as a SYNTHETIC dependency stepping stone. The
+        genome produces some output on every support input, so it already solves SOME task; keeping it
+        turns discarded search budget into a partial competency a future related attempt can graft and
+        improve. Admitted as a dependency (bypasses the shelf cap) with the real io signature; lookup
+        re-evaluates entries against the real target, so a synthetic 0.7-solver never falsely hits."""
+        if result.champion_genome is None:
+            return None  # a composition-shaped loser has no flat module to recycle
+        io = task_io(task)
+        behavior = _genome_behavior(result.champion_genome) + ["hindsight"]
+        provenance = {
+            "task": task.meta.name,
+            "rung": task.meta.rung,
+            "depth": depth,
+            "strategy": result.strategy,
+            "accepted_metric": result.metric,
+            "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
+            "behavior": behavior,
+            "synthetic": True,
+        }
+        level = module_level(result.champion_genome, self.library)
+        return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=io, provenance=provenance, level=level, dependency=True)
 
     def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE

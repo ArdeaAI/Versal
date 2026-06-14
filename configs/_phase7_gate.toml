@@ -16,8 +16,8 @@
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_ladder"
-clearml = true
+experiment = "phase7_gate"
+clearml = false
 machine = "MonadMetal"
 seed = 0
 log_level = "INFO"
@@ -28,115 +28,56 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 400
+n_samples = 60
 support_fraction = 0.8
 
-[schedule]
+[schedule]                    # GATE: rung 3 (two_spirals) only, a handful of fresh instances
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5, 6] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
-tasks_per_rung = 100
-shuffle = true
-
-[entity]                      # phase 6: the ENTITY level, a meta-GA over the SEARCH ITSELF. When
-                              # enabled it evolves the search-control knobs (novelty weight, refine
-                              # prob, stall window, depth budget, solvability floor) on a small task
-                              # batch, then runs the orchestrated trial under the tuned policy. This is
-                              # the macro analogue of the per-genome self-adaptive operator rates (the
-                              # micro level): the whole search evolves how it searches. EXPENSIVE (each
-                              # Entity eval is a full mini-run). Phase 7: the champion policy is SAVED to
-                              # policy_path and keeps IMPROVING across runs (re-saved only when a run beats
-                              # the stored score). enabled=false keeps the ordinary path byte-identical.
-enabled = true
-reuse = true                  # phase 7: WARM-START the meta-GA from the saved policy (build on the prior
-                              # best instead of restarting from these config defaults). false = cold-start
-                              # from config (re-tune from scratch, e.g. after changing the rungs/substrate).
-evolve = true                 # phase 7: run the meta-GA each run and RE-SAVE the champion when it strictly
-                              # beats the stored score (the policy ratchets up, never regressing). Set false
-                              # to just load+apply the saved policy WITHOUT re-evolving (the cheap path for a
-                              # production run that should not re-tune). The Entity batch is seeded
-                              # deterministically, so scores are comparable across runs.
-# policy_path = "library/entity_policy.json"   # default: <library_dir>/entity_policy.json (the cross-run memory)
-pop_size = 6
-generations = 4
-elitism = 1
-sigma = 0.2
-batch_size = 4                # tasks per Entity evaluation (small: each is a full orchestrated mini-run)
+rungs = [3]
+tasks_per_rung = 4
+shuffle = false
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
-accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
+tasks = 2                      # 2 two_spirals instances: read the metric ceiling (the 2nd re-evolves if the 1st failed)
+accept_metric = "query_accuracy"
 accept_threshold = 0.95
-floor = 0.35                  # below this at half budget = early stall
+floor = 0.35
 stall_generations = 28
 stall_epsilon = 0.005
-stall_strategy = "adapt_rates"   # phase 7 (Pillar B): on a direct-search plateau with budget left (or
-                                 # at the half-budget mark), escalate the operator mix ONCE toward depth/
-                                 # recursion for the rest of the run, instead of idling on the plateau.
-                                 # "none" (or omitted) keeps the phase-6 behavior. Boosts in [orchestrator.stall].
-max_depth = 2                 # recursion cap for decomposition
+stall_strategy = "adapt_rates"   # phase 7 (Pillar B): escalate depth/recursion on the plateau
+max_depth = 0                 # GATE: no decompose, isolate the A+B lever
 quick_eval_top_k = 5
-library_dir = "library"       # persistent across runs: delete it to start the search space cold
-evolve = ["direct", "composition"]   # DIRECT-FIRST (phase 5): direct grows structure and wins ~43% of
-                                     # attempts vs composition's ~15%, and routes TIME-axis tasks through
-                                     # the recurrent substrate so temporal modules stop degenerating into
-                                     # flat pass-throughs. Composition runs second to catch glue-reuse
-                                     # cases (config order, first success wins, unspent budget rolls on).
-decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
-output_slices_n_groups = 2
-input_subsets_n_subsets = 2
-time_windows_n_windows = 2
-spatial_patches_n_patches = 2    # grid->grid: tile a band of the spatial axis (the ARC-portable split)
-decompose_solvability_floor = 0.6   # skip a decompose op whose probed subtasks cannot fit support this far
-decompose_probe_generations = 6     # short evolve to probe each subtask before committing the budget
-  [orchestrator.budgets]      # evolve generations per recursion depth (shared across strategies)
-  depth0 = 240
-  depth1 = 120
-  depth2 = 80
-  [orchestrator.evolve_budget]  # relative budget shares within one depth allocation (direct leads)
-  direct = 0.6
-  composition = 0.4
-  [orchestrator.stall]        # phase 7 (Pillar B): the escalated operator probabilities applied once a
-                              # direct search stalls. The depth/recursion levers the proven standalone
-                              # two_spirals recipe uses (add_deep_node 0.25, fan-heavy) but reached only
-                              # when the plateau detector says the timid default is not enough.
+library_dir = "_phase7_gate_library"   # scratch: never touch the real library
+evolve = ["direct"]           # GATE: direct only (where two_spirals is solved); isolate the lever
+decompose = []
+  [orchestrator.budgets]
+  depth0 = 140
+  [orchestrator.evolve_budget]
+  direct = 1.0
+  [orchestrator.stall]        # phase 7 (Pillar B): the escalated operator probabilities on a stall
   add_deep_node = 0.25
   add_rich_node = 0.18
   add_connection = 0.18
   enable_refinement = 0.15
   tweak_refine_steps = 0.12
-  [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
-                              # fallback (two-spirals class) and the source of task-shaped modules.
-                              # TIME-axis tasks run through the stepped recurrent substrate here.
-  pop_size = 64
+  [orchestrator.direct]
+  pop_size = 48
   elitism = 2
-  validation_fraction = 0.15  # phase 7 (Pillar A): carve an INNER fold out of the support set, fit the
-                              # trainer on the rest, and select on the held-out fold (support_holdout_*).
-                              # The leakage-free analogue of the proven rung3 recipe's w_query_accuracy:
-                              # the direct path cannot select on the real query (it is the accept metric
-                              # and the library currency), so it generalizes against this inner holdout.
-                              # 0.0 = no fold (byte-identical to phase 6).
-    [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
-                                 # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
+  validation_fraction = 0.15  # phase 7 (Pillar A): inner-fold generalization signal
+    [orchestrator.direct.train]
     kind = "gradient_refine"
     steps = 120
     lr = 0.03
     writeback = true
     weight_decay = 0.0002
-    [orchestrator.direct.fitness]  # phase 7 (Pillar A): the GENERALIZATION recipe for the direct path,
-                                   # distinct from the module pool's robustness fitness below. Mirrors the
-                                   # proven standalone two_spirals recipe (support bootstraps, generalization
-                                   # dominates, mild parsimony) but on the leakage-free inner-fold holdout
-                                   # instead of the real query. NO hidden_penalty: two_spirals grows to ~23
-                                   # hidden nodes, so penalizing hidden growth fights the depth it requires.
+    [orchestrator.direct.fitness]  # phase 7 (Pillar A): the leakage-free generalization recipe
     components = ["support_accuracy", "holdout_accuracy", "generalization_gap", "bounded_negative_holdout_loss", "weight_robustness", "modularity_bonus", "complexity_penalty"]
     w_support_accuracy = 0.3
     w_holdout_accuracy = 0.7
     w_generalization_gap = 0.3
     w_bounded_negative_holdout_loss = 0.5
     w_weight_robustness = 0.3
-    w_modularity_bonus = 0.1     # phase 7 (Pillar C): pull toward LOCAL/tiled structure on grid rungs;
-                                 # inert (0.0) on flat rungs, so it only bites once grid coordinates are
-                                 # stamped (the gradient toward weight-tied conv kernels over a dense readout)
+    w_modularity_bonus = 0.1
     w_complexity_penalty = 0.02
 
 [library]                     # admission policy: what earns a place on the shelf
@@ -148,9 +89,6 @@ per_niche_cap = 2             # max entries per (io shape, behavior niche): dist
                               # coexist (small/deep, recurrent/refining, gated, macro) for recombination
 max_per_signature = 12        # total live entries per io shape across all niches; the weakest is
                               # tombstoned (never deleted) when full, so existing refs keep assembling
-refine_depth_threshold = 0.85 # phase 6: admit deep-refine (refine_steps>1) stepping stones at this
-                              # lower bar so the recursion niche can bootstrap from zero (it adds
-                              # diversity, not a marginally higher metric); other niches keep min_metric
 
 [substrate]
 available_activations = ["tanh", "relu", "sigmoid", "identity"]
@@ -175,12 +113,10 @@ elitism = 1
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
                               # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "enable_refinement", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "add_conv_motif"]
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "enable_refinement", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
-  add_rich_node_init_zero_edges = true   # phase 7 (Pillar A): zero the readout so adding a node is
-                                         # identity-preserving and trains up from zero, instead of a
-                                         # random readout that resets the trained body each structural edit
+  add_rich_node_init_zero_edges = true   # phase 7 (Pillar A): identity-preserving node growth
   add_deep_node_prob = 0.12
   add_deep_node_fan_in = 4
   add_deep_node_fan_out = 2
@@ -208,12 +144,6 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
-  # add_conv_motif: a WEIGHT-TIED kernel tiled across the grid (true convolution; one shared weight per
-  # tap reused at every tile). The image-wall lever proper: untied motifs above cannot scale to full
-  # grids, a shared kernel can. No-op on non-grid tasks (no coordinates).
-  add_conv_motif_prob = 0.06
-  add_conv_motif_kernel = 4
-  add_conv_motif_copies = 6
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
   kind = "gradient"
   steps = 40

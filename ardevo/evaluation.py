@@ -6,13 +6,16 @@ tensors. Dispatch on `value_type` lives entirely in the Icarus `loss_fn`/`Level0
 nothing here special-cases a rung.
 """
 
+import hashlib
 import math
+import random
+from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 
 if TYPE_CHECKING:
-    from ardevo.substrate import RefineGraphNet
+    from ardevo.substrate import EquilibriumGraphNet, RefineGraphNet
 
 from ardevo.dataset.icarus import (
     EncodedTask,
@@ -88,6 +91,26 @@ def support_loss_deep(module: torch.nn.Module, encoded: EncodedTask) -> torch.Te
     return total / weight_sum
 
 
+def support_loss_equilibrium(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
+    """Deep-supervised support loss for the equilibrium substrate: a loss at EVERY fixed-point
+    iteration against the same target, weighted toward the later (more converged) iterations and
+    normalized so the scale matches the single-pass loss. Backprop flows through the full unrolled
+    iteration. Requires a module exposing `equilibrium_trace` (EquilibriumGraphNet)."""
+    x, _descriptor = encoded.support_input
+    target, mask, descriptor = encoded.support_target
+    trace = cast("EquilibriumGraphNet", module).equilibrium_trace(x)  # [batch, iters, n_outputs]
+    iters = trace.shape[1]
+    total = torch.zeros((), dtype=trace.dtype)
+    weight_sum = 0.0
+    positions = target_positions(target)
+    for index in range(iters):
+        weight = float(index + 1)  # later iterations carry more weight: the answer should keep converging
+        raw = as_logits(trace[:, index], descriptor, positions)
+        total = total + weight * loss_fn(raw, target, descriptor, mask)
+        weight_sum += weight
+    return total / weight_sum
+
+
 def split_metrics_from_raw(raw: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None, descriptor, encoder: DecodingEncoder) -> tuple[float, float]:
     """Accuracy (via decode) and dispatched loss from an ALREADY-COMPUTED logits tensor.
 
@@ -122,6 +145,47 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
     return split_metrics_from_raw(raw, target, mask, descriptor, encoder)
 
 
+def _fold_seed(encoded: EncodedTask) -> int:
+    """A deterministic seed derived ONLY from the io descriptor (value_type + shapes), never the rung or
+    task name, so the inner fold is stable across runs/resume and ARC-portable. Hashed (not Python's
+    salted `hash`) so it is identical across processes."""
+    x, _descriptor = encoded.support_input
+    target, _mask, descriptor = encoded.support_target
+    key = f"{descriptor.value_type}|{tuple(int(d) for d in x.shape[1:])}|{tuple(int(d) for d in target.shape[1:])}"
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big")
+
+
+def support_fold(encoded: EncodedTask, fraction: float, *, holdout_min: int = 4) -> tuple[list[int], list[int]]:
+    """Partition the support rows into (inner_train, inner_holdout), deterministically by io shape.
+
+    The inner holdout is a LEAKAGE-FREE stand-in for the real query: it is carved out of the support
+    set the trainer fits, never the accept/query set, so selecting on it pressures generalization
+    without ever touching the metric admission scores. `fraction <= 0` or a support set too small to
+    keep `holdout_min` rows on BOTH sides returns the whole support as inner-train and an empty
+    holdout, so the path is byte-identical to no fold."""
+    x, _descriptor = encoded.support_input
+    n = int(x.shape[0])
+    if fraction <= 0.0 or n < 2 * holdout_min:
+        return list(range(n)), []
+    holdout_count = min(max(holdout_min, int(round(n * fraction))), n - holdout_min)
+    order = list(range(n))
+    random.Random(_fold_seed(encoded)).shuffle(order)
+    return sorted(order[holdout_count:]), sorted(order[:holdout_count])
+
+
+def restrict_support(encoded: EncodedTask, rows: list[int]) -> EncodedTask:
+    """A view of `encoded` whose SUPPORT split is restricted to `rows` (query untouched). Used to build
+    the inner-train task the trainer fits on and the inner-holdout task evaluate scores against."""
+    index = torch.tensor(rows, dtype=torch.long)
+    x, x_descriptor = encoded.support_input
+    target, mask, target_descriptor = encoded.support_target
+    return replace(
+        encoded,
+        support_input=(x.index_select(0, index), x_descriptor),
+        support_target=(target.index_select(0, index), mask.index_select(0, index) if mask is not None else None, target_descriptor),
+    )
+
+
 def behavior_descriptor(module: torch.nn.Module, encoded: EncodedTask, *, max_dim: int = 64) -> tuple[float, ...]:
     """A cheap FUNCTIONAL fingerprint of what a module computes: its raw outputs on the support input,
     flattened and deterministically subsampled to a bounded length. Two genomes computing the same
@@ -137,18 +201,28 @@ def behavior_descriptor(module: torch.nn.Module, encoded: EncodedTask, *, max_di
     return tuple(float(value) for value in out.tolist())
 
 
-def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder) -> dict[str, float]:
+def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder, *, holdout: EncodedTask | None = None) -> dict[str, float]:
     """Support- and query-set metrics. Support fit rewards capacity (structure improves it even when
-    the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization."""
+    the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization.
+
+    When `holdout` is given (the inner-fold view, support rows withheld from training), its support
+    metrics are reported under `support_holdout_*` so the generalization fitness components get a
+    leakage-free generalization signal. Absent, no holdout keys are emitted and the dict is exactly the
+    pre-fold contract (byte-identical when no fold is configured)."""
     with torch.no_grad():
         support_accuracy, support_loss_value = _split_metrics(module, encoded.support_input, encoded.support_target, encoder)
         if encoded.query_input is not None and encoded.query_target is not None:
             query_accuracy, query_loss_value = _split_metrics(module, encoded.query_input, encoded.query_target, encoder)
         else:
             query_accuracy, query_loss_value = 0.0, float("inf")
-    return {
-        "support_accuracy": support_accuracy,
-        "support_loss": support_loss_value,
-        "query_accuracy": query_accuracy,
-        "query_loss": query_loss_value,
-    }
+        metrics = {
+            "support_accuracy": support_accuracy,
+            "support_loss": support_loss_value,
+            "query_accuracy": query_accuracy,
+            "query_loss": query_loss_value,
+        }
+        if holdout is not None:
+            holdout_accuracy, holdout_loss_value = _split_metrics(module, holdout.support_input, holdout.support_target, encoder)
+            metrics["support_holdout_accuracy"] = holdout_accuracy
+            metrics["support_holdout_loss"] = holdout_loss_value
+    return metrics

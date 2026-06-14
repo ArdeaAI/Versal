@@ -24,7 +24,7 @@ from typing import Callable
 import torch
 
 from ardevo.dataset.icarus import EncodedTask, as_logits, loss_fn, target_positions
-from ardevo.evaluation import support_loss, support_loss_deep
+from ardevo.evaluation import support_loss, support_loss_deep, support_loss_equilibrium
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
 from ardevo.substrate import SubstrateModule
@@ -104,6 +104,40 @@ def gradient_refine(
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss_deep(module, encoded)
+        if not loss.requires_grad or not torch.isfinite(loss):
+            break
+        loss.backward()
+        optimizer.step()
+    if writeback:
+        genome = _writeback(genome, module)
+    return genome, module
+
+
+@TRAIN.register("gradient_equilibrium")
+def gradient_equilibrium(
+    genome: Genome,
+    module: SubstrateModule,
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 20,
+    lr: float = 0.01,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+) -> tuple[Genome, SubstrateModule]:
+    """Deep-supervised training for the equilibrium substrate: backprop a loss summed over every
+    fixed-point iteration, through the full unrolled recursion. Falls back to `gradient_refine` (which
+    itself falls back to `gradient`) for modules that do not iterate to equilibrium, so it is a safe
+    drop-in trainer for a population that mixes feedforward, refine, and equilibrium genomes."""
+    if not hasattr(module, "equilibrium_trace"):
+        return gradient_refine(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+    parameters = _trainable_parameters(module)
+    if steps <= 0 or not module.has_edges or not parameters:
+        return genome, module
+    optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
+    for _ in range(steps):
+        optimizer.zero_grad()
+        loss = support_loss_equilibrium(module, encoded)
         if not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()

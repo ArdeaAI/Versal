@@ -127,6 +127,24 @@ def _build_archive(
     return policy
 
 
+@LIBRARY_ADMISSION.register("hindsight")
+def _build_hindsight(**params: object) -> "AdmissionPolicy":
+    """Phase 7 (Pillar G): the open-ended archive PLUS hindsight relabeling. A run's failed attempts
+    are not discarded: the best failed genome is re-admitted as a SYNTHETIC dependency (a graftable
+    stepping stone), so wasted search budget becomes a growing repertoire of partial competencies the
+    next related attempt can build on. Synthetic dependencies always admit (they are stepping stones,
+    not shelf competitors, and are excluded from the signature cap and re-evaluated at lookup so they
+    never falsely hit); everything else faces the ordinary `archive` policy unchanged."""
+    archive = _build_archive(**params)
+
+    def policy(library: "ModuleLibrary", *, entry_type: str, io: dict[str, Any], provenance: dict[str, Any]) -> AdmissionDecision:
+        if provenance.get("synthetic") and provenance.get("dependency"):
+            return AdmissionDecision(admit=True, reason="hindsight stepping stone")
+        return archive(library, entry_type=entry_type, io=io, provenance=provenance)
+
+    return policy
+
+
 def descriptor_signature(value_type: str, axes: tuple[str, ...]) -> str:
     """The bank-signature scheme shared with `multitask.task_entry`: value_type plus axis letters."""
     return f"{value_type}|{','.join(axes)}"

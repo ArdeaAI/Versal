@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ardevo.evolution.genome import Genome
+from ardevo.evolution.genome import Genome, coordinate_distance
 from ardevo.evolution.registry import Registry
 
 # A degenerate genome (non-finite metric, e.g. an exploding refine recursion) gets this floor instead
@@ -77,6 +77,35 @@ def bounded_negative_query_loss(genome: Genome, metrics: dict[str, float]) -> fl
     return 1.0 / (1.0 + max(float(metrics.get("query_loss", 0.0)), 0.0))
 
 
+# --- generalization components (metrics produced when an inner support fold is active) ---------------
+# The orchestrated/library path may NOT select on the real query_accuracy: it is the accept metric and
+# the library admission currency, so optimizing it directly is leakage (the search would memorize its
+# own held-out test). These components read an INNER fold carved out of TRAINING instead, the leakage-
+# free analogue of the proven standalone recipe's w_query_accuracy. All fall back to the support metric
+# when no fold is configured, so they are harmless (contribute 0 gap, support-equal loss) at fraction 0.
+
+
+@FITNESS.register("holdout_accuracy")
+def holdout_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
+    # Accuracy on the inner fold withheld from training: rewards GENERALIZATION, not memorization.
+    return float(metrics.get("support_holdout_accuracy", metrics.get("support_accuracy", 0.0)))
+
+
+@FITNESS.register("generalization_gap")
+def generalization_gap(genome: Genome, metrics: dict[str, float]) -> float:
+    # Negative train-minus-holdout gap: a memorizer (high train, low holdout) is penalized; a genome
+    # that generalizes (train ~ holdout) is not. Exactly 0 when no fold (holdout defaults to train).
+    train = float(metrics.get("support_accuracy", 0.0))
+    held = float(metrics.get("support_holdout_accuracy", train))
+    return -(train - held)
+
+
+@FITNESS.register("bounded_negative_holdout_loss")
+def bounded_negative_holdout_loss(genome: Genome, metrics: dict[str, float]) -> float:
+    loss = float(metrics.get("support_holdout_loss", metrics.get("support_loss", 0.0)))
+    return 1.0 / (1.0 + max(loss, 0.0))
+
+
 # --- weight-robustness components (metrics produced by the weight_samples / hybrid evaluate ops) ---
 # All default to 0.0 when the metric is absent so a misconfigured combo degrades instead of crashing.
 
@@ -91,6 +120,14 @@ def max_sample_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
     return float(metrics.get("max_sample_accuracy", 0.0))
 
 
+@FITNESS.register("depth_scaling_score")
+def depth_scaling_score(genome: Genome, metrics: dict[str, float]) -> float:
+    # Phase 7 (Pillar D): rewards a genome whose accuracy IMPROVES with more recursion iterations (the
+    # depth_scaled evaluate stamps it). Makes effective depth an admittable currency so recursion buys
+    # reasoning depth instead of refine_steps drifting back to 1. Absent (no depth) -> 0.0, inert.
+    return float(metrics.get("depth_scaling_score", 0.0))
+
+
 @FITNESS.register("weight_robustness")
 def weight_robustness(genome: Genome, metrics: dict[str, float]) -> float:
     # mean minus std over the shared-weight samples: rewards topologies whose function survives
@@ -101,6 +138,34 @@ def weight_robustness(genome: Genome, metrics: dict[str, float]) -> float:
 @FITNESS.register("negative_mean_sample_loss")
 def negative_mean_sample_loss(genome: Genome, metrics: dict[str, float]) -> float:
     return -float(metrics.get("mean_sample_loss", 0.0))
+
+
+# --- modularity (phase 7, Pillar C): a gradient toward LOCAL/tiled structure on grid tasks ----------
+# Computed straight from the genome's coordinate geometry (no evaluate metric needed): the fraction of
+# coordinate-comparable edges that are LOCAL (within a small radius). On grid rungs this rewards the
+# tiled receptive fields a convolution needs, giving evolution a pull toward weight-tied kernels rather
+# than a dense readout. No-op (0.0) on the flat/non-grid path: uncoordinated edges are skipped, so a
+# genome with no geometry scores 0 and the term is inert until grid coordinates are stamped.
+_MODULARITY_RADIUS = 2.0
+
+
+@FITNESS.register("modularity_bonus")
+def modularity_bonus(genome: Genome, metrics: dict[str, float]) -> float:
+    nodes = getattr(genome, "nodes", None)
+    if nodes is None or not hasattr(genome, "enabled_connections"):
+        return 0.0  # a composition genome carries no node geometry; the bonus only applies to flat grids
+    comparable = 0
+    local = 0
+    for conn in genome.enabled_connections():
+        if conn.in_id not in nodes or conn.out_id not in nodes:
+            continue
+        distance = coordinate_distance(nodes[conn.in_id].coordinate, nodes[conn.out_id].coordinate)
+        if math.isinf(distance):
+            continue  # uncoordinated or incomparable banks: not a geometry edge
+        comparable += 1
+        if distance <= _MODULARITY_RADIUS:
+            local += 1
+    return local / comparable if comparable else 0.0
 
 
 @dataclass

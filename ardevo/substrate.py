@@ -325,6 +325,37 @@ class RecurrentGraphNet(GraphNet):
                 )
             self._recurrent_products.append(entries)
 
+    def _step(self, x_step: torch.Tensor, previous: torch.Tensor, masked: torch.Tensor, recurrent_masked: torch.Tensor) -> torch.Tensor:
+        """One stepped pass: fill inputs/bias from `x_step`, add the time-delayed term from `previous`,
+        run the levels, and return the full node-value vector. The shared unit of work for the temporal
+        loop (RecurrentGraphNet) and the fixed-point iteration (EquilibriumGraphNet)."""
+        batch = x_step.shape[0]
+        values = torch.zeros(batch, self.n, dtype=x_step.dtype, device=x_step.device)
+        if self.input_pos.numel():
+            values = values.index_copy(1, self.input_pos, x_step)
+        if self.bias_pos.numel():
+            values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x_step.dtype, device=x_step.device))
+        recurrent_in = previous @ recurrent_masked
+        for (level_positions, activation_groups), products, macros in zip(self._levels, self._recurrent_products, self._macro_entries):
+            pre_activation = values @ masked[:, level_positions] + recurrent_in.index_select(1, level_positions)
+            for local_index, node_position, forward_sources, recurrent_sources in products:
+                factors = []
+                if forward_sources.numel():
+                    forward_weights = masked.index_select(0, forward_sources).index_select(1, node_position).squeeze(1)
+                    factors.append(values.index_select(1, forward_sources) * forward_weights)
+                if recurrent_sources.numel():
+                    recurrent_edge_weights = recurrent_masked.index_select(0, recurrent_sources).index_select(1, node_position).squeeze(1)
+                    factors.append(previous.index_select(1, recurrent_sources) * recurrent_edge_weights)
+                combined = torch.cat(factors, dim=1).prod(dim=1, keepdim=True)
+                pre_activation = pre_activation.index_copy(1, local_index, combined)
+            for local_indices, input_positions, inner in macros:
+                pre_activation = pre_activation.index_copy(1, local_indices, inner(values.index_select(1, input_positions)))
+            activated = pre_activation
+            for activation, local_indices in activation_groups:
+                activated = activated.index_copy(1, local_indices, activation(activated.index_select(1, local_indices)))
+            values = values.index_copy(1, level_positions, activated)
+        return values
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 3:
             raise ValueError(f"RecurrentGraphNet expects [batch, time, features], got shape {tuple(x.shape)}")
@@ -334,30 +365,7 @@ class RecurrentGraphNet(GraphNet):
         previous = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
         outputs: list[torch.Tensor] = []
         for step in range(steps):
-            values = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
-            if self.input_pos.numel():
-                values = values.index_copy(1, self.input_pos, x[:, step])
-            if self.bias_pos.numel():
-                values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x.dtype, device=x.device))
-            recurrent_in = previous @ recurrent_masked
-            for (level_positions, activation_groups), products, macros in zip(self._levels, self._recurrent_products, self._macro_entries):
-                pre_activation = values @ masked[:, level_positions] + recurrent_in.index_select(1, level_positions)
-                for local_index, node_position, forward_sources, recurrent_sources in products:
-                    factors = []
-                    if forward_sources.numel():
-                        forward_weights = masked.index_select(0, forward_sources).index_select(1, node_position).squeeze(1)
-                        factors.append(values.index_select(1, forward_sources) * forward_weights)
-                    if recurrent_sources.numel():
-                        recurrent_edge_weights = recurrent_masked.index_select(0, recurrent_sources).index_select(1, node_position).squeeze(1)
-                        factors.append(previous.index_select(1, recurrent_sources) * recurrent_edge_weights)
-                    combined = torch.cat(factors, dim=1).prod(dim=1, keepdim=True)
-                    pre_activation = pre_activation.index_copy(1, local_index, combined)
-                for local_indices, input_positions, inner in macros:
-                    pre_activation = pre_activation.index_copy(1, local_indices, inner(values.index_select(1, input_positions)))
-                activated = pre_activation
-                for activation, local_indices in activation_groups:
-                    activated = activated.index_copy(1, local_indices, activation(activated.index_select(1, local_indices)))
-                values = values.index_copy(1, level_positions, activated)
+            values = self._step(x[:, step], previous, masked, recurrent_masked)
             previous = values
             outputs.append(values.index_select(1, self.output_pos))
         if self.mode == "last":
@@ -412,6 +420,78 @@ class RefineGraphNet(RecurrentGraphNet):
         return flat.reshape(x.shape[0], self.steps, self.output_pos.numel())
 
 
+class EquilibriumGraphNet(RecurrentGraphNet):
+    """Iterate the recurrent graph to a DAMPED FIXED POINT instead of a fixed number of refine passes.
+
+    Same static-input re-application as RefineGraphNet (recurrent edges thread the latent reasoning
+    state across passes), but the number of passes is NOT a brittle evolved gene: the net iterates
+    `z <- (1-damping)*z + damping*F(x, z)` until the node state stops moving (max residual < tol) or
+    `max_iters`. This severs effective depth from `refine_steps`: ANY genome with one recurrent edge
+    (which `enable_refinement` already lands) gets variable, test-time-tunable depth, so the search must
+    find ONE structural trait instead of two rare co-occurring ones. Input/bias positions are pinned to
+    the static input every iteration (never damped), matching the refine semantics; with no recurrent
+    edges the iteration converges to the plain feedforward answer in a couple of passes."""
+
+    def __init__(
+        self,
+        genome: Genome,
+        n_inputs: int,
+        n_outputs: int,
+        *,
+        tol: float = 1e-4,
+        damping: float = 0.5,
+        max_iters: int = 16,
+        macro_resolver: MacroResolver | None = None,
+    ) -> None:
+        super().__init__(genome, n_inputs, n_outputs, "last", macro_resolver=macro_resolver)
+        if max_iters < 1:
+            raise ValueError(f"equilibrium max_iters must be >= 1, got {max_iters}")
+        if not 0.0 < damping <= 1.0:
+            raise ValueError(f"equilibrium damping must be in (0, 1], got {damping}")
+        self.tol = float(tol)
+        self.damping = float(damping)
+        self.max_iters = int(max_iters)
+
+    def _pin_inputs(self, values: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        if self.input_pos.numel():
+            values = values.index_copy(1, self.input_pos, x)
+        if self.bias_pos.numel():
+            values = values.index_copy(1, self.bias_pos, torch.ones(x.shape[0], self.bias_pos.numel(), dtype=x.dtype, device=x.device))
+        return values
+
+    def _converge(self, x: torch.Tensor, max_iters: int) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Iterate to the damped fixed point, collecting per-iteration readouts for deep supervision.
+        The residual test is detached (a stopping condition only), so it never enters autograd."""
+        if x.dim() != 2:
+            raise ValueError(f"EquilibriumGraphNet expects a static [batch, features] input, got shape {tuple(x.shape)}")
+        masked = self._masked_weights()
+        recurrent_masked = self.recurrent_weights * self.recurrent_mask
+        previous = torch.zeros(x.shape[0], self.n, dtype=x.dtype, device=x.device)
+        trace: list[torch.Tensor] = []
+        for _ in range(max_iters):
+            step_values = self._step(x, previous, masked, recurrent_masked)
+            updated = self._pin_inputs((1.0 - self.damping) * previous + self.damping * step_values, x)
+            trace.append(updated.index_select(1, self.output_pos))
+            residual = float((updated - previous).detach().abs().max())
+            previous = updated
+            if residual < self.tol:
+                break
+        return previous, trace
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        final, _trace = self._converge(x, self.max_iters)
+        return final.index_select(1, self.output_pos)
+
+    def equilibrium_trace(self, x: torch.Tensor) -> torch.Tensor:
+        """Per-iteration readouts `[batch, iters, n_outputs]` for DEEP SUPERVISION (a loss at every
+        fixed-point iteration, the signal that trains the recursion to keep improving the answer)."""
+        _final, trace = self._converge(x, self.max_iters)
+        return torch.stack(trace, dim=1)
+
+    def core(self) -> tuple["GraphNet | None", "torch.Tensor | None"]:
+        return None, None  # the fixed-point iteration is not the batchable single-pass GraphNet form
+
+
 def decode(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
     """Build the torch module for a genome."""
     return GraphNet(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
@@ -426,6 +506,21 @@ def decode_refine(genome: Genome, n_inputs: int, n_outputs: int, *, steps: int |
     """Build the iterative-refinement module for a genome (static input, re-applied `steps` times)."""
     resolved = genome.refine_steps if steps is None else steps
     return RefineGraphNet(genome, n_inputs, n_outputs, resolved, macro_resolver=macro_resolver)
+
+
+def decode_equilibrium(
+    genome: Genome,
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    tol: float = 1e-4,
+    damping: float = 0.5,
+    max_iters: int = 16,
+    macro_resolver: MacroResolver | None = None,
+) -> EquilibriumGraphNet:
+    """Build the fixed-point (equilibrium) module for a genome: iterate the recurrent graph on a static
+    input until the node state converges, so effective depth is test-time-tunable rather than gene-fixed."""
+    return EquilibriumGraphNet(genome, n_inputs, n_outputs, tol=tol, damping=damping, max_iters=max_iters, macro_resolver=macro_resolver)
 
 
 def decode_module(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:

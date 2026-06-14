@@ -25,6 +25,7 @@ from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
+from ardevo.evolution.stall import StallStrategy, build_stall_strategy
 from ardevo.library import ModuleLibrary
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
@@ -123,7 +124,19 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
-    return DirectStrategy(evolver=build_evolver(overlay))
+    # The direct path may NOT select on the real query (it is the accept metric and library currency).
+    # An overridable [orchestrator.direct.fitness] lets it run a GENERALIZATION recipe (inner-fold
+    # holdout signal) distinct from the module pool's robustness fitness; the inner fold is sized by
+    # validation_fraction. Both default to the module-pool behavior, so omitting them is byte-identical.
+    if "fitness" in table:
+        overlay["fitness"] = table["fitness"]
+    equilibrium = table.get("equilibrium")
+    return DirectStrategy(
+        evolver=build_evolver(overlay),
+        validation_fraction=float(table.get("validation_fraction", 0.0)),
+        stall_strategy=build_stall_strategy(config),
+        equilibrium=dict(equilibrium) if equilibrium else None,
+    )
 
 
 @dataclass
@@ -134,6 +147,13 @@ class DirectStrategy:
 
     evolver: Evolver
     name: str = "direct"
+    # Inner support-fold fraction for the generalization fitness (Pillar A); 0.0 = no fold.
+    validation_fraction: float = 0.0
+    # Phase 7 (Pillar B): escalate the mutation mix once the search stalls with budget left; None = the
+    # phase-6 behavior (run the full budget under novelty, or stop on plateau without novelty).
+    stall_strategy: StallStrategy | None = None
+    # Phase 7 (Pillar D): equilibrium decode params; None = the gene-fixed refine/feedforward decode.
+    equilibrium: dict[str, Any] | None = None
 
     def _adapter(self, task: Task) -> TaskAdapter | TemporalTaskAdapter:
         support_input, _support_output = support_loader(task)
@@ -144,7 +164,7 @@ class DirectStrategy:
             width *= int(dim)
         encoder = Level0Encoder(max_flat_dim=width)
         encoded = encode_task(task, encoder)
-        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded))
+        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), validation_fraction=self.validation_fraction, equilibrium=self.equilibrium)
 
     @staticmethod
     def _grid_shape(task: Task) -> tuple[int, ...] | None:
@@ -197,20 +217,35 @@ class DirectStrategy:
 
         best: Assessed = max(state.population, key=_champion_key)
         generations = 0
-        for generation in range(budget):
-            generation_best = max(state.population, key=_champion_key)
-            if _champion_key(generation_best) > _champion_key(best):
-                best = generation_best
-            if runtime.on_generation is not None:
-                mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
-                runtime.on_generation(self.name, generation, generation_best, mean_fitness)
-            runtime.state.generation += 1  # the global clock spans strategies for monotonic logging
-            generations = generation + 1
-            if runtime.metric_of(best) >= runtime.accept_threshold:
-                break
-            if not novelty_on and stop(generation, best):
-                break
-            self.evolver.advance(state, adapter)
+        # Pillar B: when the search stalls (or reaches the half-budget mark) with budget remaining,
+        # escalate the operator mix ONCE toward depth/recursion for the rest of the run, instead of
+        # idling on the plateau (novelty on) or stopping (novelty off). The half-budget fallback
+        # guarantees the grown structure has time to train even if the plateau detector never fires.
+        # The escalated pipeline is restored after the task so it never leaks into the next solve.
+        original_mutation = self.evolver.mutation
+        escalated = False
+        half_budget = max(1, budget // 2)
+        try:
+            for generation in range(budget):
+                generation_best = max(state.population, key=_champion_key)
+                if _champion_key(generation_best) > _champion_key(best):
+                    best = generation_best
+                if runtime.on_generation is not None:
+                    mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
+                    runtime.on_generation(self.name, generation, generation_best, mean_fitness)
+                runtime.state.generation += 1  # the global clock spans strategies for monotonic logging
+                generations = generation + 1
+                if runtime.metric_of(best) >= runtime.accept_threshold:
+                    break
+                stalled = stop(generation, best)
+                if self.stall_strategy is not None and not escalated and (stalled or generation >= half_budget):
+                    self.evolver.mutation = self.stall_strategy(original_mutation)
+                    escalated = True
+                elif stalled and not novelty_on:
+                    break
+                self.evolver.advance(state, adapter)
+        finally:
+            self.evolver.mutation = original_mutation
 
         # Verification: the genome PAYLOAD (not the live module object) must reproduce the metric,
         # because the payload is what admission persists and lookups re-decode.

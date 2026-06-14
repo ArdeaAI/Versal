@@ -3,11 +3,23 @@ of the per-genome self-adaptive operator rates). The MetaEvolver is pure (scorer
 convergence is tested against a synthetic objective; the production scorer is smoke-tested on XOR."""
 
 import random
+from pathlib import Path
 from typing import Any
 
 from ardevo.dataset.icarus import Level0Encoder, Task
 from ardevo.evaluation import encode, input_width, output_features
-from ardevo.evolution.entity import ENTITY_GENES, EntityGenome, MetaEvolver, build_orchestrator_batch_evaluator
+from ardevo.evolution.entity import (
+    ENTITY_GENES,
+    EntityGenome,
+    MetaEvolver,
+    _genome_from_saved,
+    _should_resave,
+    build_orchestrator_batch_evaluator,
+    load_entity_policy,
+    load_entity_score,
+    run_entity_layer,
+    save_entity_policy,
+)
 
 
 def _base_config() -> dict[str, Any]:
@@ -72,6 +84,51 @@ def test_meta_evolver_is_deterministic() -> None:
         return MetaEvolver(_base_config(), scorer, pop_size=5, generations=4).run(random.Random(3)).to_dict()
 
     assert run() == run()
+
+
+# --- policy persistence (phase 7) -----------------------------------------------------------------
+
+
+def test_save_and_load_entity_policy_round_trip(tmp_path: Path) -> None:
+    champion = EntityGenome.seed(_base_config())
+    champion.values["evolution/novelty/weight"] = 0.77
+    path = tmp_path / "entity_policy.json"
+    save_entity_policy(path, champion, score=0.85, context={"rungs": [1, 2]})
+    loaded = load_entity_policy(path)
+    assert loaded is not None and loaded["evolution/novelty/weight"] == 0.77
+    assert load_entity_score(path) == 0.85  # the bar a later run must beat to re-save
+    assert load_entity_policy(tmp_path / "missing.json") is None  # no policy saved yet
+    assert load_entity_score(tmp_path / "missing.json") is None
+
+
+def test_should_resave_only_when_strictly_beating_the_stored_score() -> None:
+    assert _should_resave(None, 0.5)  # no policy yet -> save
+    assert _should_resave(0.5, 0.6)  # a strict improvement -> re-save
+    assert not _should_resave(0.6, 0.5)  # worse -> keep the stored best
+    assert not _should_resave(0.5, 0.5)  # a tie does not overwrite (no regression, no churn)
+
+
+def test_genome_from_saved_clamps_to_current_bounds_and_ignores_unknown_keys() -> None:
+    saved = {"evolution/novelty/weight": 0.6, "orchestrator/budgets/depth0": 999999.0, "bogus/key": 1.0}
+    genome = _genome_from_saved(_base_config(), saved)
+    assert genome.values["evolution/novelty/weight"] == 0.6
+    assert genome.values["orchestrator/budgets/depth0"] == 320.0  # clamped to the gene's high
+    assert "bogus/key" not in genome.values  # a key that no longer maps to a gene is dropped
+
+
+def test_run_entity_layer_applies_saved_policy_when_evolve_off(tmp_path: Path) -> None:
+    # evolve=false returns BEFORE any dataset load, so the saved policy is applied offline and the
+    # meta-GA is skipped entirely (dataset "unused" would crash build_pool_report if reached).
+    policy_path = tmp_path / "entity_policy.json"
+    champion = EntityGenome.seed(_base_config())
+    champion.values["orchestrator/stall_generations"] = 33.0
+    save_entity_policy(policy_path, champion, score=0.9, context={})
+    config = _base_config()
+    config["dataset"] = "unused"
+    config["n_samples"] = 4
+    config["entity"] = {"evolve": False, "reuse": True, "policy_path": str(policy_path)}
+    applied = run_entity_layer(config)
+    assert applied["orchestrator"]["stall_generations"] == 33  # saved policy applied, no meta-GA run
 
 
 # --- production scorer (smoke) --------------------------------------------------------------------

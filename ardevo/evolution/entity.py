@@ -15,10 +15,12 @@ orchestrator-batch evaluator below.
 """
 
 import copy
+import json
 import random
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -125,15 +127,16 @@ class MetaEvolver:
     sigma: float = 0.2
     genes: tuple[EntityGene, ...] = ENTITY_GENES
     history: list[dict[str, Any]] = field(default_factory=list)
+    champion_score: float = float("-inf")  # the best score found, for persisting alongside the champion
 
     def run(self, rng: random.Random) -> EntityGenome:
         seed = EntityGenome.seed(self.base_config, self.genes)
         population = [seed] + [seed.mutate(rng, self.sigma) for _ in range(self.pop_size - 1)]
-        champion, champion_score = seed, float("-inf")
+        champion, self.champion_score = seed, float("-inf")
         for generation in range(self.generations):
             scored = sorted(((genome, self.evaluate(genome)) for genome in population), key=lambda pair: pair[1], reverse=True)
-            if scored[0][1] > champion_score:
-                champion, champion_score = scored[0]
+            if scored[0][1] > self.champion_score:
+                champion, self.champion_score = scored[0]
             self.history.append({"generation": generation, "best_score": scored[0][1], "best": scored[0][0].to_dict()})
             logger.info("entity gen %d: best score %.4f", generation, scored[0][1])
             elites = [genome for genome, _score in scored[: self.elitism]]
@@ -169,13 +172,90 @@ def build_orchestrator_batch_evaluator(base_config: dict[str, Any], tasks: list[
     return evaluate
 
 
+def _policy_path(config: dict[str, Any]) -> Path:
+    """Where the learned search policy persists across runs. Defaults to `entity_policy.json` inside the
+    persistent library dir (the system's cross-run memory), so deleting the library also resets the
+    policy; override with `[entity] policy_path`."""
+    explicit = config.get("entity", {}).get("policy_path")
+    if explicit:
+        return Path(explicit)
+    library_dir = config.get("orchestrator", {}).get("library_dir", "library")
+    return Path(library_dir) / "entity_policy.json"
+
+
+def save_entity_policy(path: Path, champion: EntityGenome, *, score: float, context: dict[str, Any]) -> None:
+    """Persist the champion's knob values (plus the score and the context it was tuned on) so a future
+    run can reuse the learned search policy instead of re-paying the expensive meta-GA."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"values": champion.to_dict(), "score": float(score), "saved_at": datetime.now(timezone.utc).isoformat(), "context": context}
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def load_entity_policy(path: Path) -> dict[str, float] | None:
+    """The saved knob values (gene key -> value), or None when no policy has been saved yet."""
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    return {str(key): float(value) for key, value in data.get("values", {}).items()}
+
+
+def load_entity_score(path: Path) -> float | None:
+    """The score the saved policy achieved (the bar a later run must beat to re-save), or None."""
+    if not path.exists():
+        return None
+    score = json.loads(path.read_text()).get("score")
+    return float(score) if score is not None else None
+
+
+def _should_resave(stored_score: float | None, champion_score: float) -> bool:
+    """Overwrite the saved policy only when there is none yet or the new champion STRICTLY beats the
+    stored score, so the saved policy ratchets to the best ever found and never regresses on a tie."""
+    return stored_score is None or champion_score > stored_score
+
+
+def _genome_from_saved(config: dict[str, Any], saved: dict[str, float]) -> EntityGenome:
+    """Rebuild an EntityGenome from saved values: seed the current genes from config, then overlay each
+    saved value that still maps to a known gene (clamped to its CURRENT bounds), so a policy stays
+    loadable even if the gene set or bounds shifted between versions."""
+    seeded = EntityGenome.seed(config)
+    values = dict(seeded.values)
+    for gene in ENTITY_GENES:
+        if gene.key in saved:
+            values[gene.key] = seeded._clamp(gene, saved[gene.key])
+    return EntityGenome(values)
+
+
 def run_entity_layer(config: dict[str, Any]) -> dict[str, Any]:
-    """Evolve the search policy on a small task batch, then return `config` with the champion Entity's
-    knobs written in. Called from `main` only when `[entity] enabled`; the heavy orchestrated trial
-    then runs once under the tuned policy."""
+    """Return `config` with an evolved search policy written in. Called from `main` only when
+    `[entity] enabled`. Behavior:
+
+    - `[entity] evolve = false` + a saved policy: load and apply it WITHOUT running the meta-GA (the
+      cheap reuse path, for a production run that should not re-tune).
+    - otherwise (default): run the meta-GA, WARM-STARTED from the saved policy when `[entity] reuse`
+      (so each run builds on the best-known instead of restarting), then RE-SAVE the champion only when
+      it strictly beats the stored score. The Entity batch is seeded deterministically, so the score is
+      comparable across runs and the saved policy ratchets up to the best ever found, never regressing.
+    """
     from ardevo.evolution.multitask import build_pool_report
 
     table = config.get("entity", {})
+    path = _policy_path(config)
+    saved = load_entity_policy(path)
+    stored_score = load_entity_score(path)
+    reuse = bool(table.get("reuse", True))
+
+    if not bool(table.get("evolve", True)):
+        if saved is not None:
+            genome = _genome_from_saved(config, saved)
+            logger.info("entity layer: applying saved policy from %s without evolving: %s", path, genome.to_dict())
+            return genome.apply(config)
+        logger.warning("entity layer: evolve off and no saved policy; running with the base config")
+        return config
+
+    # Warm start: the meta-GA seeds from the saved policy so each run builds on the prior best, which
+    # guarantees the champion is at least as good as the stored policy on this (deterministic) batch.
+    base = _genome_from_saved(config, saved).apply(config) if (saved is not None and reuse) else config
+
     schedule_cfg = config.get("schedule", {})
     rungs_cfg = schedule_cfg.get("rungs", [1, 2, 3, 4, 5])
     rungs = list(range(1, 19)) if rungs_cfg == "all" else [int(rung) for rung in rungs_cfg]
@@ -191,10 +271,10 @@ def run_entity_layer(config: dict[str, Any]) -> dict[str, Any]:
     batch = [entry.task for entry in report.entries[: int(table.get("batch_size", 4))]]
     if not batch:
         logger.warning("entity layer: no tasks in the batch; running with the base config")
-        return config
-    evaluator = build_orchestrator_batch_evaluator(config, batch, seed=int(config.get("seed", 0)))
+        return base
+    evaluator = build_orchestrator_batch_evaluator(base, batch, seed=int(config.get("seed", 0)))
     meta = MetaEvolver(
-        config,
+        base,
         evaluator,
         pop_size=int(table.get("pop_size", 6)),
         generations=int(table.get("generations", 4)),
@@ -202,5 +282,10 @@ def run_entity_layer(config: dict[str, Any]) -> dict[str, Any]:
         sigma=float(table.get("sigma", 0.2)),
     )
     champion = meta.run(random.Random(int(config.get("seed", 0))))
-    logger.info("entity layer champion: %s", champion.to_dict())
+    if _should_resave(stored_score, meta.champion_score):
+        context = {"rungs": rungs, "batch_size": len(batch), "seed": int(config.get("seed", 0)), "generations": int(table.get("generations", 4))}
+        save_entity_policy(path, champion, score=meta.champion_score, context=context)
+        logger.info("entity layer: re-saved policy to %s (score %.4f beats stored %s): %s", path, meta.champion_score, stored_score, champion.to_dict())
+    else:
+        logger.info("entity layer: kept stored policy (champion %.4f did not beat stored %.4f)", meta.champion_score, stored_score)
     return champion.apply(config)
