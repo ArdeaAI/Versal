@@ -24,8 +24,8 @@ HAS_CLEARML = importlib.util.find_spec("clearml") is not None
 
 VALID_MACHINE_ENVS = {"local", "LatticeCPU", "LatticeCUDA", "MonadCPU", "MonadMetal"}
 QUEUE_BY_MACHINE = {
-    "LatticeCPU": "lattice-cpu",
-    "LatticeCUDA": "lattice-cuda",
+    "LatticeCPU": "lattice_cpu",
+    "LatticeCUDA": "lattice_cuda",
     "MonadCPU": "local",
     "MonadMetal": "local",
 }
