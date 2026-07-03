@@ -63,6 +63,59 @@ def test_flat_parallel_assess_matches_serial(xor_adapter, linear_genome: Genome,
         torch.set_num_threads(previous)
 
 
+def test_hierarchical_process_pool_matches_serial(decomposable_task: Task, tmp_path) -> None:
+    """Composition assessment across the shared process pool is bit-identical to serial: champion
+    fitness/metrics AND the evolved module pool match (rng streams match; training is rng-free)."""
+    from ardevo.evolution import evolver as ev_mod
+
+    outcomes = []
+    try:
+        for workers in (0, 2):
+            ev_mod.set_shared_pool(None)
+            if workers > 1:
+                ev_mod.create_assess_pool(workers, str(tmp_path))
+            loop = build_loop(_loop_config())
+            state = loop.fresh_state(random.Random(0))
+            best = loop.run_task(_spec(decomposable_task), state, budget=2)
+            outcomes.append((best.fitness, best.metrics, [genome_to_dict(m.genome) for m in state.modules]))
+            ev_mod._close_shared_pool()
+            ev_mod.set_shared_pool(None)
+    finally:
+        ev_mod.set_shared_pool(None)
+    assert outcomes[0][0] == outcomes[1][0]
+    assert outcomes[0][1] == outcomes[1][1]
+    assert outcomes[0][2] == outcomes[1][2]  # module pool evolved identically
+
+
+def test_flat_process_pool_matches_serial(xor_adapter, linear_genome: Genome, solving_genome: Genome, tmp_path) -> None:
+    """Process-pool assessment (assess_workers) is bit-identical to serial: independent candidates,
+    rng-free training, and re-decoded modules reproduce the exact population."""
+    results = []
+    for workers in (0, 2):
+        config = {
+            "seed": 0,
+            "library_dir": str(tmp_path),
+            "evolution": {
+                "pop_size": 6,
+                "assess_workers": workers,
+                "init": {"kind": "minimal"},
+                "selection": {"kind": "tournament", "tournament_size": 2},
+                "crossover": {"kind": "none"},
+                "mutation": {"operators": ["add_rich_node"], "add_rich_node_prob": 0.5},
+                "train": {"kind": "gradient", "steps": 10, "lr": 0.05},
+            },
+            "fitness": {"components": ["support_accuracy"]},
+        }
+        evolver = build_evolver(config)
+        try:
+            state = evolver.seed_state(xor_adapter, random.Random(0))
+            evolver.advance(state, xor_adapter)
+            results.append([(item.fitness, genome_to_dict(item.genome)) for item in state.population])
+        finally:
+            evolver.close_pool()
+    assert results[0] == results[1]
+
+
 def test_partitioned_batched_training_handles_mixed_generations(xor_adapter, linear_genome: Genome, solving_genome: Genome) -> None:
     """T4: one non-batchable candidate must not force the whole generation onto the serial path."""
     from tests.test_aggregation import _product_xor_genome

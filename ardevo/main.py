@@ -34,6 +34,19 @@ def configure_macro_resolver(config: dict[str, Any]) -> None:
         set_macro_resolver(macro_resolver(ModuleLibrary(library_dir)))
 
 
+def configure_assess_pool(config: dict[str, Any]) -> None:
+    """Create the direct strategy's process pool HERE, before the Pipeline builds the ClearML task.
+    clearml.Task.init unconditionally patches os.fork/multiprocessing, and workers spawned afterward
+    inherit CLEARML_PROC_MASTER_ID and stall attaching to the task instead of computing. Spawning the
+    persistent workers first (clearml not yet imported) keeps them clean for the whole run."""
+    orchestrator = config.get("orchestrator", {})
+    workers = int(orchestrator.get("direct", {}).get("assess_workers", 0))
+    if orchestrator and workers > 1:
+        from ardevo.evolution.evolver import create_assess_pool
+
+        create_assess_pool(workers, orchestrator.get("library_dir", "library"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ArdEVO: evolve network topologies on the Icarus ladder.")
     parser.add_argument("--config", type=str, default=None, help="Path to a config.toml (defaults to repo root).")
@@ -45,6 +58,7 @@ def main() -> None:
         config.current["resume"] = args.resume
     configure_torch_threads(config.current)
     configure_macro_resolver(config.current)
+    configure_assess_pool(config.current)
     logger = Logger.get_logger()
 
     pipe = Pipeline(config.current, load_data=False)

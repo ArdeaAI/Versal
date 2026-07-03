@@ -71,6 +71,9 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # TIME-axis tasks run through the stepped recurrent substrate here.
   pop_size = 64
   elitism = 2
+  assess_workers = 24         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
+                              # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
+                              # (independent genomes, rng-free training); the dominant run cost.
     [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
                                  # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
     kind = "gradient_refine"

@@ -24,7 +24,7 @@
       "L2"
     ],
     "stats": {
-      "use_count": 2225,
+      "use_count": 2584,
       "max_attributed_fitness": 3.1476923191547392
     }
   },
@@ -53,7 +53,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 1859,
+      "use_count": 2131,
       "max_attributed_fitness": 3.242040447187786
     }
   },
@@ -82,7 +82,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 2271,
+      "use_count": 2648,
       "max_attributed_fitness": 3.2020911169696484
     }
   },
@@ -111,7 +111,7 @@
       "L4"
     ],
     "stats": {
-      "use_count": 1272,
+      "use_count": 1603,
       "max_attributed_fitness": 3.0519584071027
     }
   },
@@ -140,7 +140,7 @@
       "L4"
     ],
     "stats": {
-      "use_count": 1514,
+      "use_count": 1832,
       "max_attributed_fitness": 3.144044331116356
     }
   },
@@ -169,7 +169,7 @@
       "L4"
     ],
     "stats": {
-      "use_count": 543,
+      "use_count": 862,
       "max_attributed_fitness": 2.984998495008572
     }
   },
@@ -256,7 +256,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2527,
+      "use_count": 2931,
       "max_attributed_fitness": 3.1221540839848565
     }
   },
@@ -288,7 +288,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 763,
+      "use_count": 1072,
       "max_attributed_fitness": 3.130224252482189
     }
   },
@@ -384,7 +384,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 3040,
+      "use_count": 3400,
       "max_attributed_fitness": 3.1641777985515627
     }
   },
@@ -410,7 +410,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2226,
+      "use_count": 2616,
       "max_attributed_fitness": 3.1474238354326087
     }
   },
@@ -436,7 +436,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2411,
+      "use_count": 2859,
       "max_attributed_fitness": 3.1374752058946447
     }
   },
@@ -462,7 +462,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 1687,
+      "use_count": 2101,
       "max_attributed_fitness": 3.2276415587934615
     }
   },
@@ -494,7 +494,7 @@
       "macro"
     ],
     "stats": {
-      "use_count": 1915,
+      "use_count": 2268,
       "max_attributed_fitness": 3.209332115177132
     }
   }

@@ -123,6 +123,8 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
         parallel_assess=int(evolution.get("parallel_assess", 0)),
+        assess_workers=int(evolution.get("assess_workers", 0)),
+        library_dir=str(config.get("library_dir", "library")),
         seed=int(config.get("seed", 0)),
         init_op=init_op,
         selection_op=selection_op,

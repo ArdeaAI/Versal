@@ -117,6 +117,8 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
     evolution = {key: value for key, value in config.get("evolution", {}).items() if key != "loop"}
     evolution["pop_size"] = int(table.get("pop_size", 48))
     evolution["elitism"] = int(table.get("elitism", 2))
+    evolution["assess_workers"] = int(table.get("assess_workers", 0))
+    overlay["library_dir"] = config.get("orchestrator", {}).get("library_dir", "library")
     # Single-task structure growth usually wants a stronger inner trainer (and sometimes a
     # different mutation recipe) than the composition loop's glue fitting; both are overridable.
     for overridable in ("mutation", "train", "evaluate"):

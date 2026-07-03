@@ -32,7 +32,7 @@ from ardevo.evolution.composition import (
     minimal_composition,
     writeback_composition,
 )
-from ardevo.evolution.evolver import Evolver
+from ardevo.evolution.evolver import Evolver, get_shared_pool, get_worker_library
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from ardevo.evolution.mutation import MutationContext
 from ardevo.evolution.registry import Registry, _bind_prefixed, build_evolver
@@ -110,6 +110,78 @@ class CompTaskSpec:
     bank_columns: dict[str, list[int]]
     output_ref: str
     output_width: int
+
+
+# Throwaway rng for worker-side training. Train ops ignore rng (the train.py contract forbids
+# call-order-dependent draws precisely so assessment can be reordered/parallelized), so a fixed
+# instance keeps pooled results bit-identical to the sequential path.
+_COMP_WORKER_RNG = random.Random(0)
+
+
+def assess_composition_pure(
+    comp: CompositionGenome,
+    spec: CompTaskSpec,
+    species_champions: dict[int, Genome],
+    library: ModuleLibrary | None,
+    max_inline_depth: int,
+    *,
+    train: bool,
+    train_op: Callable[..., Any],
+    evaluate_op: Callable[..., dict[str, float]],
+    fitness: Callable[..., float],
+    rng: random.Random,
+) -> AssessedComposition:
+    """Assemble, optionally train, evaluate, and score ONE composition. Pure w.r.t. shared state: it
+    reads only the passed champions + library, decodes its OWN inner-module copies (fresh context), and
+    draws no caller rng. This is the single seam the sequential path and the process-pool workers both
+    call, so they cannot diverge."""
+
+    def live_resolver(species_id: str) -> Genome:
+        genome = species_champions.get(int(species_id))
+        if genome is None:
+            raise CompositionAssemblyError(f"live species {species_id} no longer exists")
+        return genome
+
+    ctx = AssemblyContext(bank_columns=dict(spec.bank_columns), live_resolver=live_resolver, library=library, max_inline_depth=max_inline_depth)
+    try:
+        net = assemble(comp, ctx, spec.n_inputs)
+    except CompositionAssemblyError as error:
+        logger.debug("composition floored at assembly: %s", error)
+        return AssessedComposition(comp=comp, metrics={}, fitness=FLOOR_FITNESS, net=None)
+    if train:
+        # writeback=False: the op returns the SAME comp/net; glue lands on the comp genes here and
+        # module weights flow via the champion policy (in _module_writeback), not the flat writeback.
+        comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False))
+        comp = writeback_composition(comp, net)
+    metrics = evaluate_op(comp, net, _CompositionEvalAdapter(spec))
+    return AssessedComposition(comp=comp, metrics=metrics, fitness=fitness(comp, metrics), net=net)
+
+
+def _assess_comp_in_worker(
+    comp: CompositionGenome,
+    *,
+    spec: CompTaskSpec,
+    species_champions: dict[int, Genome],
+    max_inline_depth: int,
+    train: bool,
+    train_op: Callable[..., Any],
+    evaluate_op: Callable[..., dict[str, float]],
+    fitness: Callable[..., float],
+) -> AssessedComposition:
+    """Process-pool entry: assess one composition using the worker's own on-disk library handle, and
+    return the AssessedComposition (with the trained net) for the main process's serial writeback."""
+    return assess_composition_pure(
+        comp,
+        spec,
+        species_champions,
+        get_worker_library(),
+        max_inline_depth,
+        train=train,
+        train_op=train_op,
+        evaluate_op=evaluate_op,
+        fitness=fitness,
+        rng=_COMP_WORKER_RNG,
+    )
 
 
 @dataclass
@@ -222,15 +294,6 @@ class HierarchicalLoop:
                 state.repaired_refs += 1
         return comp if child is None else child
 
-    def _context(self, state: HierarchicalState) -> AssemblyContext:
-        def live_resolver(species_id: str) -> Genome:
-            genome = state.species_champions.get(int(species_id))
-            if genome is None:
-                raise CompositionAssemblyError(f"live species {species_id} no longer exists")
-            return genome
-
-        return AssemblyContext(bank_columns={}, live_resolver=live_resolver, library=self.library, max_inline_depth=self.max_inline_depth)
-
     # --- assessment ---------------------------------------------------------------------------------
 
     def assess_composition(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
@@ -239,40 +302,48 @@ class HierarchicalLoop:
         return self._assess(comp, spec, state, train=train)
 
     def _assess(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
-        ctx = self._context(state)
-        ctx.bank_columns = dict(spec.bank_columns)
-        try:
-            net = assemble(comp, ctx, spec.n_inputs)
-        except CompositionAssemblyError as error:
-            logger.debug("composition floored at assembly: %s", error)
-            return AssessedComposition(comp=comp, metrics={}, fitness=FLOOR_FITNESS, net=None)
-        if train:
-            # Train ops must NOT write back here: their genome-level writeback expects a flat Genome.
-            # Glue lands on the comp genes below; module weights flow via the champion policy.
-            comp, _module = self._train(comp, net, spec, state)
-            comp = writeback_composition(comp, net)
-        metrics = self.evolver.evaluate_op(comp, net, _CompositionEvalAdapter(spec))
-        fitness = self.evolver.fitness(comp, metrics)  # CompositionGenome duck-types complexity/hidden_ids
-        return AssessedComposition(comp=comp, metrics=metrics, fitness=fitness, net=net)
-
-    def _train(self, comp: CompositionGenome, net: ComposedNet, spec: CompTaskSpec, state: HierarchicalState) -> tuple[CompositionGenome, ComposedNet]:
-        # Honor the train-op contract by capturing its (genome, module) return rather than relying on
-        # in-place mutation (writeback is False here; the hierarchical loop routes module writeback).
-        # With writeback=False the op returns the SAME comp/net it was handed, so the cast is exact.
-        comp, net = cast(tuple[CompositionGenome, ComposedNet], self.evolver.train_op(comp, net, spec.encoded, rng=state.rng, writeback=False))
-        return comp, net
+        return assess_composition_pure(
+            comp,
+            spec,
+            state.species_champions,
+            self.library,
+            self.max_inline_depth,
+            train=train,
+            train_op=self.evolver.train_op,
+            evaluate_op=self.evolver.evaluate_op,
+            fitness=self.evolver.fitness,
+            rng=state.rng,
+        )
 
     def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
-        """Assess a batch of candidates, on a thread pool when configured (order-preserving map).
+        """Assess a batch of candidates, order-preserving. Prefer the shared process pool (true
+        multi-core, same workers as the direct path) when present; else the sequential list (default)
+        or a thread pool if `parallel_assess` is set.
 
         Results are identical to the serial loop: candidates share no trainable state, assessment
-        consumes no rng, and floored candidates (assembly errors) are produced INSIDE _assess."""
+        consumes no rng (a throwaway rng in workers is safe), and floored candidates (assembly errors)
+        are produced INSIDE the pure assessor. The champion's trained `net` is returned intact so the
+        serial `_attribute` / `_module_writeback` reductions run unchanged afterward."""
+        pool = get_shared_pool()
+        if pool is not None and len(comps) > 1:
+            worker = partial(
+                _assess_comp_in_worker,
+                spec=spec,
+                species_champions=state.species_champions,
+                max_inline_depth=self.max_inline_depth,
+                train=train,
+                train_op=self.evolver.train_op,
+                evaluate_op=self.evolver.evaluate_op,
+                fitness=self.evolver.fitness,
+            )
+            chunksize = max(1, len(comps) // (4 * (getattr(pool, "_processes", 12) or 12)))
+            return pool.map(worker, comps, chunksize=chunksize)
         if self.parallel_assess <= 1 or len(comps) <= 1:
             return [self._assess(comp, spec, state, train=train) for comp in comps]
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
-            return list(pool.map(lambda comp: self._assess(comp, spec, state, train=train), comps))
+        with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool_threads:
+            return list(pool_threads.map(lambda comp: self._assess(comp, spec, state, train=train), comps))
 
     # --- attribution and writeback --------------------------------------------------------------------
 

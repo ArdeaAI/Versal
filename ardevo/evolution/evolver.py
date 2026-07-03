@@ -12,9 +12,12 @@ population forward) and checkpoint/resume the run.
 
 import random
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Callable, Protocol
 
 if TYPE_CHECKING:
+    from multiprocessing.pool import Pool
+
     from ardevo.library import ModuleLibrary
 
 from ardevo.dataset.icarus import EncodedTask, Level0Encoder
@@ -110,6 +113,8 @@ class Evolver:
     # population trainer is already batched). Candidates are independent and assessment never
     # draws from the shared rng, so results are order-preserving and stream-identical.
     parallel_assess: int = 0
+    assess_workers: int = 0
+    library_dir: str = "library"
     # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so
     # they sample the SAME entries the decode-time macro resolver resolves. Left None on the pure
     # flat path; the orchestrator's direct strategy sets it to the attached library. Without this the
@@ -140,6 +145,8 @@ class Evolver:
         trainer is configured. Order-preserving, and rng-equivalent to the sequential path because
         train ops never draw from the shared rng (the contract documented in train.py)."""
         if self.train_population_op is None:
+            if self.assess_workers > 1 and len(genomes) > 1:
+                return self._assess_pooled(genomes, adapter)
             if self.parallel_assess <= 1 or len(genomes) <= 1:
                 return [self.assess(genome, adapter, state) for genome in genomes]
             from concurrent.futures import ThreadPoolExecutor
@@ -156,6 +163,36 @@ class Evolver:
             metrics = self.evaluate_op(genome, module, adapter)
             assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), module))
         return assessed
+
+    def _assess_pooled(self, genomes: list[Genome], adapter: Adapter) -> list[Assessed]:
+        """Assess independent genomes across a persistent process pool (true multi-core). Workers
+        return (trained genome, metrics, fitness); the module is re-decoded here from the written-back
+        genome (faithful and cheap, no retrain), so the returned Assessed matches the sequential path."""
+        pool = self._ensure_pool()
+        worker = partial(_assess_in_worker, adapter=adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+        chunksize = max(1, len(genomes) // (self.assess_workers * 4))
+        results = pool.map(worker, genomes, chunksize=chunksize)
+        return [Assessed(genome, metrics, fitness, self._decode(genome, adapter)) for genome, metrics, fitness in results]
+
+    def _ensure_pool(self) -> "Pool":
+        if _SHARED_POOL is not None:
+            return _SHARED_POOL
+        pool = getattr(self, "_pool", None)
+        if pool is None:
+            import atexit
+
+            pool = _spawn_assess_pool(self.assess_workers, self.library_dir)
+            self._pool = pool
+            atexit.register(self.close_pool)
+        return pool
+
+    def close_pool(self) -> None:
+        """Close only this evolver's OWN lazy pool; the shared pool is owned by create_assess_pool."""
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            self._pool = None
+            pool.terminate()
+            pool.join()
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -242,3 +279,95 @@ class Evolver:
         for slot, item in zip(child_slots, self.assess_many(children, adapter, state)):
             next_assessed[slot] = item
         return [item for item in next_assessed if item is not None]
+
+
+_WORKER_RNG = random.Random(0)
+_SHARED_POOL: "Pool | None" = None
+
+
+def _spawn_assess_pool(workers: int, library_dir: str) -> "Pool":
+    import multiprocessing as mp
+
+    context = mp.get_context("spawn")  # torch/Metal-safe; also avoids fork issues on the Linux queues
+    n = min(workers, mp.cpu_count() or workers)
+    return context.Pool(processes=n, initializer=_init_worker, initargs=(library_dir,))
+
+
+def create_assess_pool(workers: int, library_dir: str) -> "Pool":
+    """Build the shared assess pool once, at startup. Call this BEFORE clearml.Task.init so the workers
+    spawn from an unpatched multiprocessing state and never attach to the ClearML task."""
+    global _SHARED_POOL
+    if _SHARED_POOL is None:
+        import atexit
+
+        _SHARED_POOL = _spawn_assess_pool(workers, library_dir)
+        atexit.register(_close_shared_pool)
+    return _SHARED_POOL
+
+
+def set_shared_pool(pool: "Pool | None") -> None:
+    global _SHARED_POOL
+    _SHARED_POOL = pool
+
+
+def get_shared_pool() -> "Pool | None":
+    """The startup pool, if one was created. The hierarchical loop reuses it to parallelize its own
+    composition assessment (same workers as the direct path)."""
+    return _SHARED_POOL
+
+
+def get_worker_library() -> "ModuleLibrary | None":
+    """The worker-process ModuleLibrary set by _init_worker, for library: refs during composition
+    assembly. On-disk entries resolve by key, so a library grown mid-run needs no reload."""
+    return _WORKER_LIBRARY
+
+
+def _close_shared_pool() -> None:
+    global _SHARED_POOL
+    if _SHARED_POOL is not None:
+        pool, _SHARED_POOL = _SHARED_POOL, None
+        pool.terminate()
+        pool.join()
+
+
+# Per-worker ModuleLibrary handle (set in _init_worker), reused by both the direct macro resolver and
+# the hierarchical loop's composition assembly.
+_WORKER_LIBRARY: "ModuleLibrary | None" = None
+
+
+def _init_worker(library_dir: str) -> None:
+    """Per-worker bootstrap for the process pool. First scrub ClearML's master-task env so a worker can
+    never decide it is a ClearML subprocess and stall attaching to the server (workers are pure compute).
+    Then pin torch to one intra-op thread (N workers x 1 thread map cleanly to N cores; the kernels are
+    too small for intra-op threading to help) and open the on-disk library once (shared by the macro
+    resolver and composition assembly)."""
+    import os
+
+    os.environ.pop("CLEARML_PROC_MASTER_ID", None)
+    os.environ.pop("TRAINS_PROC_MASTER_ID", None)
+
+    import torch
+
+    torch.set_num_threads(1)
+    from ardevo.library import ModuleLibrary, macro_resolver
+    from ardevo.substrate import set_macro_resolver
+
+    global _WORKER_LIBRARY
+    _WORKER_LIBRARY = ModuleLibrary(library_dir)
+    set_macro_resolver(macro_resolver(_WORKER_LIBRARY))
+
+
+def _assess_in_worker(
+    genome: Genome,
+    *,
+    adapter: Adapter,
+    train_op: Callable[..., tuple[Genome, SubstrateModule]],
+    evaluate_op: Callable[..., dict[str, float]],
+    fitness: FitnessAggregator,
+) -> tuple[Genome, dict[str, float], float]:
+    """Decode, train, and evaluate one genome in a worker process. Returns the plain-data triple
+    (trained genome, metrics, fitness); the main process re-decodes the module from the genome."""
+    module = Evolver._decode(genome, adapter)
+    genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
+    metrics = evaluate_op(genome, module, adapter)
+    return genome, metrics, fitness(genome, metrics)
