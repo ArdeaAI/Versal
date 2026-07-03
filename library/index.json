@@ -24,7 +24,7 @@
       "L2"
     ],
     "stats": {
-      "use_count": 1870,
+      "use_count": 2225,
       "max_attributed_fitness": 3.1476923191547392
     }
   },
@@ -53,7 +53,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 1556,
+      "use_count": 1859,
       "max_attributed_fitness": 3.242040447187786
     }
   },
@@ -82,7 +82,7 @@
       "L3"
     ],
     "stats": {
-      "use_count": 1871,
+      "use_count": 2271,
       "max_attributed_fitness": 3.2020911169696484
     }
   },
@@ -111,7 +111,7 @@
       "L4"
     ],
     "stats": {
-      "use_count": 907,
+      "use_count": 1272,
       "max_attributed_fitness": 3.0519584071027
     }
   },
@@ -140,7 +140,7 @@
       "L4"
     ],
     "stats": {
-      "use_count": 1165,
+      "use_count": 1514,
       "max_attributed_fitness": 3.144044331116356
     }
   },
@@ -169,8 +169,8 @@
       "L4"
     ],
     "stats": {
-      "use_count": 179,
-      "max_attributed_fitness": 2.934986070539558
+      "use_count": 543,
+      "max_attributed_fitness": 2.984998495008572
     }
   },
   {
@@ -256,7 +256,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2107,
+      "use_count": 2527,
       "max_attributed_fitness": 3.1221540839848565
     }
   },
@@ -288,7 +288,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 410,
+      "use_count": 763,
       "max_attributed_fitness": 3.130224252482189
     }
   },
@@ -384,7 +384,7 @@
       "flat"
     ],
     "stats": {
-      "use_count": 2669,
+      "use_count": 3040,
       "max_attributed_fitness": 3.1641777985515627
     }
   },
@@ -410,7 +410,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 1803,
+      "use_count": 2226,
       "max_attributed_fitness": 3.1474238354326087
     }
   },
@@ -436,7 +436,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 1963,
+      "use_count": 2411,
       "max_attributed_fitness": 3.1374752058946447
     }
   },
@@ -462,7 +462,7 @@
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 1263,
+      "use_count": 1687,
       "max_attributed_fitness": 3.2276415587934615
     }
   },
@@ -494,7 +494,7 @@
       "macro"
     ],
     "stats": {
-      "use_count": 1532,
+      "use_count": 1915,
       "max_attributed_fitness": 3.209332115177132
     }
   }
