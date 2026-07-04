@@ -126,6 +126,7 @@ class OrchestratedTrial(Proctor):
                 library_keys_before = set(self.library.keys())
                 solution = orchestrator.solve(entry.task)
                 task_cursor += 1
+                self.library.flush_stats()  # deferred bump_stats writes land at the task boundary
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
                 attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
                 outcome = attempt.outcome if attempt is not None else "unknown"
@@ -141,11 +142,13 @@ class OrchestratedTrial(Proctor):
                 if new_library_keys:
                     self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
+            self.library.flush_stats()  # a crash still leaves the stats it had
             self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
             if orchestrator is not None:
                 self._persist_resume_state(orchestrator, state, task_cursor)
             raise
 
+        self.library.flush_stats()
         self._persist_resume_state(orchestrator, state, task_cursor)
         if self.gc_enabled:
             self._run_gc(state)

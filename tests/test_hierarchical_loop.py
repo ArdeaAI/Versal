@@ -9,7 +9,7 @@ from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.evolution.composition import CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome
 from ardevo.evolution.evolver import Evolver
 from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind, genome_to_dict, topological_order
-from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, FlatLoop, HierarchicalLoop, state_from_dict, state_to_dict
+from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, state_from_dict, state_to_dict
 from ardevo.evolution.registry import build_loop
 from ardevo.library import MODULE, ModuleLibrary, task_io
 
@@ -72,12 +72,13 @@ def _spec(task: Task) -> CompTaskSpec:
 
 
 def test_build_loop_resolves_kinds() -> None:
-    flat = build_loop({"evolution": {}, "fitness": {"components": []}})
-    assert isinstance(flat, FlatLoop) and isinstance(flat.evolver, Evolver)
+    default = build_loop({"evolution": {}, "fitness": {"components": []}})
+    assert isinstance(default, HierarchicalLoop) and isinstance(default.evolver, Evolver)
     hierarchical = build_loop(_config())
     assert isinstance(hierarchical, HierarchicalLoop)
-    with pytest.raises(KeyError):
-        build_loop({"evolution": {"loop": "nonsense"}})
+    for gone in ("flat", "nonsense"):
+        with pytest.raises(KeyError):
+            build_loop({"evolution": {"loop": gone}})
 
 
 def test_fresh_state_seeds_modules_and_species() -> None:

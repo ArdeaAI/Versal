@@ -1,23 +1,30 @@
-"""Throughput micro-benchmarks for the phase-4 compute work. Run: uv run benchmark
+"""Throughput micro-benchmarks. Run: uv run benchmark
 
-T1: thread-parallel candidate assessment in the hierarchical loop (workers x wall-clock, with the
-    determinism claim MEASURED: fitness lists must be identical across worker counts).
 T2: serial fill/restore weight-sample evaluation vs the stacked BatchedGraphNet fast path.
+L1/L2/L3: library I/O against a temp-dir synthetic library at N entries: per-call add() and
+    bump_stats() cost (each rewrites index.json in full), repeated load() of the same keys
+    (the entry-cache metric), and query() latency.
 
-Fully offline (synthetic binary tasks); numbers go into the PR description, not committed artifacts.
+Fully offline (synthetic tasks/payloads); numbers go into commit messages, not committed artifacts.
 
-MEASURED RESULTS (M4 Max, torch 2.12, 2026-06-11): both fancy paths LOSE at current scales.
-  T2 stacked sample-eval: 0.44x/0.33x/0.21x at widths 16/64/256 (full-width level math costs D times
-  the serial path's column-sliced FLOPs; construction per call adds more). Default stays OFF.
-  T1 thread-parallel assess: 0.51x at 2 workers down to 0.12x at 12, at widths 16 AND 256 (tiny
-  kernels are GIL/dispatch-bound; torch only releases the GIL inside kernels that take microseconds
-  here). Default stays 0. Re-run this bench before flipping either knob for wider rungs.
-The throughput lever that DOES pay is the partitioned gradient_batched trainer on flat/direct
+MEASURED RESULTS (M4 Max, torch 2.12, 2026-07-04):
+  T2 stacked sample-eval: LOSES at current scales (0.44x/0.33x/0.20x at widths 16/64/256; full-width
+  level math costs D times the serial path's column-sliced FLOPs). Default stays OFF.
+  Library I/O BEFORE the entry cache + deferred stats: add/bump per call 1.2/1.2 ms at 100 entries,
+  2.7/2.8 at 300, 8.4/8.6 at 1000 (the O(entries) full index rewrite dominates); load 0.05 ms/call
+  flat (uncached re-read), query(limit=8) 0.5/0.6/0.9 ms at 100/300/1000.
+  AFTER: load 0.003 ms/call (cached), query(limit=8) 0.05/0.15/0.49 ms, bump_stats ~0.00 ms/call
+  (deferred; flush_stats pays one index write per task). add() keeps the immediate O(entries)
+  rewrite by design: structural admissions are rare and must be durable.
+Removed: the T1 thread-parallel assess bench. The path itself was removed 2026-07-04; it measured
+0.51x at 2 workers down to 0.12x at 12 (2026-06-11, tiny dispatch-bound kernels). See git history.
+The throughput lever that DOES pay is the partitioned gradient_batched trainer on direct
 populations: 1.5x CPU / 2.1x MPS at pop 48 (measured in phase 3).
 """
 
 import random
 import statistics
+import tempfile
 import time
 
 import torch
@@ -26,10 +33,8 @@ from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, Ta
 from ardevo.evolution.evaluate import weight_samples
 from ardevo.evolution.evolver import TaskAdapter
 from ardevo.evolution.genome import InnovationTracker
-from ardevo.evolution.loop import CompTaskSpec, HierarchicalLoop
 from ardevo.evolution.mutation import MutationContext, add_deep_node, add_rich_node
-from ardevo.evolution.registry import build_loop
-from ardevo.library import task_io
+from ardevo.library import MODULE, ModuleLibrary
 
 
 def synthetic_task(width: int, rows: int = 200, seed: int = 0) -> Task:
@@ -43,95 +48,6 @@ def synthetic_task(width: int, rows: int = 200, seed: int = 0) -> Task:
     meta = TaskMeta(rung=0, kind=TaskKind.MAP, name=f"bench_w{width}")
     split = int(rows * 0.8)
     return Task(meta=meta, support=pairs[:split], query=pairs[split:])
-
-
-def loop_config(workers: int) -> dict:
-    return {
-        "seed": 0,
-        "evolution": {
-            "loop": "hierarchical",
-            "parallel_assess": workers,
-            "pop_size": 32,
-            "elitism": 1,
-            "init": {"kind": "minimal"},
-            "selection": {"kind": "tournament", "tournament_size": 3},
-            "crossover": {"kind": "neat", "rate": 0.2},
-            "mutation": {"operators": ["add_rich_node", "add_connection"], "add_rich_node_prob": 0.3, "add_connection_prob": 0.2},
-            "train": {"kind": "gradient", "steps": 40, "lr": 0.03},
-            "evaluate": {"kind": "hybrid"},
-            "speciation": {"kind": "neat", "target_species": 4},
-            "composition": {
-                "pop_size": 12,
-                "elitism": 2,
-                "selection": {"kind": "tournament", "tournament_size": 2},
-                "crossover": {"kind": "comp_neat", "rate": 0.3},
-                "mutation": {"operators": ["add_module_node", "add_comp_edge", "perturb_glue"], "add_module_node_prob": 0.4, "add_comp_edge_prob": 0.2, "perturb_glue_prob": 0.6},
-            },
-            "modules": {"pop_size": 32, "elitism": 1, "in_ports": 4, "out_ports": 2, "advance_every": 3},
-        },
-        "fitness": {
-            "components": ["negative_support_loss", "support_accuracy", "hidden_penalty"],
-            "w_negative_support_loss": 2.0,
-            "w_support_accuracy": 1.0,
-            "w_hidden_penalty": 0.05,
-        },
-    }
-
-
-def spec_for(task: Task) -> CompTaskSpec:
-    io = task_io(task)
-    width = io["inputs"][0]["width"]
-    signature = io["inputs"][0]["signature"]
-    encoder = Level0Encoder(max_flat_dim=width)
-    return CompTaskSpec(
-        encoded=encode_task(task, encoder),
-        encoder=encoder,
-        n_inputs=width,
-        input_specs=[(signature, width)],
-        bank_columns={signature: list(range(width))},
-        output_ref=task.meta.name,
-        output_width=io["output"]["width"],
-    )
-
-
-def bench_t1(width: int = 16, reps: int = 3) -> None:
-    print(f"\nT1: hierarchical brood assessment, input width {width}, comp pop 12, train steps 40")
-    print(f"{'workers':>8} {'median s':>10} {'speedup':>8}")
-    task = synthetic_task(width)
-    spec = spec_for(task)
-    baseline = None
-    reference_fitness: list[float] | None = None
-    for workers in (1, 2, 4, 8, 10, 12):
-        loop = build_loop(loop_config(workers))
-        assert isinstance(loop, HierarchicalLoop)
-        state = loop.fresh_state(random.Random(0))
-        assessed = loop._assess_all(
-            [comp for comp in _brood(loop, spec, state)],
-            spec,
-            state,
-            train=True,
-        )
-        fitness = [item.fitness for item in assessed]
-        if reference_fitness is None:
-            reference_fitness = fitness
-        assert fitness == reference_fitness, "parallel assessment diverged from serial"
-        timings = []
-        for _ in range(reps):
-            state = loop.fresh_state(random.Random(0))
-            brood = _brood(loop, spec, state)
-            start = time.perf_counter()
-            loop._assess_all(brood, spec, state, train=True)
-            timings.append(time.perf_counter() - start)
-        median = statistics.median(timings)
-        baseline = baseline or median
-        print(f"{workers:>8} {median:>10.3f} {baseline / median:>7.2f}x")
-
-
-def _brood(loop: HierarchicalLoop, spec: CompTaskSpec, state) -> list:
-    from ardevo.evolution.composition import minimal_composition
-
-    rng = random.Random(7)
-    return [minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, state.comp_innovations, rng) for _ in range(12)]
 
 
 def bench_t2(widths: tuple[int, ...] = (16, 64, 256), calls: int = 50) -> None:
@@ -162,11 +78,63 @@ def bench_t2(widths: tuple[int, ...] = (16, 64, 256), calls: int = 50) -> None:
         print(f"{width:>6} {len(genome.nodes):>6} {rows['serial']:>10.2f} {rows['stacked']:>11.2f} {rows['serial'] / rows['stacked']:>7.2f}x")
 
 
+def synthetic_payload(rng: random.Random, nodes: int = 24, connections: int = 48) -> dict:
+    """A genome-shaped dict of realistic size; rng-varied weights make every payload hash unique."""
+    node_rows = [
+        {
+            "id": i,
+            "kind": "input" if i < 3 else ("output" if i < 4 else "hidden"),
+            "activation": rng.choice(["tanh", "relu", "sigmoid"]),
+            "coordinate": None,
+            "aggregation": "sum",
+        }
+        for i in range(nodes)
+    ]
+    conn_rows = [
+        {"in": rng.randrange(nodes), "out": rng.randrange(nodes), "weight": rng.random(), "enabled": True, "innovation": j, "recurrent": False} for j in range(connections)
+    ]
+    return {"nodes": node_rows, "connections": conn_rows, "refine_steps": 1, "macros": []}
+
+
+def bench_library(sizes: tuple[int, ...] = (100, 300, 1000)) -> None:
+    print("\nL1/L2/L3: library I/O per call at N entries (add/bump rewrite index.json in full)")
+    print(f"{'entries':>8} {'add ms':>8} {'bump ms':>8} {'load ms':>8} {'query ms':>9}")
+    widths = (8, 16, 32, 64)
+    for n in sizes:
+        with tempfile.TemporaryDirectory() as tmp:
+            library = ModuleLibrary(tmp)
+            rng = random.Random(0)
+            add_timings = []
+            for i in range(n):
+                payload = synthetic_payload(rng)
+                io = {"inputs": [{"signature": "binary|E", "width": widths[i % 4]}], "output": {"signature": "binary|E", "width": 1}}
+                start = time.perf_counter()
+                library.add(entry_type=MODULE, payload=payload, io=io, provenance={"accepted_metric": rng.random(), "weight_robustness": rng.random()})
+                add_timings.append(time.perf_counter() - start)
+            add_ms = statistics.median(add_timings[-20:]) * 1000.0
+            all_keys = library.keys()
+            hot_keys = all_keys[:20]
+            start = time.perf_counter()
+            for _ in range(25):
+                for key in hot_keys:
+                    library.load(key)
+            load_ms = (time.perf_counter() - start) / (25 * len(hot_keys)) * 1000.0
+            start = time.perf_counter()
+            for i in range(50):
+                library.bump_stats(all_keys[i % n], 0.5)
+            bump_ms = (time.perf_counter() - start) / 50 * 1000.0
+            start = time.perf_counter()
+            for _ in range(50):
+                library.query(entry_type=MODULE, input_signature="binary|E", input_width=16, output_signature="binary|E", output_width=1, limit=8)
+            query_ms = (time.perf_counter() - start) / 50 * 1000.0
+            print(f"{n:>8} {add_ms:>8.2f} {bump_ms:>8.2f} {load_ms:>8.3f} {query_ms:>9.2f}")
+
+
 def main() -> None:
     torch.set_num_threads(1)
     print(f"torch {torch.__version__}, intra-op threads pinned to 1")
     bench_t2()
-    bench_t1()
+    bench_library()
 
 
 if __name__ == "__main__":

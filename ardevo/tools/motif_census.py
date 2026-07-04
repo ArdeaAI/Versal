@@ -75,9 +75,7 @@ def main() -> None:
         console.print(f"[red]no library at {library_root}[/red]")
         return
     json_out = Path(args.json_out) if args.json_out else library_root / "motifs.json"
-    report = run_census(
-        library_root, sizes=args.sizes, min_support=args.min_support, include_retired=args.include_retired, per_entry_cap=args.per_entry_cap, json_out=json_out
-    )
+    report = run_census(library_root, sizes=args.sizes, min_support=args.min_support, include_retired=args.include_retired, per_entry_cap=args.per_entry_cap, json_out=json_out)
 
     from rich.table import Table
 

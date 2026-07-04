@@ -53,6 +53,7 @@ def comp_task_spec(task: Task) -> CompTaskSpec:
         bank_columns={signature: list(range(width))},
         output_ref=task.meta.name,
         output_width=io["output"]["width"],
+        io=io,
     )
 
 
@@ -266,12 +267,12 @@ class Orchestrator:
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
-        stone_modules, stone_comps = self._wall_stone_seeds(task) if self.wall_ledger and depth == 0 else ([], [])
+        stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
         if stone_modules or stone_comps:
             self.counters["wall_seeded_attempts"] += 1
         result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
         if result.metric >= self.accept_threshold:
-            key = self._admit_result(result, task, depth, decompose_op=None)
+            key = self._admit_result(result, task, spec, depth, decompose_op=None)
             self.counters["accepts"] += 1
             self._record(Attempt(task=name, depth=depth, outcome="evolved", metric=result.metric, generations=result.generations_used, library_key=key, strategy=result.strategy))
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
@@ -282,7 +283,7 @@ class Orchestrator:
                 return solution
 
         self.counters["failures"] += 1
-        stone_key = self._admit_stepping_stone(result, task) if self.wall_ledger and depth == 0 else None
+        stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
         self._record(
             Attempt(
                 task=name,
@@ -409,7 +410,7 @@ class Orchestrator:
         parent_failures = int(parent_stats.get("refine_failures_since_gain", 0))
         self._refined_from = hit.key
         try:
-            key = self._admit_result(result, task, depth, decompose_op=None)
+            key = self._admit_result(result, task, spec, depth, decompose_op=None)
         finally:
             self._refined_from = None
         # Decay resets only when the gain was actually shelved; a policy-rejected gain still returns
@@ -517,21 +518,26 @@ class Orchestrator:
 
     # --- the wall ledger: failure leaves a trace ------------------------------------------------------
 
-    def _wall_stones(self, task: Task) -> list[LibraryEntry]:
+    @staticmethod
+    def _io_of(task: Task, spec: CompTaskSpec) -> dict[str, Any]:
+        """The task's structural I/O contract, computed once per solve and carried on the spec."""
+        return spec.io if spec.io is not None else task_io(task)
+
+    def _wall_stones(self, task: Task, spec: CompTaskSpec) -> list[LibraryEntry]:
         """Stepping stones matching this task's signature, best-ranked first (query order)."""
-        io = task_io(task)
+        io = self._io_of(task, spec)
         candidates = self.library.query(input_signature=io["inputs"][0]["signature"], input_width=io["inputs"][0]["width"], output_width=io["output"]["width"])
         return [entry for entry in candidates if entry.provenance.get("stepping_stone")]
 
-    def _wall_stone_seeds(self, task: Task) -> tuple[list[LibraryEntry], list[CompositionGenome]]:
+    def _wall_stone_seeds(self, task: Task, spec: CompTaskSpec) -> tuple[list[LibraryEntry], list[CompositionGenome]]:
         """The warm start for a fresh assault on a known wall, split by shape for the seeding rails
         (MODULE stones graft into the direct population, COMPOSITION stones seed the comp loop)."""
-        stones = self._wall_stones(task)[: self.wall_seed_top_k]
+        stones = self._wall_stones(task, spec)[: self.wall_seed_top_k]
         modules = [stone for stone in stones if stone.entry_type == MODULE]
         comps = [comp_from_dict(stone.payload) for stone in stones if stone.entry_type == COMPOSITION]
         return modules, comps
 
-    def _admit_stepping_stone(self, result: StrategyResult, task: Task) -> str | None:
+    def _admit_stepping_stone(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> str | None:
         """Shelve a failed attempt's best champion as a below-bar stepping stone: a dependency
         entry (bypasses the admission policy and signature caps, invisible to `signature_group`)
         that can never be a false lookup hit because quick-eval still gates on the accept bar.
@@ -542,7 +548,7 @@ class Orchestrator:
         candidate = self._candidate_rank(result)
         if candidate is None or not math.isfinite(result.metric) or result.metric < self.wall_min_metric:
             return None
-        incumbent_stone = next(iter(self._wall_stones(task)), None)
+        incumbent_stone = next(iter(self._wall_stones(task, spec)), None)
         if incumbent_stone is not None:
             if self._candidate_fingerprint(result) == structural_fingerprint(incumbent_stone.entry_type, incumbent_stone.payload):
                 return None
@@ -553,7 +559,7 @@ class Orchestrator:
         self._stepping_stone = True
         self._refined_from = incumbent_stone.key if incumbent_stone is not None else None
         try:
-            key = self._admit_result(result, task, depth=0, decompose_op=None)
+            key = self._admit_result(result, task, spec, depth=0, decompose_op=None)
         finally:
             self._stepping_stone = False
             self._refined_from = None
@@ -570,7 +576,7 @@ class Orchestrator:
     # --- ladder steps -------------------------------------------------------------------------------
 
     def _lookup(self, task: Task, spec: CompTaskSpec) -> Solution | None:
-        io = task_io(task)
+        io = self._io_of(task, spec)
         candidates = self.library.query(
             input_signature=io["inputs"][0]["signature"],
             input_width=io["inputs"][0]["width"],
@@ -647,7 +653,7 @@ class Orchestrator:
         retry_budget = max(budget // 2, 5)
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         if result.metric >= self.accept_threshold:
-            key = self._admit_result(result, task, depth, decompose_op=chosen_name)
+            key = self._admit_result(result, task, spec, depth, decompose_op=chosen_name)
             self.counters["accepts"] += 1
             attempt = Attempt(
                 task=task.meta.name,
@@ -707,7 +713,7 @@ class Orchestrator:
             return "routed"
         return COMPOSITION if result.champion_comp is not None else MODULE
 
-    def _admit_result(self, result: StrategyResult, task: Task, depth: int, decompose_op: str | None) -> str | None:
+    def _admit_result(self, result: StrategyResult, task: Task, spec: CompTaskSpec, depth: int, decompose_op: str | None) -> str | None:
         """Route a strategy winner to the right admission shape."""
         if result.champion_routed is not None:
             # Distillation off ([orchestrator.routed] distill = false): the win is solved-but-not-
@@ -724,12 +730,12 @@ class Orchestrator:
                 self.counters["routed_solved"] += 1
                 if result.champion_metrics.get("routed_zero_shot"):
                     self.counters["routed_zero_shot"] += 1
-            return self._admit(result.champion_comp, task, depth, decompose_op)
+            return self._admit(result.champion_comp, task, spec, depth, decompose_op)
         if result.champion_genome is not None:
-            return self._admit_direct_module(result, task, depth)
+            return self._admit_direct_module(result, task, spec, depth)
         raise ValueError(f"strategy {result.strategy!r} produced no admissible champion")
 
-    def _admit_direct_module(self, result: StrategyResult, task: Task, depth: int) -> str | None:
+    def _admit_direct_module(self, result: StrategyResult, task: Task, spec: CompTaskSpec, depth: int) -> str | None:
         """A direct-strategy winner is a TASK-SHAPED mini-model: admitted with its REAL io
         signature/widths (not the ANY-port snapshot shape), so lookups hit it exactly and the
         composition strategy can reference it through the catalog immediately."""
@@ -749,10 +755,15 @@ class Orchestrator:
             provenance["stepping_stone"] = True  # a below-bar wall-ledger trace, not a solution
         level = module_level(result.champion_genome, self.library)
         return self._gated_add(
-            entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
+            entry_type=MODULE,
+            payload=genome_to_dict(result.champion_genome),
+            io=self._io_of(task, spec),
+            provenance=provenance,
+            level=level,
+            dependency=depth > 0 or self._stepping_stone,
         )
 
-    def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str | None:
+    def _admit(self, best: AssessedComposition, task: Task, spec: CompTaskSpec, depth: int, decompose_op: str | None) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
         entries carrying the exact trained weights that scored; the composition references those."""
         metric = self._metric(best)
@@ -808,7 +819,7 @@ class Orchestrator:
         if self._stepping_stone:
             provenance["stepping_stone"] = True  # a below-bar wall-ledger trace, not a solution
         return self._gated_add(
-            entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
+            entry_type=COMPOSITION, payload=comp_to_dict(detached), io=self._io_of(task, spec), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
         )
 
     # --- skeleton wiring ------------------------------------------------------------------------------

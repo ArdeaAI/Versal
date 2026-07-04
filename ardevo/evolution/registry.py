@@ -46,10 +46,10 @@ def _bind_prefixed(table: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def build_loop(config: dict[str, Any]) -> Any:
-    """Resolve the configured top-level loop strategy (`[evolution] loop = "flat" | "hierarchical"`)."""
+    """Resolve the configured top-level loop strategy (`[evolution] loop`, default "hierarchical")."""
     from ardevo.evolution import loop
 
-    kind = config.get("evolution", {}).get("loop", "flat")
+    kind = config.get("evolution", {}).get("loop", "hierarchical")
     return loop.LOOP.get(kind)(config)
 
 
@@ -122,7 +122,6 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     return Evolver(
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
-        parallel_assess=int(evolution.get("parallel_assess", 0)),
         assess_workers=int(evolution.get("assess_workers", 0)),
         library_dir=str(config.get("library_dir", "library")),
         seed=int(config.get("seed", 0)),

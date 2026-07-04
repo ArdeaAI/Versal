@@ -4,10 +4,9 @@ The Evolver owns the algorithm, not the task: genetic operators are injected (co
 `build_evolver`), and an adapter injects the task-specific decode/evaluate. Each generation runs the
 stages in order: select -> crossover -> mutate -> train -> evaluate -> fitness -> replace.
 
-The loop is exposed two ways. `run()` drives a whole single-task search (phase 1). For the continuous
-multi-rung trial, `seed_state` / `advance` step one generation at a time over an explicit,
-serializable `EvolverState`, so a driver can swap the task adapter between generations (carrying the
-population forward) and checkpoint/resume the run.
+`seed_state` / `advance` step one generation at a time over an explicit, serializable
+`EvolverState`, so a driver (the direct strategy, the hierarchical loop's module pool) can swap the
+task adapter between generations, carry the population forward, and checkpoint/resume the run.
 """
 
 import random
@@ -33,9 +32,9 @@ from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 class Adapter(Protocol):
     """What the Evolver needs of a task: encoded tensors, I/O widths, and decode + evaluate.
 
-    `TaskAdapter` (single rung) and `MultiTaskAdapter` (one rung of the continuous run) both satisfy
-    it, so the loop is agnostic to which one is active and can swap between them generation to
-    generation while keeping the same population.
+    `TaskAdapter` (static tasks) and `TemporalTaskAdapter` (TIME-axis tasks) both satisfy it, so
+    the loop is agnostic to which one is active and can swap between them generation to generation
+    while keeping the same population.
     """
 
     encoded: EncodedTask
@@ -97,9 +96,6 @@ class EvolverState:
     best: Assessed | None = None
 
 
-GenerationHook = Callable[[int, Assessed, float], None]
-
-
 @dataclass
 class Evolver:
     pop_size: int
@@ -119,10 +115,6 @@ class Evolver:
     # Optional population-level trainer (e.g. gradient_batched): assess_many routes a whole
     # generation through one tensor program instead of candidate-by-candidate training.
     train_population_op: Callable[..., list[tuple[Genome, SubstrateModule]]] | None = None
-    # N > 1 runs per-candidate assessment on a thread pool (only the sequential branch; the
-    # population trainer is already batched). Candidates are independent and assessment never
-    # draws from the shared rng, so results are order-preserving and stream-identical.
-    parallel_assess: int = 0
     assess_workers: int = 0
     library_dir: str = "library"
     # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so
@@ -163,12 +155,7 @@ class Evolver:
         if self.train_population_op is None:
             if self.assess_workers > 1 and len(genomes) > 1:
                 return self._assess_pooled(genomes, adapter)
-            if self.parallel_assess <= 1 or len(genomes) <= 1:
-                return [self.assess(genome, adapter, state) for genome in genomes]
-            from concurrent.futures import ThreadPoolExecutor
-
-            with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
-                return list(pool.map(lambda genome: self.assess(genome, adapter, state), genomes))
+            return [self.assess(genome, adapter, state) for genome in genomes]
         decoded: list[SubstrateModule | None] = []
         for genome in genomes:
             try:
@@ -250,30 +237,6 @@ class Evolver:
         state.population = self._next_generation(state.population, self._context(state), state, adapter)
         state.generation += 1
         self.species_history = state.species_history
-
-    def run(
-        self,
-        adapter: TaskAdapter,
-        generations: int,
-        on_generation: GenerationHook | None = None,
-        stop_at_accuracy: float = 1.0,
-    ) -> Assessed:
-        state = self.seed_state(adapter, random.Random(self.seed))
-
-        for generation in range(generations):
-            generation_best = max(state.population, key=lambda item: item.fitness)
-            if state.best is None or generation_best.fitness > state.best.fitness:
-                state.best = generation_best
-            if on_generation is not None:
-                mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
-                on_generation(generation, generation_best, mean_fitness)
-            if generation_best.metrics.get("query_accuracy", 0.0) >= stop_at_accuracy:
-                break
-            self.advance(state, adapter)
-
-        final_best = max(state.population, key=lambda item: item.fitness)
-        best = state.best
-        return final_best if best is None or final_best.fitness > best.fitness else best
 
     def _next_generation(
         self,

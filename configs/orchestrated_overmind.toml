@@ -1,15 +1,18 @@
-# EVERYTHING ON ("all the frills"): the full orchestrated ladder + learn-mode refinement of library
-# hits + the routed substrate as the FIRST strategy WITH its Stage-C options (ACT halting, deep
-# per-step supervision via routing_trace, and the factorized edge_bias pathway prior) all enabled.
+# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
+# ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
+# its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
 # Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
 # DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
-# This is the maximal exploratory run, NOT the recommended baseline: Stage C adds training dynamics
-# that should be judged against the plainer routed/hybrid configs. The routed model is portrait-ed to
-# library/images/overmind.png on every structural growth, with observed routing-traffic pathways
-# drawn between experts. ALL 18 rungs are scheduled (no skipping), depth-0 failures leave stepping
-# stones behind ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
+# Stage C adds training dynamics of its own; flip `halting`/`edge_bias` off individually to A/B
+# against a plainer routed setup. The routed model is portrait-ed to library/images/overmind.png
+# on every structural growth, with observed routing-traffic pathways drawn between experts. ALL 18
+# rungs are scheduled (no skipping), depth-0 failures leave stepping stones behind
+# ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
 #
-#   uv run app --config configs/orchestrated_overmind.toml
+# Every evolutionary stage below is a registered, swappable operator: change a `kind`, reorder
+# `operators`, retune a weight, or register a new function and name it here. The loop never changes.
+#
+#   uv run app
 
 [run]
 project = "ardevo"
@@ -63,31 +66,34 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   routed = 0.2                  # routed's slice is small because it bills generation_cost, not real gens)
   direct = 0.5
   composition = 0.3
-  [orchestrator.routed]         # the learned routed substrate (see configs/orchestrated_routed.toml
-                                # for the knob-by-knob commentary)
-  d_model = 64
+  [orchestrator.routed]       # the learned routed substrate: a sparse MoE over FROZEN library entries
+  d_model = 64                # the shared bus width; growth is an append, never a resize
   top_k = 2
-  max_steps = 4
+  max_steps = 4               # bounded unroll: the no-stuck-loop guarantee (cycles are legal)
   train_steps = 200
   lr = 0.003
   weight_decay = 0.0001
-  adapter_rank = 4            # bottlenecked adapters: force routing to earn its keep (anti-bypass)
+  adapter_rank = 4            # > 0 = rank-bottlenecked adapters, forcing routing to earn its keep
+                              # (the anti-bypass lever; raise if expert utilization collapses)
   load_balance_weight = 0.01
-  zero_shot_accept = true
-  generation_cost = 10
-  distill = true              # a win must distill into a verified composition to count (admitted as
-  distill_usage_floor = 0.1   # a new vertex); adapter-only wins report as misses and escalate
-  distill_max_nodes = 6
-  replay_tasks = 8
+  zero_shot_accept = true     # a zero-shot clear returns at 0 generations: the router's library hit
+  generation_cost = 10        # budget charged when per-task training actually runs
+  distill = true              # THE DSL CONTRACT: a win must distill into a verified composition to
+                              # count (admitted as a new vertex); adapter-only wins report as misses
+                              # and escalate. false = solved-but-not-shelved, for A/B only
+  distill_usage_floor = 0.1   # mean gate weight an expert needs at some step to make the pathway
+  distill_max_nodes = 6       # size cap on the distilled composition
+  replay_tasks = 8            # in-memory anti-forgetting: replay a recent task every replay_every steps
   replay_every = 4
   include_compositions = true
-  exclude_temporal = true
-  persist = true
-  persist_strict = false
-  halting = true              # Stage C: ACT-style geometric halting (only ever shortens the unroll)
+  exclude_temporal = true     # TIME-axis entries are out of routing scope for the prototype
+  persist = true              # router state survives across tasks AND runs under <library_dir>/router
+  persist_strict = false      # true = hard-error on config/state mismatch instead of starting fresh
+  halting = true              # Stage C: ACT-style geometric halting (only ever SHORTENS the unroll)
   ponder_epsilon = 0.01
-  ponder_cost = 0.001
-  edge_bias = true            # Stage C: factorized expert-to-expert pathway prior
+  ponder_cost = 0.001         # loss penalty per expected step, so halting learns to stop early
+  edge_bias = true            # Stage C: factorized expert-to-expert pathway prior (fired experts
+                              # bias the next step's gate); append-only, unlike a raw V x V matrix
   [orchestrator.refine]       # LEARN MODE: on a library hit, spend up to budget_k generations seeded
                               # from the stored solution trying to beat it (lexicographic: metric,
                               # then robustness, then LOWER complexity), admit only strict wins, and
@@ -119,7 +125,7 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # TIME-axis tasks run through the stepped recurrent substrate here.
   pop_size = 64
   elitism = 2
-  assess_workers = 24         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
+  assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
                               # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
                               # (independent genomes, rng-free training); the dominant run cost.
     [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
@@ -155,16 +161,20 @@ elitism = 1
   [evolution.init]
   kind = "minimal"
   weight_scale = 1.0
-  [evolution.selection]
+  [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
   kind = "tournament"
   tournament_size = 3
-  [evolution.crossover]
+  [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
   [evolution.mutation]        # the MODULE population's operators (the proven phase-1 recipe plus
                               # the new primitives: product gating, recurrence, and library reuse:
                               # add_library_module inlines a found network as evolvable structure,
-                              # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style)
+                              # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style).
+                              # With gradient training, evolution searches STRUCTURE and gradient
+                              # owns the WEIGHTS: perturb_weights (registered) is omitted because it
+                              # fights the optimizer; add_node (canonical NEAT single-edge split) is
+                              # registered but slow to become useful next to add_rich_node/add_deep_node.
   operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
@@ -191,24 +201,32 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
-  [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies
+  [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
+                              # steps must tune a freshly-grown candidate enough for its capacity to
+                              # show BEFORE it competes (champions are never re-trained); weight_decay
+                              # is what makes fits GENERALIZE (closes the support->query gap)
   kind = "gradient"
   steps = 40
   lr = 0.03
-  writeback = true            # flat-loop semantics; the hierarchical loop routes writeback itself
+  writeback = true            # Lamarckian: tuned weights copy back into the genome (the hierarchical
+                              # loop routes champion-only module writeback itself)
   weight_decay = 0.0002
   [evolution.evaluate]        # hybrid = trained metrics PLUS weight-robustness (library admission currency)
   kind = "hybrid"
   samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
-  [evolution.speciation]      # module species are the blueprint targets the compositions reference
+  [evolution.speciation]      # module species are the blueprint targets the compositions reference.
+                              # "neat" = compatibility-distance niching + fitness sharing, one champion
+                              # per species; the threshold AUTO-ADJUSTS toward target_species each
+                              # generation (a fixed threshold lets the population fracture into
+                              # singletons; target_species = 0 disables the auto-adjust)
   kind = "neat"
-  threshold = 1.5
+  threshold = 1.5             # initial compatibility distance; auto-tuned from here
   target_species = 6
-  threshold_adjust = 0.3
-  min_threshold = 0.3
-  c_excess = 1.0
-  c_disjoint = 1.0
-  c_weight = 0.5
+  threshold_adjust = 0.3      # step size for the auto-adjustment
+  min_threshold = 0.3         # floor so the threshold never collapses to zero
+  c_excess = 1.0              # weight on excess genes in the distance
+  c_disjoint = 1.0            # weight on disjoint genes
+  c_weight = 0.5              # weight on mean matching-connection weight difference
 
   [evolution.composition]     # the per-task composition population (level 2+)
   pop_size = 48
@@ -247,9 +265,11 @@ elitism = 1
                               # the worst non-champions: found structures join the soup mid-run
 
 [fitness]
-# Phase 5: bounded loss (0,1] instead of raw (-inf,0] so it no longer swamps accuracy and robustness;
-# robustness weight raised because it is the library admission currency and the cross-task transfer
-# signal. All components now live on a comparable scale, so selection actually balances them.
+# Weighted sum of registered components, higher is better (the full menu lives in
+# ardevo/evolution/fitness.py; weights bind as w_<name>). Bounded loss (0,1] instead of raw
+# (-inf,0] so it no longer swamps accuracy and robustness; robustness weight raised because it is
+# the library admission currency and the cross-task transfer signal. All components live on a
+# comparable scale, so selection actually balances them.
 components = ["bounded_negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
 w_bounded_negative_support_loss = 2.0
 w_support_accuracy = 1.0

@@ -243,6 +243,12 @@ class ModuleLibrary:
         self._index_path = self.root / "index.json"
         self._index: dict[str, dict[str, Any]] = {}
         self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
+        # Parsed-entry cache: payloads are immutable and every mutation (dedupe provenance, stats)
+        # goes through this object, so the cached instance IS the coherent one. Unbounded is fine at
+        # hundreds of entries; revisit alongside the _write_index watchpoint when it reaches thousands.
+        self._entry_cache: dict[str, LibraryEntry] = {}
+        # Keys whose stats mutated in memory but not yet on disk (bump_stats defers; flush_stats writes).
+        self._dirty_stats: set[str] = set()
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
 
@@ -355,10 +361,20 @@ class ModuleLibrary:
         ]
 
     def load(self, key: str) -> LibraryEntry:
+        cached = self._entry_cache.get(key)
+        if cached is not None:
+            return cached
         path = self._entries_dir / f"{key}.json"
         if not path.exists():
             raise KeyError(f"no library entry {key!r} under {self.root}")
-        return LibraryEntry.from_dict(json.loads(path.read_text()))
+        entry = LibraryEntry.from_dict(json.loads(path.read_text()))
+        summary = self._index.get(key)
+        if summary is not None:
+            # Share the index row's stats dict so deferred bump_stats mutations stay visible through
+            # every loaded handle without a per-bump disk write.
+            entry.stats = summary.setdefault("stats", entry.stats)
+        self._entry_cache[key] = entry
+        return entry
 
     def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
         """Depth of the macro-reference chain under `key`: 0 = no macros, 1 + deepest target
@@ -407,6 +423,8 @@ class ModuleLibrary:
         for key in swept:
             del self._index[key]
             self._macro_depth_cache.pop(key, None)
+            self._entry_cache.pop(key, None)
+            self._dirty_stats.discard(key)
             (self._entries_dir / f"{key}.json").unlink(missing_ok=True)
             (self.root / "images" / f"{key}.png").unlink(missing_ok=True)
         self._write_index()
@@ -457,16 +475,34 @@ class ModuleLibrary:
         return [self.load(summary["key"]) for summary in matches]
 
     def bump_stats(self, key: str, attributed_fitness: float) -> None:
-        """Record a use of `key` in an assembled network (provenance for future ranking)."""
+        """Record a use of `key` in an assembled network (provenance for future ranking).
+
+        The HOT stats writer (once per attributed ref per composition generation), so it defers all
+        I/O: the index row mutates in place (shared with loaded handles via the `load` overlay) and
+        `flush_stats` persists dirty rows at task boundaries. Structural writers (add/retire/refine)
+        stay immediate."""
         summary = self._index.get(key)
         if summary is None:
             return
         stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
         stats["use_count"] = int(stats.get("use_count", 0)) + 1
         stats["max_attributed_fitness"] = max(float(stats.get("max_attributed_fitness", 0.0)), attributed_fitness)
-        entry = self.load(key)
-        entry.stats = stats
-        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._dirty_stats.add(key)
+
+    def flush_stats(self) -> None:
+        """Persist deferred `bump_stats` mutations: rewrite each dirty entry's file, then the index
+        ONCE. The orchestrated trial calls this after every task (and from its crash handler), which
+        is the durability granularity the observability contract promises. No-op when clean."""
+        if not self._dirty_stats:
+            return
+        for key in sorted(self._dirty_stats):
+            summary = self._index.get(key)
+            if summary is None:
+                continue  # swept while dirty; nothing durable to update
+            entry = self.load(key)
+            entry.stats = summary.setdefault("stats", entry.stats)
+            (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._dirty_stats.clear()
         self._write_index()
 
     def summary(self, key: str) -> dict[str, Any] | None:

@@ -68,7 +68,8 @@ def test_batched_samples_leave_module_weights_untouched(xor_adapter: TaskAdapter
 
 
 def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
-    """The HeadSlicedNet (multitask) path: column selection must survive the stacked forward."""
+    """The column-sliced-head path (`module.core()` returning columns, evaluate.py/train.py's
+    generic seam): column selection must survive the stacked forward."""
     from dataclasses import dataclass
 
     import torch
@@ -76,8 +77,30 @@ def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_gen
     from ardevo.dataset.icarus import EncodedTask, Level0Encoder
     from ardevo.evaluation import evaluate
     from ardevo.evolution.genome import ConnectionGene, NodeGene, NodeKind
-    from ardevo.evolution.multitask import HeadSlicedNet
-    from ardevo.substrate import decode
+    from ardevo.substrate import GraphNet, SubstrateModule, decode
+
+    class _ColumnSlicedNet(SubstrateModule):
+        """Minimal head wrapper: the inner net is a normal trainable submodule, this only selects
+        output columns, so `core()` reports (inner, columns) to the stacked fast path."""
+
+        def __init__(self, inner: GraphNet, columns: torch.Tensor) -> None:
+            super().__init__()
+            self.inner = inner
+            self.columns: torch.Tensor = columns
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.inner(x).index_select(1, self.columns)
+
+        @property
+        def has_edges(self) -> bool:
+            return self.inner.has_edges
+
+        def export_weights(self) -> dict[tuple[int, int, bool], float]:
+            return self.inner.export_weights()
+
+        def core(self) -> tuple[GraphNet | None, torch.Tensor | None]:
+            inner, _columns = self.inner.core()
+            return (inner, self.columns) if inner is not None else (None, None)
 
     two_headed = solving_genome.clone()
     two_headed.nodes[6] = NodeGene(6, NodeKind.OUTPUT, "identity")
@@ -92,8 +115,8 @@ def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_gen
             return evaluate(module, self.encoded, self.encoder)
 
     adapter = _HeadAdapter(xor_adapter.encoded, xor_adapter.encoder)
-    fast_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
-    slow_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    fast_module = _ColumnSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    slow_module = _ColumnSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
     fast = weight_samples(two_headed, fast_module, adapter, batched_samples=True)
     slow = weight_samples(two_headed, slow_module, adapter, batched_samples=False)
     for key in ("mean_sample_accuracy", "max_sample_accuracy", "best_sample_weight"):

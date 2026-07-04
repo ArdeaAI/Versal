@@ -58,7 +58,7 @@ def minimal(
 
 def stamp_input_coordinates(genome: Genome, input_shape: tuple[int, ...]) -> Genome:
     """Stamp each INPUT node with its raw unraveled axis-index coordinate (id order = raveled
-    row-major order, the exact convention `MultiTaskSubstrate._grow_bank` uses).
+    row-major order).
 
     This is what lets the geometry-biased mutators (add_local_node, add_local_connection,
     add_shared_motif) grow LOCAL receptive fields on grid tasks in the DIRECT path, where genomes

@@ -196,6 +196,25 @@ def test_bump_stats_tracks_use(tmp_path: Path, solving_genome: Genome) -> None:
     assert entry.stats["max_attributed_fitness"] == 0.7
 
 
+def test_bump_stats_defers_disk_writes_until_flush(tmp_path: Path, solving_genome: Genome) -> None:
+    """The hot stats path is write-deferred: bumps are visible through every in-process handle
+    immediately, hit disk only on flush_stats (the per-task boundary), and flushing twice is safe."""
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    key = _module_entry(library, solving_genome)
+    library.bump_stats(key, attributed_fitness=0.7)
+    library.bump_stats(key, attributed_fitness=0.4)
+    assert library.load(key).stats["use_count"] == 2  # live handle sees the bumps
+    stale = ModuleLibrary(root)
+    assert stale.load(key).stats["use_count"] == 0  # nothing on disk yet
+    library.flush_stats()
+    fresh = ModuleLibrary(root)
+    summary = fresh.summary(key)
+    assert summary is not None and summary["stats"]["use_count"] == 2  # index row persisted
+    assert fresh.load(key).stats["max_attributed_fitness"] == 0.7  # entry file persisted
+    library.flush_stats()  # clean flush is a no-op
+
+
 def test_record_refinement_increments_and_resets(tmp_path: Path, solving_genome: Genome) -> None:
     root = tmp_path / "lib"
     library = ModuleLibrary(root)

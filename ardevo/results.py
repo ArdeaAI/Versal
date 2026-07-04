@@ -1,13 +1,9 @@
-"""Per-run local results: write a durable record of a run to `./results/<name>/`.
+"""Per-run local results: durable JSON/PNG records under `./results/<run>/`.
 
-Every run leaves a directory `results/<YYYYMMDD_HHMMSS>_fit-<f>_acc-<a>_loss-<l>/` holding:
-- `stats.json`: run metadata, champion metrics, per-generation history, config snapshot
-- `model.json`: the champion genome (topology + scored weights), reloadable via `genome_from_dict`
-- `net.png`: the champion topology, rendered by `ardevo.rendering` (recursive, dark)
-
-These functions are pure IO/visualization (no trial or ClearML coupling) so they are easy to test
-and reuse. matplotlib is imported inside `render_speciation` to keep this module light and to set
-the headless `Agg` backend before pyplot loads.
+Pure IO/visualization helpers (no trial or ClearML coupling): `write_stats` dumps a JSON stats
+record, `render_speciation` charts species populations over generations. matplotlib is imported
+inside `render_speciation` to keep this module light and to set the headless `Agg` backend before
+pyplot loads.
 """
 
 import json
@@ -19,23 +15,9 @@ from ardevo.rendering import THEME
 DEFAULT_ROOT = "results"
 
 
-def run_directory(timestamp: str, fitness: float, accuracy: float, loss: float, root: str = DEFAULT_ROOT) -> Path:
-    """Create and return `<root>/<timestamp>_fit-<f>_acc-<a>_loss-<l>/`."""
-    name = f"{timestamp}_fit-{fitness:.3f}_acc-{accuracy:.3f}_loss-{loss:.3f}"
-    path = Path(root) / name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def write_stats(directory: Path, stats: dict[str, Any]) -> Path:
     path = directory / "stats.json"
     path.write_text(json.dumps(stats, indent=2))
-    return path
-
-
-def write_model(directory: Path, model: dict[str, Any]) -> Path:
-    path = directory / "model.json"
-    path.write_text(json.dumps(model, indent=2))
     return path
 
 

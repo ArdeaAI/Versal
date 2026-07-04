@@ -9,9 +9,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "clearml>=1.16",
     "datasets>=5.0.0",
-    "evosax>=0.2.0",
     "matplotlib>=3.9",
-    "networkx>=3",
     "psutil>=6.0",
     "rich",
     "torch>=2.12.0",
@@ -35,7 +33,6 @@ packages = ["ardevo"]
 [dependency-groups]
 dev = [
     "pytest",
-    "pytest-asyncio",
     "ruff",
     "ty",
 ]

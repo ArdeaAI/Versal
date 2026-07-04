@@ -1,9 +1,9 @@
-"""Schedule: an independent, swappable stage that picks which task the population faces next.
+"""Schedule: an independent, swappable stage that picks which task the run faces next.
 
-The continuous trial runs `generations_per_task` generations on one task, then asks the scheduler
-for the next one. Schedulers are stateful (cursors / last pick) so the interleaving is reproducible
-and survives a checkpoint; the registry returns configured instances, like speciation. To add a
-curriculum, register one class and name it in `[schedule].kind`.
+The orchestrated trial asks the scheduler for the next pool index before every solve. Schedulers
+are stateful (cursors / last pick) so the interleaving is reproducible and survives a checkpoint;
+the registry returns configured instances, like speciation. To add a curriculum, register one
+class and name it in `[schedule].kind`.
 """
 
 import random

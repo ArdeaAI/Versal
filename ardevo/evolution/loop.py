@@ -1,8 +1,8 @@
-"""Loops: the top-level generational strategies, selectable from config like any other stage.
+"""Loops: the top-level generational strategy, selectable from config like any other stage.
 
-`flat` is the phase-1 single-population Evolver, untouched. `hierarchical` is the recursive
-composition loop: a per-task population of `CompositionGenome`s co-evolves with ONE shared live
-module population. Compositions are assembled (live refs resolve to species champions, library refs
+`hierarchical` is the recursive composition loop: a per-task population of `CompositionGenome`s
+co-evolves with ONE shared live module population. Compositions are assembled (live refs resolve
+to species champions, library refs
 inline admitted entries), trained (glue + unfrozen live inner copies), evaluated, and scored;
 fitness then flows DOWN as attribution to the module species and library entries each composition
 referenced. Modules reproduce with the existing flat-stage operators every `advance_every`
@@ -47,21 +47,9 @@ LOOP: Registry = Registry("loop")
 FLOOR_FITNESS = -1e9
 
 
-@LOOP.register("flat")
-def _build_flat(config: dict[str, Any]) -> "FlatLoop":
-    return FlatLoop(evolver=build_evolver(config))
-
-
 @LOOP.register("hierarchical")
 def _build_hierarchical_entry(config: dict[str, Any]) -> "HierarchicalLoop":
     return build_hierarchical(config)
-
-
-@dataclass
-class FlatLoop:
-    """Thin shim so `[evolution] loop = "flat"` resolves; the Evolver behaves exactly as before."""
-
-    evolver: Evolver
 
 
 @dataclass
@@ -110,6 +98,10 @@ class CompTaskSpec:
     bank_columns: dict[str, list[int]]
     output_ref: str
     output_width: int
+    # The task's full structural I/O contract (library.task_io), computed once per solve so the
+    # orchestrator's lookup/wall/admission paths never re-derive it. None-tolerant for callers that
+    # build a spec by hand (tests, benches).
+    io: dict[str, Any] | None = None
 
 
 # Throwaway rng for worker-side training. Train ops ignore rng (the train.py contract forbids
@@ -213,11 +205,6 @@ class HierarchicalLoop:
     decay: float
     offspring_discount: float
     seed_fraction: float
-    # N > 1 assesses candidates on a thread pool. Safe because each candidate decodes its OWN
-    # module copies (fresh AssemblyContext) and assessment never draws from the shared rng (the
-    # train-op contract in train.py); torch releases the GIL inside kernels. Do NOT introduce any
-    # cross-candidate cache of decoded inners without revisiting this.
-    parallel_assess: int = 0
     # At each lookup miss the orchestrator absorbs up to this many NEW exact-port library entries
     # into the module pool (grafted over the worst non-champion members): found structures become
     # building blocks IN the soup, mid-run, not just at fresh_state.
@@ -317,8 +304,7 @@ class HierarchicalLoop:
 
     def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
         """Assess a batch of candidates, order-preserving. Prefer the shared process pool (true
-        multi-core, same workers as the direct path) when present; else the sequential list (default)
-        or a thread pool if `parallel_assess` is set.
+        multi-core, same workers as the direct path) when present; else the sequential list.
 
         Results are identical to the serial loop: candidates share no trainable state, assessment
         consumes no rng (a throwaway rng in workers is safe), and floored candidates (assembly errors)
@@ -338,12 +324,7 @@ class HierarchicalLoop:
             )
             chunksize = max(1, len(comps) // (4 * (getattr(pool, "_processes", 12) or 12)))
             return pool.map(worker, comps, chunksize=chunksize)
-        if self.parallel_assess <= 1 or len(comps) <= 1:
-            return [self._assess(comp, spec, state, train=train) for comp in comps]
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool_threads:
-            return list(pool_threads.map(lambda comp: self._assess(comp, spec, state, train=train), comps))
+        return [self._assess(comp, spec, state, train=train) for comp in comps]
 
     # --- attribution and writeback --------------------------------------------------------------------
 
@@ -663,6 +644,5 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         decay=float(modules_cfg.get("decay", 0.95)),
         offspring_discount=float(modules_cfg.get("offspring_discount", 0.9)),
         seed_fraction=float(modules_cfg.get("seed_fraction", 0.25)),
-        parallel_assess=int(evolution.get("parallel_assess", 0)),
         absorb_top_k=int(modules_cfg.get("absorb_top_k", 0)),
     )
