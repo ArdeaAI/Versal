@@ -1,6 +1,8 @@
 # EVERYTHING ON ("all the frills"): the full orchestrated ladder + learn-mode refinement of library
 # hits + the routed substrate as the FIRST strategy WITH its Stage-C options (ACT halting, deep
 # per-step supervision via routing_trace, and the factorized edge_bias pathway prior) all enabled.
+# Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
+# DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
 # This is the maximal exploratory run, NOT the recommended baseline: Stage C adds training dynamics
 # that should be judged against the plainer routed/hybrid configs. The routed model is portrait-ed to
 # library/images/overmind.png on every structural growth.
@@ -70,6 +72,9 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   load_balance_weight = 0.01
   zero_shot_accept = true
   generation_cost = 10
+  distill = true              # a win must distill into a verified composition to count (admitted as
+  distill_usage_floor = 0.1   # a new vertex); adapter-only wins report as misses and escalate
+  distill_max_nodes = 6
   replay_tasks = 8
   replay_every = 4
   include_compositions = true
@@ -90,8 +95,10 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # improvements admit UNCONDITIONALLY via the dependency rail (unbounded)
   metric_epsilon = 0.005
   robustness_epsilon = 0.01
-  decay = 0.5                 # effective-K multiplier per consecutive no-gain on an entry (24->12->6->skip);
-                              # any shelved improvement resets the entry's decay (DreamCoder-ish cooldown)
+  decay = 0.5                 # effective-K multiplier per consecutive no-gain (24->12->6->skip). The cooldown
+                              # rides the LINEAGE: a capability gain (metric/robustness) recharges it, a
+                              # compression-only gain spends it, so one capability epoch funds a few polish
+                              # passes and then the family sleeps (DreamCoder compress-then-stop)
   min_generations = 4         # decayed budgets below this skip refinement entirely
   stall_generations = 8       # refine-local flatline window (the global 28 would exceed typical budgets)
   retire_superseded = true    # tombstone the old entry when the shelved improvement weakly dominates

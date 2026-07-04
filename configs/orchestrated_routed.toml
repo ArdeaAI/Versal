@@ -3,8 +3,12 @@
 #
 # The router is a sparse mixture-of-experts over FROZEN library entries: per-vertex adapters talk
 # to a shared d_model bus, a task-conditioned gate picks top_k experts per routing step, and the
-# bounded max_steps unroll makes module-to-module pathways (including cycles) real. Routed wins are
-# solved-but-not-shelved (Solution.key = None); the router itself persists under <library_dir>/router.
+# bounded max_steps unroll makes module-to-module pathways (including cycles) real. A routed win
+# only COUNTS when its dominant pathway distills into a composition that verifies at the accept bar
+# (the distilled composition is admitted, becoming a new routable vertex); an adapter-only win
+# reports as a miss. The router itself persists under <library_dir>/router. NOTE: routed-only on a
+# COLD library short-circuits every task (no experts yet), so the cold variant only makes sense
+# against a library populated by a baseline run.
 #
 # Two variants of this run:
 #   SHARED library (as-is):   the router routes over everything the baseline has accumulated
@@ -61,6 +65,11 @@ decompose = []
   load_balance_weight = 0.01
   zero_shot_accept = true     # a zero-shot clear returns at 0 generations: the router's library hit
   generation_cost = 10        # budget charged when per-task training actually runs
+  distill = true              # THE DSL CONTRACT: a win must distill into a verified composition to
+                              # count; the composition is admitted (a new vertex). false = the old
+                              # solved-but-not-shelved behavior, for A/B only
+  distill_usage_floor = 0.1   # mean gate weight an expert needs at some step to make the pathway
+  distill_max_nodes = 6       # size cap on the distilled composition
   replay_tasks = 8            # in-memory anti-forgetting: replay a recent task every replay_every steps
   replay_every = 4
   include_compositions = true

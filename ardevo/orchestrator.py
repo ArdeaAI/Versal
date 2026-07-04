@@ -27,7 +27,7 @@ from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, C
 from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.train import _writeback
-from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, task_io
+from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, structural_fingerprint, task_io
 from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
 from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
@@ -229,9 +229,13 @@ class Orchestrator:
                 }
             )
         if any(name == "routed" for name, _strategy in self.strategies):  # registered only when the routed strategy is configured
-            self.counters.update({"routed_solved": 0, "routed_zero_shot": 0})
+            # routed_solved counts DISTILLED admissions (the router's win became a library composition);
+            # no_experts = short-circuited on an empty vertex set; undistillable = won in router space
+            # but the pathway did not survive verification as a composition (reported as a miss).
+            self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
+        self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
 
     # --- public API ---------------------------------------------------------------------------------
 
@@ -307,6 +311,10 @@ class Orchestrator:
             if allocation <= 0:
                 break
             outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
+            if name == "routed":  # the strategy has no counter access; it stamps markers instead
+                for marker in ("routed_no_experts", "routed_undistillable"):
+                    if outcome.champion_metrics.get(marker):
+                        self.counters[marker] += 1
             results.append(outcome)
             remaining -= outcome.generations_used
             if outcome.metric >= self.accept_threshold:
@@ -357,11 +365,14 @@ class Orchestrator:
         self.counters["refine_generations"] += result.generations_used
 
         candidate = self._candidate_rank(result)
-        incumbent = self._incumbent_rank(hit, entry)
+        incumbent = self._incumbent_rank(hit, entry, seed_metric=result.seed_metric)
         improves = (
             candidate is not None
             # A robustness/size tie-break can sit epsilon below an at-the-bar incumbent; never shelve below the bar.
             and result.metric >= self.accept_threshold
+            # Identity check FIRST: the incumbent topology retrained on this variant is NOT a new
+            # solution (entry keys hash weights, so a key comparison can never catch this).
+            and self._candidate_fingerprint(result) != structural_fingerprint(entry.entry_type, entry.payload)
             and refinement_improves(candidate, incumbent, metric_epsilon=self.refine_metric_epsilon, robustness_epsilon=self.refine_robustness_epsilon)
         )
         if not improves:
@@ -369,17 +380,29 @@ class Orchestrator:
             self.counters["refine_no_gain"] += 1
             return None, result.generations_used
 
-        key = self._admit_result(result, task, depth, decompose_op=None)
-        if key == hit.key:
-            # Evolution returned the identical payload (dedupe); a self-refresh is not a gain.
-            self.library.record_refinement(hit.key, improved=False)
-            self.counters["refine_no_gain"] += 1
-            return None, result.generations_used
+        # Scalars, not the stats dict: `summary` copies shallowly, and record_refinement below
+        # mutates the live row the copy still aliases.
+        parent_stats = (self.library.summary(hit.key) or {}).get("stats") or {}
+        parent_attempts = int(parent_stats.get("refine_attempts", 0))
+        parent_failures = int(parent_stats.get("refine_failures_since_gain", 0))
+        self._refined_from = hit.key
+        try:
+            key = self._admit_result(result, task, depth, decompose_op=None)
+        finally:
+            self._refined_from = None
         # Decay resets only when the gain was actually shelved; a policy-rejected gain still returns
         # the improved solution this run but counts as a failure so full-K retries do not repeat.
         self.library.record_refinement(hit.key, improved=key is not None)
+        if key is not None:
+            # The replacement continues the SAME lineage, so its cooldown rides the chain: a
+            # capability gain (metric/robustness tier) recharges the family, but a compression-only
+            # gain spends it (24 -> 12 -> 6 -> skip), or one capability epoch would fund an endless
+            # per-variant polish treadmill of near-identical entries (the 2026-07-04 lesson).
+            assert candidate is not None
+            capability_gain = candidate.metric > incumbent.metric + self.refine_metric_epsilon or candidate.robustness > incumbent.robustness + self.refine_robustness_epsilon
+            self.library.seed_refine_stats(key, attempts=parent_attempts + 1, failures=0 if capability_gain else parent_failures + 1)
         if key is not None and self.refine_retire_superseded and candidate is not None:
-            self._retire_if_dominated(hit.key, candidate)
+            self._retire_if_dominated(hit.key, candidate, incumbent)
         self.counters["refine_improvements"] += 1
         self._record(
             Attempt(
@@ -426,28 +449,47 @@ class Orchestrator:
             return RefinementRank(metric=result.metric, robustness=robustness, complexity=result.champion_comp.comp.complexity(), entry_type=COMPOSITION)
         return None
 
-    def _incumbent_rank(self, hit: Solution, entry: LibraryEntry) -> RefinementRank:
-        # The metric is the quick metric just measured on THIS task, not the stale stored one.
-        # Robustness is stored-at-admission (the index max over re-admissions); recomputing it fresh
-        # would cost a weight-samples evaluation per hit, against the cheap-hit contract, and the
-        # asymmetry only matters inside the metric-tie tier where the epsilon band absorbs it.
+    @staticmethod
+    def _candidate_fingerprint(result: StrategyResult) -> str | None:
+        if result.champion_genome is not None:
+            return structural_fingerprint(MODULE, genome_to_dict(result.champion_genome))
+        if result.champion_comp is not None:
+            return structural_fingerprint(COMPOSITION, comp_to_dict(result.champion_comp.comp))
+        return None
+
+    def _incumbent_rank(self, hit: Solution, entry: LibraryEntry, *, seed_metric: float | None = None) -> RefinementRank:
+        # The metric baseline is the STRONGER of the quick metric just measured on THIS task and the
+        # seed's own trained standing inside the refine run (when the strategy tracked it): a
+        # candidate must beat the incumbent GIVEN THE SAME TRAINING, or the comparison rewards
+        # retraining instead of topology. Robustness is stored-at-admission (the index max over
+        # re-admissions); recomputing it fresh would cost a weight-samples evaluation per hit,
+        # against the cheap-hit contract, and the asymmetry only matters inside the metric-tie tier
+        # where the epsilon band absorbs it.
         summary = self.library.summary(entry.key) or {}
         robustness = float(summary.get("weight_robustness", entry.provenance.get("weight_robustness", 0.0)))
         if entry.entry_type == MODULE:
             complexity = genome_from_dict(entry.payload).complexity()
         else:
             complexity = comp_from_dict(entry.payload).complexity()
-        return RefinementRank(metric=hit.metric, robustness=robustness, complexity=complexity, entry_type=entry.entry_type)
+        metric = hit.metric if seed_metric is None else max(hit.metric, seed_metric)
+        return RefinementRank(metric=metric, robustness=robustness, complexity=complexity, entry_type=entry.entry_type)
 
-    def _retire_if_dominated(self, old_key: str, candidate: RefinementRank) -> None:
+    def _retire_if_dominated(self, old_key: str, candidate: RefinementRank, incumbent: RefinementRank) -> None:
         """Retire the superseded entry only when the shelved improvement weakly dominates its STORED
-        ranking fields: `query` orders by (robustness, metric), so a dominated entry can never be
-        the preferable lookup and only burns a niche slot. Mixed trade-offs (metric up, robustness
-        down) keep distinct value and stay live for the archive policy to manage."""
+        ranking fields AND carries a strict margin: better beyond epsilon on metric or robustness,
+        or strictly simpler (same entry type) at parity. Weak dominance alone is not enough: entries
+        with a degenerate stored robustness of 0.0 (the temporal-module case) would otherwise be
+        tombstoned by any same-metric clone. Mixed trade-offs (metric up, robustness down) keep
+        distinct value and stay live for the archive policy to manage."""
         summary = self.library.summary(old_key)
         if summary is None:
             return
-        if candidate.metric >= float(summary.get("accepted_metric", 0.0)) and candidate.robustness >= float(summary.get("weight_robustness", 0.0)):
+        stored_metric = float(summary.get("accepted_metric", 0.0))
+        stored_robustness = float(summary.get("weight_robustness", 0.0))
+        weakly_dominates = candidate.metric >= stored_metric and candidate.robustness >= stored_robustness
+        strict_margin = candidate.metric > stored_metric + self.refine_metric_epsilon or candidate.robustness > stored_robustness + self.refine_robustness_epsilon
+        strictly_simpler = candidate.entry_type == incumbent.entry_type and candidate.complexity < incumbent.complexity
+        if weakly_dominates and (strict_margin or strictly_simpler):
             self.library.retire(old_key)
             logger.info("retired superseded library entry %s (refined replacement dominates)", old_key)
 
@@ -594,13 +636,20 @@ class Orchestrator:
     def _admit_result(self, result: StrategyResult, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Route a strategy winner to the right admission shape."""
         if result.champion_routed is not None:
-            # A routed win is solved-but-not-shelved (Solution.key = None): its executable state is
-            # the persisted router, not a library payload. Distillation to a composition is future scope.
+            # Distillation off ([orchestrator.routed] distill = false): the win is solved-but-not-
+            # shelved (Solution.key = None), its executable state being the persisted router. With
+            # distillation on, a routed win arrives here as champion_comp instead.
             self.counters["routed_solved"] += 1
             if getattr(result.champion_routed, "zero_shot", False):
                 self.counters["routed_zero_shot"] += 1
             return None
         if result.champion_comp is not None:
+            if result.strategy == "routed":
+                # A distilled routed win: the pathway survived verification as a composition and is
+                # admitted through the ordinary rail below, becoming a routable vertex at next sync.
+                self.counters["routed_solved"] += 1
+                if result.champion_metrics.get("routed_zero_shot"):
+                    self.counters["routed_zero_shot"] += 1
             return self._admit(result.champion_comp, task, depth, decompose_op)
         if result.champion_genome is not None:
             return self._admit_direct_module(result, task, depth)
@@ -620,6 +669,8 @@ class Orchestrator:
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
             "behavior": _genome_behavior(result.champion_genome),
         }
+        if self._refined_from is not None:
+            provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
         level = module_level(result.champion_genome, self.library)
         return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
 
@@ -674,6 +725,8 @@ class Orchestrator:
             "weight_robustness": best.metrics.get("weight_robustness", 0.0),
             "behavior": _comp_behavior(detached, level),
         }
+        if self._refined_from is not None:
+            provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
         return self._gated_add(entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
 
     # --- skeleton wiring ------------------------------------------------------------------------------

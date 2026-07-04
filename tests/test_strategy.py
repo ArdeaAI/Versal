@@ -181,6 +181,17 @@ def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Pat
     result = strategy(xor_task, comp_task_spec(xor_task), runtime, budget=2, seed_entries=[entry])
     assert result.metric >= 0.99  # the grafted incumbent already clears the bar; the early exit fires
     assert result.champion_genome is not None
+    # Refine fairness: the seed's own trained standing is stamped as the incumbent baseline.
+    assert result.seed_metric is not None and result.seed_metric >= 0.99
+
+
+def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.orchestrator import comp_task_spec
+
+    orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct", "composition"], "direct": {"pop_size": 4, "elitism": 1}})
+    strategy = dict(orchestrator.strategies)["direct"]
+    result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
+    assert result.seed_metric is None
 
 
 def test_lookup_quick_evaluates_temporal_modules(tmp_path: Path, temporal_task: Task) -> None:

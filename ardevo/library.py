@@ -195,6 +195,31 @@ def _canonical_key(entry_type: str, level: int, payload: dict[str, Any]) -> str:
     return f"{entry_type[0]}{level}_{digest}"
 
 
+def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
+    """Weight-agnostic topology hash: two payloads share a fingerprint iff they are the same
+    STRUCTURE (nodes, wiring, macro refs, refine depth), regardless of trained weights, glue
+    values, or innovation numbering. Entry keys hash the full payload, so a retrained clone
+    always gets a fresh key; this is the identity refinement must compare against instead
+    (a weight-only "improvement" is not a new solution). Also the natural basis for a future
+    motif census over discovered substructures."""
+    if entry_type == MODULE:
+        skeleton: dict[str, Any] = {
+            "nodes": sorted(
+                (int(node["id"]), node["kind"], node["activation"], list(node["coordinate"]) if node.get("coordinate") is not None else None, node.get("aggregation", "sum"))
+                for node in payload["nodes"]
+            ),
+            "connections": sorted((int(conn["in"]), int(conn["out"]), bool(conn["enabled"]), bool(conn.get("recurrent", False))) for conn in payload["connections"]),
+            "macros": sorted((macro["ref"], list(macro["inputs"]), list(macro["outputs"]), bool(macro.get("trainable", False))) for macro in payload.get("macros", [])),
+            "refine_steps": int(payload.get("refine_steps", 1)),
+        }
+    else:
+        skeleton = {
+            "nodes": sorted((int(node["id"]), node["kind"], node["ref"], node.get("aggregation", "sum"), bool(node.get("trainable", True))) for node in payload["nodes"]),
+            "edges": sorted((int(edge["in"]), int(edge["out"]), bool(edge["enabled"]), int(edge.get("glue_rank", 0))) for edge in payload["edges"]),
+        }
+    return hashlib.sha1(json.dumps(skeleton, sort_keys=True).encode()).hexdigest()[:16]
+
+
 class ModuleLibrary:
     """File-backed store. The index holds query-able summaries; payloads load on demand."""
 
@@ -224,6 +249,8 @@ class ModuleLibrary:
         return rows
 
     def _write_index(self) -> None:
+        # Scale watchpoint: a full index rewrite per admission is O(entries); fine at hundreds,
+        # revisit (append-log or sqlite) when the library reaches thousands.
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path.write_text(json.dumps(sorted(self._index.values(), key=lambda item: item["key"]), indent=2))
 
@@ -389,6 +416,22 @@ class ModuleLibrary:
         stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
         stats["refine_attempts"] = int(stats.get("refine_attempts", 0)) + 1
         stats["refine_failures_since_gain"] = 0 if improved else int(stats.get("refine_failures_since_gain", 0)) + 1
+        entry = self.load(key)
+        entry.stats = stats
+        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_index()
+
+    def seed_refine_stats(self, key: str, *, attempts: int, failures: int) -> None:
+        """Start `key`'s refine ledger from its lineage instead of zero: a refined replacement is
+        the SAME solution continuing under a new key, so the family's cooldown must ride the chain
+        (a fresh account per polish pass is the treadmill that filled the library with lineage
+        variants of one solver). Lazy keys, like `record_refinement`."""
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["refine_attempts"] = int(attempts)
+        stats["refine_failures_since_gain"] = int(failures)
         entry = self.load(key)
         entry.stats = stats
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))

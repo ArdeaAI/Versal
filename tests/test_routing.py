@@ -141,7 +141,11 @@ def test_retired_vertices_are_masked(tmp_path: Path, xor_task: Task, solving_gen
     assert sanitize_key(retired_key) not in net.last_gate_stats  # but the gate can never pick them
 
 
-def test_strategy_returns_valid_result_and_orchestrator_skips_admission(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+def test_routed_win_distills_into_admitted_composition(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    """The DSL contract end-to-end: a routed win over a planted expert must come back as a VERIFIED
+    composition referencing that expert, admitted into the library (a new routable vertex)."""
+    from ardevo.evolution.composition import comp_from_dict
+
     torch.manual_seed(0)
     table = {
         "evolve": ["routed"],
@@ -151,19 +155,86 @@ def test_strategy_returns_valid_result_and_orchestrator_skips_admission(tmp_path
         "routed": {"d_model": 16, "top_k": 2, "max_steps": 2, "train_steps": 30, "persist": False},
     }
     orchestrator = _orchestrator(tmp_path, table=table)
-    planted = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
-    # Make lookup miss so the ladder actually reaches the routed strategy (the planted entry is a
-    # perfect XOR solver, so quick-eval would short-circuit before any strategy ran).
-    orchestrator.library.retire(planted)
+    # A foreign signature makes the LOOKUP miss (so the ladder reaches the routed strategy) while
+    # the entry stays live and routable: the router's vertex set is signature-agnostic.
+    foreign_io = {"inputs": [{"signature": "BINARY|C", "width": 2}], "output": {"signature": "BINARY|C", "width": 1}}
+    planted = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=foreign_io, provenance={"accepted_metric": 1.0})
     keys_before = set(orchestrator.library.keys())
     solution = orchestrator.solve(xor_task)
     assert solution is not None, [attempt.to_dict() for attempt in orchestrator.attempts]
-    assert solution.key is None and solution.entry_type == "routed"  # solved but never shelved
+    assert solution.key is not None and solution.entry_type == COMPOSITION  # solved AND shelved
     attempt = orchestrator.attempts[-1]
-    assert attempt.outcome == "evolved" and attempt.strategy == "routed"
-    assert set(orchestrator.library.keys()) == keys_before  # not one new library entry
+    assert attempt.outcome == "evolved" and attempt.strategy == "routed" and attempt.library_key == solution.key
+    new_keys = set(orchestrator.library.keys()) - keys_before
+    assert new_keys == {solution.key}
+    entry = orchestrator.library.load(solution.key)
+    assert entry.entry_type == COMPOSITION and entry.level == 2
+    assert f"library:{planted}" in comp_from_dict(entry.payload).refs()  # the pathway names the expert
     assert orchestrator.counters["routed_solved"] == 1
     assert orchestrator.counters["routed_zero_shot"] in (0, 1)
+    assert orchestrator.counters["routed_undistillable"] == 0
+
+
+def test_routed_no_experts_short_circuits_and_escalates(tmp_path: Path, xor_task: Task) -> None:
+    """A cold library means nothing to route over: the strategy must charge NOTHING and fall
+    through, so evolution populates the vertex set first (no adapter-memorization solves)."""
+    torch.manual_seed(0)
+    table = {
+        "evolve": ["routed"],
+        "accept_threshold": 0.2,
+        "decompose": [],
+        "budgets": {"depth0": 3},
+        "routed": {"d_model": 16, "top_k": 2, "max_steps": 2, "train_steps": 30, "persist": False},
+    }
+    orchestrator = _orchestrator(tmp_path, table=table)
+    solution = orchestrator.solve(xor_task)
+    assert solution is None  # routed was the only strategy; it declined at zero cost
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed" and attempt.generations == 0
+    assert orchestrator.counters["routed_no_experts"] == 1
+    assert orchestrator.counters["routed_solved"] == 0
+    assert len(orchestrator.library) == 0
+
+
+def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    """A router-space win whose pathway cannot be kept (here: an impossible usage floor, the
+    adapter-bypass proxy) must report as a miss with the marker, never as a solve."""
+    from ardevo.routing import RoutedStrategy
+
+    torch.manual_seed(0)
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.2, "decompose": []})
+    orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    strategy = RoutedStrategy(
+        library_dir=str(tmp_path / "lib"),
+        d_model=16,
+        top_k=1,
+        max_steps=2,
+        train_steps=30,
+        persist=False,
+        distill_usage_floor=2.0,  # no expert can clear a floor above 1.0: the pathway is always empty
+    )
+    result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
+    assert result.metric == 0.0 and result.champion_comp is None and result.champion_routed is None
+    assert result.champion_metrics["routed_undistillable"] == 1.0
+    assert result.champion_metrics["routed_metric"] >= 0.2  # the router-space win is kept as a diagnostic
+
+
+def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    """A distilled entry's vertex is born AT the task embedding that produced it (fingerprint-matched
+    at sync), not at the mean-of-peers default."""
+    from ardevo.library import structural_fingerprint
+
+    torch.manual_seed(0)
+    library = ModuleLibrary(tmp_path / "lib")
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2)
+    payload = genome_to_dict(solving_genome)
+    placement = torch.linspace(-1.0, 1.0, 16)
+    service.note_pending_embedding(structural_fingerprint(MODULE, payload), placement)
+    library.add(entry_type=MODULE, payload=payload, io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    assert service.sync() == 1
+    key = sanitize_key(library.keys()[0])
+    assert torch.equal(service.net.vertex_embeddings[key].detach(), placement)
+    assert service.pending_embeddings == {}  # consumed on use
 
 
 def test_build_vertex_skips_temporal_and_undecodable(tmp_path: Path, temporal_task: Task, xor_task: Task, solving_genome: Genome) -> None:
@@ -284,6 +355,7 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
                 persist=False,
                 zero_shot_accept=False,
                 expert_ablation=ablation,
+                distill=False,  # the diagnostic instruments ROUTER-SPACE behavior, pre-contract
             )
             orchestrator = _orchestrator(tmp_path / f"orc_{task_name}_{rank}_{ablation}", table={"accept_threshold": 0.999, "decompose": []})
             runtime = orchestrator._runtime()

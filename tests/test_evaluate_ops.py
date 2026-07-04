@@ -171,3 +171,20 @@ def test_robustness_fitness_components_read_metrics(solving_genome: Genome) -> N
     assert FITNESS.get("weight_robustness")(solving_genome, metrics) == 0.55
     assert FITNESS.get("negative_mean_sample_loss")(solving_genome, metrics) == -0.4
     assert FITNESS.get("weight_robustness")(solving_genome, {}) == 0.0
+
+
+def test_hybrid_stamps_weight_robustness_through_temporal_adapter(temporal_task) -> None:
+    """The refine comparator and retire guard consume weight_robustness for temporal modules too;
+    this pins that the stepped path really stamps it. NOTE the field CAN be exactly 0.0 in the
+    wild (a constant-weight pole controller fails identically at every sample: mean 0, variance 0),
+    which is why the retire guard demands a strict margin instead of weak dominance."""
+    import math
+
+    from ardevo.temporal import temporal_adapter
+    from tests.test_recurrence import _running_parity_genome
+
+    adapter = temporal_adapter(temporal_task)
+    genome = _running_parity_genome()
+    metrics = hybrid(genome, adapter.decode(genome), adapter, samples=[-1.0, 1.0])
+    assert _ROBUSTNESS_KEYS <= set(metrics)
+    assert math.isfinite(metrics["weight_robustness"])

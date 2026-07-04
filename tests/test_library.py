@@ -243,3 +243,46 @@ def test_summaries_filters_retired_and_dependency(tmp_path: Path, solving_genome
     assert {row["key"] for row in library.summaries(include_retired=True)} == {kept, dependency, retired}
     rows = library.summaries(include_retired=True)
     assert rows == sorted(rows, key=lambda row: (row["level"], row["key"]))
+
+
+def test_structural_fingerprint_ignores_weights_but_not_topology(tmp_path: Path, solving_genome: Genome) -> None:
+    """The refine identity: a retrained clone shares the fingerprint (entry KEYS never do, they
+    hash weights); any structural edit, however small, changes it."""
+    from ardevo.library import structural_fingerprint
+
+    payload = genome_to_dict(solving_genome)
+    reweighted = genome_to_dict(solving_genome)
+    for connection in reweighted["connections"]:
+        connection["weight"] += 0.75
+    renumbered = genome_to_dict(solving_genome)
+    for offset, connection in enumerate(renumbered["connections"]):
+        connection["innovation"] += 100 + offset
+    assert structural_fingerprint(MODULE, payload) == structural_fingerprint(MODULE, reweighted)
+    assert structural_fingerprint(MODULE, payload) == structural_fingerprint(MODULE, renumbered)
+
+    library = ModuleLibrary(tmp_path / "lib")
+    assert _module_entry(library, solving_genome) != library.add(entry_type=MODULE, payload=reweighted, io=_IO, provenance={})  # keys DO differ
+
+    toggled = genome_to_dict(solving_genome)
+    toggled["connections"][0]["enabled"] = not toggled["connections"][0]["enabled"]
+    deepened = genome_to_dict(solving_genome)
+    deepened["refine_steps"] = int(deepened.get("refine_steps", 1)) + 2
+    assert structural_fingerprint(MODULE, payload) != structural_fingerprint(MODULE, toggled)
+    assert structural_fingerprint(MODULE, payload) != structural_fingerprint(MODULE, deepened)
+
+
+def test_structural_fingerprint_composition_ignores_glue_values() -> None:
+    import random as random_module
+
+    from ardevo.evolution.composition import comp_to_dict, minimal_composition
+    from ardevo.library import COMPOSITION, structural_fingerprint
+
+    comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random_module.Random(1))
+    baseline = comp_to_dict(comp)
+    reglued = comp_to_dict(comp)
+    for edge in reglued["edges"]:
+        edge["glue"] = [value + 1.5 for value in edge["glue"]]
+    disabled = comp_to_dict(comp)
+    disabled["edges"][0]["enabled"] = False
+    assert structural_fingerprint(COMPOSITION, baseline) == structural_fingerprint(COMPOSITION, reglued)
+    assert structural_fingerprint(COMPOSITION, baseline) != structural_fingerprint(COMPOSITION, disabled)

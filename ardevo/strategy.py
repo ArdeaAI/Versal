@@ -22,10 +22,10 @@ from typing import Any, Callable
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
 from ardevo.evaluation import input_width, output_features
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
-from ardevo.evolution.genome import Genome, InnovationTracker
+from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
-from ardevo.library import LibraryEntry, ModuleLibrary, graft
+from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, structural_fingerprint
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
 
@@ -58,6 +58,10 @@ class StrategyResult:
     # A routed winner is a RECORD (ardevo.routing.RoutedSolution), not an admissible payload: the
     # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
     champion_routed: Any | None = None
+    # Refine-on-hit fairness: the best metric the grafted seed itself reached under THIS run's
+    # training. The refine comparator uses it as the incumbent baseline, so a candidate must beat
+    # the incumbent given the same training, not just beat its untrained quick-eval score.
+    seed_metric: float | None = None
 
 
 @EVOLVE_STRATEGY.register("composition")
@@ -196,6 +200,21 @@ class DirectStrategy:
             state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
         finally:
             self.evolver.init_op = original_init
+        # Refine fairness: the grafted seeds' TRAINED standing is the incumbent baseline. Lineage is
+        # tracked by structural fingerprint (selection reshuffles the population, and a same-topology
+        # descendant with remixed weights is still the incumbent topology, so it counts).
+        seed_fingerprints: set[str] = set()
+        seed_metric: float | None = None
+        if seed_entries:
+            seed_fingerprints = {structural_fingerprint(MODULE, genome_to_dict(member.genome)) for member in state.population[: len(seed_entries)]}
+
+        def refresh_seed_metric() -> None:
+            nonlocal seed_metric
+            for member in state.population:
+                if structural_fingerprint(MODULE, genome_to_dict(member.genome)) in seed_fingerprints:
+                    value = runtime.metric_of(member)
+                    seed_metric = value if seed_metric is None else max(seed_metric, value)
+
         stop = runtime.stall_factory(budget)
         best: Assessed = max(state.population, key=lambda item: item.fitness)
         generations = 0
@@ -203,6 +222,8 @@ class DirectStrategy:
             generation_best = max(state.population, key=lambda item: item.fitness)
             if generation_best.fitness > best.fitness:
                 best = generation_best
+            if seed_fingerprints:
+                refresh_seed_metric()
             if runtime.on_generation is not None:
                 mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
                 runtime.on_generation(self.name, generation, generation_best, mean_fitness)
@@ -221,6 +242,7 @@ class DirectStrategy:
             generations_used=generations,
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
+            seed_metric=seed_metric,
         )
 
 

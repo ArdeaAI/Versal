@@ -10,8 +10,16 @@ unrolls refinement passes: termination is structural, never a convergence hope.
 
 Integration is a single EVOLVE_STRATEGY named "routed" (registered in `ardevo/strategy.py`): the
 orchestrator ladder, lookup, decompose, and the other strategies are untouched, so baseline vs
-routed is a pure config A/B. Routed winners are NOT shelved in the library (a RoutedSolution is a
-record, not a payload; the executable state lives in the router itself).
+routed is a pure config A/B.
+
+THE DSL CONTRACT: the library is the DSL and every solved thing must become a routable vertex in
+it. A routed win therefore only COUNTS when its dominant routing pathway distills into a
+CompositionGenome over the fired library entries and that composition verifies at the accept bar
+(glue-fit through the ordinary `assess_composition` rail); the verified composition is what gets
+admitted, becoming a new vertex at the next sync. A win that lives only in adapter weights is
+adapter bypass, reported as a miss so the evolutionary strategies run and grow the library
+instead. With `[orchestrator.routed] distill = false` the pre-contract behavior remains: winners
+are solved-but-not-shelved records (RoutedSolution), the executable state living in the router.
 """
 
 import json
@@ -26,10 +34,22 @@ import torch
 from torch import nn
 
 from ardevo.dataset.icarus import Task
-from ardevo.evolution.composition import BIAS_REF, AssemblyContext, CompositionAssemblyError, assemble, comp_from_dict
+from ardevo.evolution.composition import (
+    BIAS_REF,
+    AssemblyContext,
+    CompEdgeGene,
+    CompNodeGene,
+    CompNodeKind,
+    CompositionAssemblyError,
+    _glue_for,
+    assemble,
+    comp_from_dict,
+    comp_to_dict,
+    minimal_composition,
+)
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import AssessedComposition, CompositionGenome, CompTaskSpec
-from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, task_io
+from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, structural_fingerprint, task_io
 from ardevo.substrate import SubstrateModule, decode_module
 from ardevo.utils.logging import Logger
 
@@ -170,12 +190,16 @@ class RoutedNet(nn.Module):
 
     # --- vertex table -------------------------------------------------------------------------------
 
-    def register_vertex(self, vertex: RouterVertex) -> None:
+    def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None) -> None:
         key = vertex.sanitized_key
         if key in self.vertex_embeddings:
             self._vertices[key] = vertex  # adapters/embedding already exist (e.g. rebuilt after load)
             return
-        if len(self.vertex_embeddings) == 0:
+        if embedding is not None:
+            # A distilled vertex is BORN where the task that produced it lives in latent space,
+            # so the gate finds it for that task family from the first step.
+            embedding = embedding.detach().clone()
+        elif len(self.vertex_embeddings) == 0:
             embedding = torch.randn(self.d_model) * 0.02
         else:
             # A newcomer starts "roughly average" until evidence arrives: mean of peers plus noise.
@@ -190,9 +214,13 @@ class RoutedNet(nn.Module):
         self._vertices[key] = vertex
         self._vertex_order.append(key)
 
-    def sync_with_library(self, library: ModuleLibrary, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
+    def sync_with_library(
+        self, library: ModuleLibrary, *, include_compositions: bool = True, exclude_temporal: bool = True, pending_embeddings: dict[str, torch.Tensor] | None = None
+    ) -> int:
         """Append vertices for library keys not yet in the table; refresh the retired mask. Returns
-        the number of new vertices. The vertex set only grows (entries tombstone, never delete)."""
+        the number of new vertices. The vertex set only grows (entries tombstone, never delete).
+        `pending_embeddings` maps a structural fingerprint to the task embedding that produced a
+        distilled entry; a matching newcomer is born at that latent position (consumed on use)."""
         added = 0
         known = {vertex.original_key for vertex in self._vertices.values()}
         for summary in library.summaries(include_retired=True):
@@ -213,7 +241,8 @@ class RoutedNet(nn.Module):
             vertex = build_vertex(entry, library)
             if vertex is None:
                 continue
-            self.register_vertex(vertex)
+            embedding = pending_embeddings.pop(structural_fingerprint(entry.entry_type, entry.payload), None) if pending_embeddings else None
+            self.register_vertex(vertex, embedding=embedding)
             added += 1
         return added
 
@@ -398,6 +427,9 @@ class RouterService:
         self.adapter_rank = adapter_rank
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
+        # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
+        # only (a cross-run newcomer just gets the mean+noise init, which is fine).
+        self.pending_embeddings: dict[str, torch.Tensor] = {}
         self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
         self.net = RoutedNet(
             d_model=d_model,
@@ -414,10 +446,13 @@ class RouterService:
             self._load(persist_dir)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
-        added = self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal)
+        added = self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal, pending_embeddings=self.pending_embeddings)
         if added:
             self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
         return added
+
+    def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
+        self.pending_embeddings[fingerprint] = embedding.detach().clone()
 
     def render_overmind(self) -> None:
         """Draw the WHOLE routed model (every expert embedded, wired to the shared bus) to
@@ -477,6 +512,8 @@ class RouterService:
         }
 
     def save(self) -> None:
+        # Scale watchpoint: the state_dict grows with vertices/signatures and is rewritten whole on
+        # every routed win; fine at hundreds of vertices, revisit (sharded/incremental save) at thousands.
         if self.persist_dir is None:
             return
         self.version += 1
@@ -543,6 +580,12 @@ class RoutedStrategy:
     load_balance_weight: float = 0.01
     zero_shot_accept: bool = True
     generation_cost: int = 10
+    # The DSL contract: a win only counts when its pathway distills into a verified composition
+    # (see the module docstring). usage_floor is the mean gate weight an expert needs at some step
+    # to make the pathway; max_nodes caps the distilled composition's size.
+    distill: bool = True
+    distill_usage_floor: float = 0.1
+    distill_max_nodes: int = 6
     replay_tasks: int = 8
     replay_every: int = 4
     include_compositions: bool = True
@@ -593,11 +636,17 @@ class RoutedStrategy:
         seed_entries: list | None = None,
     ) -> Any:
         from ardevo.evaluation import evaluate
+        from ardevo.strategy import StrategyResult
 
         service = self._service(runtime.library)
         service.sync(include_compositions=self.include_compositions, exclude_temporal=self.exclude_temporal)
-        io = task_io(task)
         net = service.net
+        if self.distill and not any(name not in net._retired for name in net._vertex_order):
+            # Nothing to route over: a "solve" here would be pure adapter memorization that leaves
+            # no trace in the DSL. Fall straight through to the evolutionary strategies, which is
+            # what populates the vertex set in the first place.
+            return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"routed_no_experts": 1.0})
+        io = task_io(task)
         input_key = net.ensure_input_adapter(io["inputs"][0]["signature"], io["inputs"][0]["width"])
         head_key = net.ensure_output_head(io["output"]["signature"], io["output"]["width"])
         support_input, _descriptor = spec.encoded.support_input
@@ -606,13 +655,15 @@ class RoutedStrategy:
         zero_shot_metrics = evaluate(view, spec.encoded, spec.encoder)
         zero_shot_metric = runtime.metric_of(self._metrics_view(zero_shot_metrics))
         if self.zero_shot_accept and zero_shot_metric >= runtime.accept_threshold:
-            return self._result(task, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0, runtime=runtime)
+            return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
         steps_used = self._train(view, spec, runtime)
         metrics = evaluate(view, spec.encoded, spec.encoder)
         metric = runtime.metric_of(self._metrics_view(metrics))
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
+        if metric >= runtime.accept_threshold:
+            return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost)
         return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost, runtime=runtime)
 
     def _train(self, view: RoutedTaskView, spec: CompTaskSpec, runtime: Any) -> int:
@@ -659,6 +710,116 @@ class RoutedStrategy:
             return
         self._replay.append((spec.encoded, input_key, head_key, support_input))
         del self._replay[: -self.replay_tasks]
+
+    # --- distillation: the DSL contract ---------------------------------------------------------------
+
+    def _resolve_win(
+        self,
+        task: Task,
+        spec: CompTaskSpec,
+        runtime: Any,
+        service: RouterService,
+        view: RoutedTaskView,
+        metrics: dict[str, float],
+        metric: float,
+        *,
+        zero_shot: bool,
+        steps_used: int,
+        generations_used: int,
+    ) -> Any:
+        """A router-space win becomes a real win only if its pathway survives as a composition."""
+        from ardevo.strategy import StrategyResult
+
+        if not self.distill:
+            return self._result(task, service, view, metrics, metric, zero_shot=zero_shot, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
+
+        pathway = self._dominant_pathway(view)
+        assessed = self._verify_distilled(pathway, spec, runtime) if pathway else None
+        distilled_metric = runtime.metric_of(assessed) if assessed is not None else 0.0
+        if assessed is not None and distilled_metric >= runtime.accept_threshold:
+            fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(assessed.comp))
+            task_embed = view.net.task_embedding(view.support_input, view.input_key, view.head_key)
+            service.note_pending_embedding(fingerprint, task_embed)
+            stamped = dict(assessed.metrics)
+            stamped["routed_metric"] = float(metric)
+            stamped["routed_zero_shot_metric"] = float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0))
+            stamped["routed_steps_used"] = float(steps_used)
+            if zero_shot:
+                stamped["routed_zero_shot"] = 1.0
+            service.record_task(
+                {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": True}
+            )
+            service.save()
+            return StrategyResult(strategy=self.name, metric=float(distilled_metric), generations_used=generations_used, champion_comp=assessed, champion_metrics=stamped)
+
+        # Adapter bypass or an unverifiable pathway: what the system can KEEP is the metric that
+        # counts, so this reports as a miss and the ladder escalates to the evolutionary strategies.
+        stamped = dict(metrics)
+        stamped["routed_undistillable"] = 1.0
+        stamped["routed_metric"] = float(metric)
+        stamped["routed_steps_used"] = float(steps_used)
+        service.record_task(
+            {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": False}
+        )
+        logger.info("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
+        return StrategyResult(strategy=self.name, metric=float(distilled_metric), generations_used=generations_used, champion_metrics=stamped)
+
+    def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
+        """Per routing step, the ORIGINAL library keys whose mean gate weight over the support batch
+        clears the usage floor, capped at distill_max_nodes across all steps."""
+        net = view.net
+        with torch.no_grad():
+            view.forward(view.support_input)  # populates last_selections / last_probs per step
+        live_names = [name for name in net._vertex_order if name not in net._retired]
+        pathway: list[list[str]] = []
+        total = 0
+        for selections, probs in zip(net.last_selections, net.last_probs):
+            step_weight = torch.zeros(len(live_names)).scatter_add_(0, selections.reshape(-1), probs.reshape(-1).to(torch.float32)) / selections.shape[0]
+            ranked = sorted(((float(weight), name) for name, weight in zip(live_names, step_weight.tolist())), reverse=True)
+            step_keys = []
+            for weight, name in ranked:
+                if weight < self.distill_usage_floor or total >= self.distill_max_nodes:
+                    break
+                step_keys.append(net._vertices[name].original_key)
+                total += 1
+            if step_keys:
+                pathway.append(step_keys)
+        return pathway
+
+    def _verify_distilled(self, pathway: list[list[str]], spec: CompTaskSpec, runtime: Any) -> AssessedComposition | None:
+        """Build the pathway as a CompositionGenome (INPUT -> step layers -> OUTPUT, dense between
+        consecutive layers, a repeated expert unrolled into separate nodes) and glue-fit it through
+        the ordinary assess_composition rail. The returned assessment is the admittable artifact."""
+        net = self._service(runtime.library).net
+        widths = {vertex.original_key: (vertex.in_width, vertex.out_width) for vertex in net._vertices.values()}
+        tracker = runtime.state.comp_innovations
+        rng = runtime.state.rng
+        loop = runtime.loop
+        comp = minimal_composition(
+            spec.input_specs, spec.output_ref, spec.output_width, tracker, rng, glue_scale=loop.glue_scale, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold
+        )
+        previous = [node_id for node_id in comp.input_ids if comp.nodes[node_id].ref != BIAS_REF]
+        output_id = comp.output_ids[0]
+        for step_keys in pathway:
+            layer: list[int] = []
+            for key in step_keys:
+                in_width, out_width = widths[key]
+                node_id = tracker.new_node_id()
+                comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
+                for source in previous:
+                    glue, rank = _glue_for(
+                        comp.nodes[source].out_width, in_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+                    )
+                    comp.edges.append(CompEdgeGene(source, node_id, True, tracker.innovation(source, node_id), glue, rank))
+                layer.append(node_id)
+            previous = layer
+        for source in previous:
+            glue, rank = _glue_for(
+                comp.nodes[source].out_width, spec.output_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+            )
+            comp.edges.append(CompEdgeGene(source, output_id, True, tracker.innovation(source, output_id), glue, rank))
+        assessed = loop.assess_composition(comp, spec, runtime.state, train=True)
+        return assessed if assessed.net is not None else None  # assembly failure floors with net=None
 
     def _result(
         self,
@@ -716,6 +877,9 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         load_balance_weight=float(table.get("load_balance_weight", 0.01)),
         zero_shot_accept=bool(table.get("zero_shot_accept", True)),
         generation_cost=int(table.get("generation_cost", 10)),
+        distill=bool(table.get("distill", True)),
+        distill_usage_floor=float(table.get("distill_usage_floor", 0.1)),
+        distill_max_nodes=int(table.get("distill_max_nodes", 6)),
         replay_tasks=int(table.get("replay_tasks", 8)),
         replay_every=int(table.get("replay_every", 4)),
         include_compositions=bool(table.get("include_compositions", True)),

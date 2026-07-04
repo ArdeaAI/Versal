@@ -76,8 +76,10 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # improvements admit UNCONDITIONALLY via the dependency rail (unbounded)
   metric_epsilon = 0.005
   robustness_epsilon = 0.01
-  decay = 0.5                 # effective-K multiplier per consecutive no-gain on an entry (24->12->6->skip);
-                              # any shelved improvement resets the entry's decay (DreamCoder-ish cooldown)
+  decay = 0.5                 # effective-K multiplier per consecutive no-gain (24->12->6->skip). The cooldown
+                              # rides the LINEAGE: a capability gain (metric/robustness) recharges it, a
+                              # compression-only gain spends it, so one capability epoch funds a few polish
+                              # passes and then the family sleeps (DreamCoder compress-then-stop)
   min_generations = 4         # decayed budgets below this skip refinement entirely
   stall_generations = 8       # refine-local flatline window (the global 28 would exceed typical budgets)
   retire_superseded = true    # tombstone the old entry when the shelved improvement weakly dominates
