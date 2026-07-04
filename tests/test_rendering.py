@@ -214,3 +214,100 @@ def test_composition_spec_without_library_uses_opaque_boxes() -> None:
     entry = library.load("c2_88ff427f98da")
     spec = build_entry_spec(entry, resolve=None)
     assert len(spec.containers) == 1 and spec.containers[0].opaque
+
+
+# --- overmind flow grid ----------------------------------------------------------------------------
+
+
+def _grid_view(count: int):
+    from ardevo.rendering import OvermindVertex, OvermindView
+
+    vertices = [OvermindVertex(key="", label=f"v{index}", embedding_rank=index) for index in range(count)]
+    return OvermindView(vertices=vertices, input_signatures=["IN_2"], output_signatures=["OUT_1"], d_model=8, top_k=1, max_steps=2)
+
+
+def test_overmind_grid_bands_and_rows() -> None:
+    from ardevo.rendering import THEME, build_overmind_spec
+
+    spec = build_overmind_spec(_grid_view(5), columns=4, legend=False)
+    input_nodes = [node for node in spec.nodes if node.color == THEME["node_input"]]
+    output_nodes = [node for node in spec.nodes if node.color == THEME["node_output"]]
+    assert len(input_nodes) == 1 and len(output_nodes) == 1
+    assert input_nodes[0].y == max(node.y for node in spec.nodes)  # input band at the TOP (y-up frame)
+    assert output_nodes[0].y == min(node.y for node in spec.nodes)  # output band at the BOTTOM
+    cells = [box for box in spec.containers if box.depth == 1]
+    assert len(cells) == 5
+    assert all(box.y1 < input_nodes[0].y and box.y0 > output_nodes[0].y for box in cells)  # grid strictly between the bands
+    row_tops = sorted({round(box.y1, 6) for box in cells}, reverse=True)
+    assert len(row_tops) == 2  # 5 cells at columns=4 -> a 4-row and a 1-row
+    assert sum(1 for box in cells if round(box.y1, 6) == row_tops[0]) == 4
+    assert not any(node.marker == "D" for node in spec.nodes)  # the gate hub is gone
+    band_labels = [text.text for text in spec.texts]
+    assert "IN_2" in band_labels and "OUT_1" in band_labels
+
+
+def test_overmind_fresh_library_draws_uniform_feeds() -> None:
+    from ardevo.rendering import THEME, build_overmind_spec
+
+    spec = build_overmind_spec(_grid_view(3), legend=False)  # every share is 0.0: no traffic yet
+    entry_edges = [edge for edge in spec.edges if edge.color == THEME["edge_entry"]]
+    exit_edges = [edge for edge in spec.edges if edge.color == THEME["edge_exit"]]
+    assert len(entry_edges) == 3 and len(exit_edges) == 3
+    assert all(edge.width == 0.8 for edge in entry_edges + exit_edges)  # uniform thin: the flow story on day one
+
+
+def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_genome: Genome) -> None:
+    from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
+
+    library = ModuleLibrary(tmp_path / "lib")
+    inner_key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
+    host_key = library.add(entry_type=MODULE, payload=genome_to_dict(_macro_host(inner_key)), io=_IO, provenance={"accepted_metric": 1.0})
+    view = OvermindView(
+        vertices=[OvermindVertex(key=host_key, label="host"), OvermindVertex(key=inner_key, label="inner", embedding_rank=1)],
+        input_signatures=["IN_2"],
+        output_signatures=["OUT_1"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    containment = [edge for edge in spec.edges if edge.color == THEME["edge_macro"] and edge.style == "dashed"]
+    assert len(containment) == 1  # host cell -> inner cell, dashed: structure, not traffic
+
+
+def test_overmind_legend_populates_texts_and_widens() -> None:
+    from ardevo.rendering import build_overmind_spec
+
+    bare = build_overmind_spec(_grid_view(2), legend=False)
+    keyed = build_overmind_spec(_grid_view(2), legend=True)
+    assert keyed.width > bare.width
+    labels = [text.text for text in keyed.texts]
+    assert "key" in labels
+    expected_labels = ("routing traffic (observed)", "input feed (step-0 gate mass)", "output feed (final-step gate mass)", "recurrent (time-delayed)")
+    for expected in expected_labels + ("built from (structural ref)",):
+        assert expected in labels
+
+
+def test_spec_text_draws() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from ardevo.rendering import RenderSpec, SpecText, draw_spec
+
+    spec = RenderSpec(texts=[SpecText(1.0, 2.0, "hello")], width=4.0, height=4.0)
+    figure, axis = plt.subplots()
+    draw_spec(axis, spec)
+    assert any(text.get_text() == "hello" for text in axis.texts)
+    plt.close(figure)
+
+
+def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
+    import matplotlib.image as mpimg
+
+    from ardevo.rendering import RenderSpec, _render_spec_png
+
+    tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
+    image = mpimg.imread(tall)
+    assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square

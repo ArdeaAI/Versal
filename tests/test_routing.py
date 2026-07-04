@@ -383,6 +383,11 @@ def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_ta
     for source, row in service.transition_totals.items():
         assert source in service.net._vertex_order
         assert all(target in service.net._vertex_order and weight > 0 for target, weight in row.items())
+    # The per-step ledger splits exactly the same mass by unroll step.
+    assert set(service.step_usage_totals) == set(service.usage_totals)
+    for name, steps in service.step_usage_totals.items():
+        assert 1 <= len(steps) <= 3
+        assert sum(steps) == pytest.approx(service.usage_totals[name])
 
 
 def test_traffic_persists_through_meta_round_trip(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
@@ -398,6 +403,19 @@ def test_traffic_persists_through_meta_round_trip(tmp_path: Path, xor_task: Task
     reloaded = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
     assert reloaded.usage_totals == pytest.approx(service.usage_totals)
     assert set(reloaded.transition_totals) == set(service.transition_totals)
+    assert set(reloaded.step_usage_totals) == set(service.step_usage_totals)
+    for name, steps in service.step_usage_totals.items():
+        assert reloaded.step_usage_totals[name] == pytest.approx(steps)
+
+    # Pre-ledger meta files (no step_usage_totals key) load clean: no format bump, empty ledger.
+    import json as json_module
+
+    meta = json_module.loads((router_dir / "router_meta.json").read_text())
+    del meta["step_usage_totals"]
+    (router_dir / "router_meta.json").write_text(json_module.dumps(meta))
+    legacy = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
+    assert legacy.step_usage_totals == {}
+    assert legacy.usage_totals == pytest.approx(service.usage_totals)
 
 
 def test_tolerant_load_drops_garbage_collected_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
@@ -420,6 +438,7 @@ def test_tolerant_load_drops_garbage_collected_vertex(tmp_path: Path, xor_task: 
     reloaded = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
     assert len(reloaded.net._vertex_order) == 1  # dropped, not crashed
     assert sanitize_key(doomed) not in reloaded.usage_totals
+    assert sanitize_key(doomed) not in reloaded.step_usage_totals
     reloaded.save()
     import json as json_module
 
@@ -445,13 +464,16 @@ def test_pathways_prefer_observed_traffic_and_fall_back_to_prior(tmp_path: Path,
     assert all(weight <= 1.0 for _s, _t, weight in observed)
 
 
-def test_overmind_spec_draws_pathway_edges_and_usage_wiring(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+def test_overmind_spec_draws_pathway_and_traffic_feed_edges(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec, library_resolver
 
     library = _seed_library(tmp_path, xor_task, solving_genome, with_composition=True)
     keys = library.keys()
     view = OvermindView(
-        vertices=[OvermindVertex(key=keys[0], label=keys[0], usage=1.0), OvermindVertex(key=keys[1], label=keys[1], usage=0.0)],
+        vertices=[
+            OvermindVertex(key=keys[0], label=keys[0], usage=1.0, entry_share=1.0, exit_share=0.4),
+            OvermindVertex(key=keys[1], label=keys[1], usage=0.0, entry_share=0.1, exit_share=0.0, embedding_rank=1),
+        ],
         input_signatures=["BINARY|K:2"],
         output_signatures=["BINARY|K:1"],
         d_model=16,
@@ -459,8 +481,23 @@ def test_overmind_spec_draws_pathway_edges_and_usage_wiring(tmp_path: Path, xor_
         max_steps=3,
         pathways=[(0, 1, 1.0)],
     )
-    spec = build_overmind_spec(view, resolve=library_resolver(library))
+    spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
     pathway_edges = [edge for edge in spec.edges if edge.color == THEME["edge_pathway"]]
     assert len(pathway_edges) == 1 and pathway_edges[0].curve != 0.0
-    callout_edges = [edge for edge in spec.edges if edge.color == THEME["edge_callout"]]
-    assert max(edge.width for edge in callout_edges) > min(edge.width for edge in callout_edges)  # usage-scaled gate wiring
+    entry_edges = [edge for edge in spec.edges if edge.color == THEME["edge_entry"]]
+    assert len(entry_edges) == 2  # one input adapter feeding both live experts
+    assert max(edge.width for edge in entry_edges) > min(edge.width for edge in entry_edges)  # share-scaled feeds
+    exit_edges = [edge for edge in spec.edges if edge.color == THEME["edge_exit"]]
+    assert len(exit_edges) == 1  # a zero exit share draws no output feed
+
+
+def test_overmind_vertex_order_is_traffic_first() -> None:
+    from ardevo.routing import mean_firing_step, overmind_vertex_order
+
+    assert mean_firing_step([]) is None and mean_firing_step([0.0, 0.0]) is None
+    assert mean_firing_step([0.0, 2.0]) == pytest.approx(1.0)
+    embedding_ordered = ["a", "b", "c", "d", "e"]
+    step_usage = {"b": [1.0, 0.0], "d": [0.0, 1.0], "e": [0.5, 0.5]}
+    order = overmind_vertex_order(embedding_ordered, retired={"c"}, step_usage=step_usage)
+    # Trafficked live by mean firing step (b=0.0, e=0.5, d=1.0), untrafficked live next, retired last.
+    assert order == ["b", "e", "d", "a", "c"]

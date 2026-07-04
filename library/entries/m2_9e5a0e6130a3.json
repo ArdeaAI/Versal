@@ -527,8 +527,8 @@
     ]
   },
   "stats": {
-    "use_count": 769,
-    "max_attributed_fitness": 3.1033242180858887,
+    "use_count": 1335,
+    "max_attributed_fitness": 3.157544932765347,
     "refine_attempts": 3,
     "refine_failures_since_gain": 3
   }

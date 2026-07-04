@@ -400,6 +400,27 @@ class RoutedSolution:
     expert_usage: dict[str, float] = field(default_factory=dict)
 
 
+def mean_firing_step(step_masses: list[float]) -> float | None:
+    """The mass-weighted mean unroll step at which a vertex fires; None when it never has."""
+    total = sum(step_masses)
+    if total <= 0.0:
+        return None
+    return sum(index * mass for index, mass in enumerate(step_masses)) / total
+
+
+def overmind_vertex_order(embedding_ordered: list[str], retired: set[str], step_usage: dict[str, list[float]]) -> list[str]:
+    """The portrait's row order: live vertices that have actually fired sort by mean firing step
+    (early experts land near the input band, late ones near the output band), zero-traffic live
+    vertices follow in latent order, retired vertices last."""
+    mean_steps = {name: mean_firing_step(step_usage.get(name, [])) for name in embedding_ordered}
+    rank = {name: index for index, name in enumerate(embedding_ordered)}
+    live = [name for name in embedding_ordered if name not in retired]
+    trafficked = sorted((name for name in live if mean_steps[name] is not None), key=lambda name: (float(mean_steps[name] or 0.0), rank[name]))
+    untrafficked = [name for name in live if mean_steps[name] is None]
+    tail = [name for name in embedding_ordered if name in retired]
+    return trafficked + untrafficked + tail
+
+
 class RouterService:
     """Owns the persistent RoutedNet, its growth against the library, and the disk round-trip."""
 
@@ -430,11 +451,14 @@ class RouterService:
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
         # only (a cross-run newcomer just gets the mean+noise init, which is fine).
         self.pending_embeddings: dict[str, torch.Tensor] = {}
-        # Lifetime routing TRAFFIC (persisted in meta): summed gate mass per vertex and observed
-        # step-to-step co-firing between vertices. This is what makes the overmind's pathway edges
-        # REAL observed routing, not just the learned prior, and it survives offline renders.
+        # Lifetime routing TRAFFIC (persisted in meta): summed gate mass per vertex, observed
+        # step-to-step co-firing between vertices, and per-unroll-step gate mass (which experts fire
+        # EARLY vs LATE; the overmind's top-down flow order and its input/output feed widths). This
+        # is what makes the overmind's edges REAL observed routing, not just the learned prior, and
+        # it survives offline renders.
         self.usage_totals: dict[str, float] = {}
         self.transition_totals: dict[str, dict[str, float]] = {}
+        self.step_usage_totals: dict[str, list[float]] = {}
         self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
         self.net = RoutedNet(
             d_model=d_model,
@@ -474,10 +498,16 @@ class RouterService:
         for selections, probs in zip(net.last_selections, net.last_probs):
             weights = torch.zeros(len(live_names)).scatter_add_(0, selections.reshape(-1), probs.reshape(-1).to(torch.float32)) / selections.shape[0]
             step_weights.append(weights)
-        for weights in step_weights:
+        for step_index, weights in enumerate(step_weights):
             for name, weight in zip(live_names, weights.tolist()):
                 if weight > 1e-4:
                     self.usage_totals[name] = self.usage_totals.get(name, 0.0) + weight
+                    # Ragged per-step lists are fine: halting (default off) can shorten a run, which
+                    # makes "last element" a slightly biased exit estimate; accepted.
+                    steps = self.step_usage_totals.setdefault(name, [])
+                    while len(steps) <= step_index:
+                        steps.append(0.0)
+                    steps[step_index] += weight
         for earlier, later in zip(step_weights, step_weights[1:]):
             for source, source_weight in zip(live_names, earlier.tolist()):
                 if source_weight <= 1e-3:
@@ -550,18 +580,40 @@ class RouterService:
         try:
             from ardevo.rendering import OvermindVertex, OvermindView, render_overmind
 
-            ordered_names = self._embedding_order()
+            embedding_ordered = self._embedding_order()
+            rank = {name: index for index, name in enumerate(embedding_ordered)}
+            ordered_names = overmind_vertex_order(embedding_ordered, self.net._retired, self.step_usage_totals)
             total_usage = sum(self.usage_totals.values()) or 1.0
+            # Feed widths: step-0 / final-step gate mass, peak-normalized like _pathways. Pre-ledger
+            # meta (or a fresh library) falls back to lifetime usage for both; else zeros and the
+            # renderer draws its uniform thin feeds.
+            entry_raw = {name: steps[0] for name, steps in self.step_usage_totals.items() if steps}
+            exit_raw = {name: steps[-1] for name, steps in self.step_usage_totals.items() if steps}
+            if not entry_raw:
+                entry_raw = dict(self.usage_totals)
+                exit_raw = dict(self.usage_totals)
+            entry_peak = max(entry_raw.values(), default=0.0) or 1.0
+            exit_peak = max(exit_raw.values(), default=0.0) or 1.0
             vertices = []
             for name in ordered_names:
                 vertex = self.net._vertices[name]
+                retired = name in self.net._retired
                 share = self.usage_totals.get(name, 0.0) / total_usage
+                try:
+                    stone = bool(self.library.load(vertex.original_key).provenance.get("stepping_stone", False))
+                except KeyError:
+                    stone = False
                 vertices.append(
                     OvermindVertex(
                         key=vertex.original_key,
-                        label=f"{vertex.original_key}  ({share:.0%})" + ("  retired" if name in self.net._retired else ""),
-                        retired=name in self.net._retired,
+                        label=f"{vertex.original_key}  ({share:.0%})" + ("  stone" if stone else "") + ("  retired" if retired else ""),
+                        retired=retired,
                         usage=share,
+                        entry_share=entry_raw.get(name, 0.0) / entry_peak,
+                        exit_share=exit_raw.get(name, 0.0) / exit_peak,
+                        mean_step=mean_firing_step(self.step_usage_totals.get(name, [])),
+                        embedding_rank=rank[name],
+                        stepping_stone=stone,
                     )
                 )
             view = OvermindView(
@@ -604,6 +656,7 @@ class RouterService:
             # Lifetime routing traffic, pruned to current vertices (a GC'd vertex takes its traffic with it).
             "usage_totals": {name: value for name, value in self.usage_totals.items() if name in known},
             "transition_totals": {source: {target: value for target, value in row.items() if target in known} for source, row in self.transition_totals.items() if source in known},
+            "step_usage_totals": {name: values for name, values in self.step_usage_totals.items() if name in known},
         }
 
     def save(self) -> None:
@@ -677,6 +730,8 @@ class RouterService:
         self.transition_totals = {
             source: {target: float(value) for target, value in row.items() if target in known} for source, row in (meta.get("transition_totals") or {}).items() if source in known
         }
+        # Optional key so pre-ledger meta files load clean; no format bump (a bump stales every router dir).
+        self.step_usage_totals = {name: [float(value) for value in values] for name, values in (meta.get("step_usage_totals") or {}).items() if name in known}
         self.net.sync_with_library(self.library)  # append anything admitted since the last save
 
 

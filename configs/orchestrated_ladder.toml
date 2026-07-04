@@ -33,7 +33,7 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
+rungs = [1, 2, 3, 4, 5, 6, 7] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
 tasks_per_rung = 100
 shuffle = true
 
@@ -89,7 +89,7 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # TIME-axis tasks run through the stepped recurrent substrate here.
   pop_size = 64
   elitism = 2
-  assess_workers = 24         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
+  assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
                               # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
                               # (independent genomes, rng-free training); the dominant run cost.
     [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes

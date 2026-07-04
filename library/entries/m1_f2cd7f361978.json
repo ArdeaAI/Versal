@@ -131,7 +131,7 @@
     "refined_from": "m1_f64d7961ab56"
   },
   "stats": {
-    "use_count": 776,
+    "use_count": 1274,
     "max_attributed_fitness": 3.183333343267441,
     "refine_attempts": 4,
     "refine_failures_since_gain": 3
