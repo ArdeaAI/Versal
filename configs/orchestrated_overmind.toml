@@ -30,7 +30,7 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
 tasks_per_rung = 100
 shuffle = true
