@@ -62,16 +62,17 @@ class Attempt:
 
     task: str
     depth: int
-    outcome: str  # "library_hit" | "evolved" | "decomposed" | "failed"
+    outcome: str  # "library_hit" | "refined" | "evolved" | "decomposed" | "failed"
     metric: float
     generations: int
     library_key: str | None = None
     decompose_op: str | None = None
     strategy: str | None = None  # which evolve strategy produced the winner (or the best loser)
     failure_stage: str | None = None  # for failed decomposed tasks: "subtask:<name>" | "parent_re_evolve"
+    refine_generations: int = 0  # learn-mode generations spent refining a library hit (bounded extra compute)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "task": self.task,
             "depth": self.depth,
             "outcome": self.outcome,
@@ -82,6 +83,9 @@ class Attempt:
             "strategy": self.strategy,
             "failure_stage": self.failure_stage,
         }
+        if self.refine_generations:  # only when refinement ran, so live-mode summaries stay byte-identical
+            data["refine_generations"] = self.refine_generations
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Attempt":
@@ -95,6 +99,7 @@ class Attempt:
             decompose_op=data.get("decompose_op"),
             strategy=data.get("strategy"),
             failure_stage=data.get("failure_stage"),
+            refine_generations=int(data.get("refine_generations", 0)),
         )
 
 
@@ -103,6 +108,36 @@ class Solution:
     key: str | None  # None when the task was SOLVED but the admission gate declined to shelve it
     entry_type: str
     metric: float
+
+
+@dataclass(frozen=True)
+class RefinementRank:
+    """The lexicographic standing of one topology in a refine-on-hit comparison."""
+
+    metric: float
+    robustness: float
+    complexity: int
+    entry_type: str
+
+
+def refinement_improves(candidate: RefinementRank, incumbent: RefinementRank, *, metric_epsilon: float, robustness_epsilon: float) -> bool:
+    """Lexicographic better-than: accept metric, then weight robustness, then LOWER structural
+    complexity, each tier inside an epsilon band so "equal" is a non-event (equal everything never
+    admits). Complexity only tie-breaks within one entry type: composition complexity counts glue
+    edges + module nodes, not inner genome cost, so cross-type size comparisons are meaningless."""
+    if not (math.isfinite(candidate.metric) and math.isfinite(candidate.robustness)):
+        return False
+    if candidate.metric > incumbent.metric + metric_epsilon:
+        return True
+    if candidate.metric < incumbent.metric - metric_epsilon:
+        return False
+    if candidate.robustness > incumbent.robustness + robustness_epsilon:
+        return True
+    if candidate.robustness < incumbent.robustness - robustness_epsilon:
+        return False
+    if candidate.entry_type != incumbent.entry_type:
+        return False
+    return candidate.complexity < incumbent.complexity
 
 
 @dataclass
@@ -156,6 +191,17 @@ class Orchestrator:
         self.strategies = build_strategies(config)
         shares = table.get("evolve_budget", {})
         self.evolve_shares = {name: float(shares.get(name, 1.0)) for name, _strategy in self.strategies}
+        # Learn-mode refinement of library hits ([orchestrator.refine]). budget_k = 0 is live mode:
+        # hits stay zero-cost and the whole path below is byte-identical to the plain hit branch.
+        refine = table.get("refine", {}) or {}
+        self.refine_budget_k = int(refine.get("budget_k", 0))
+        self.refine_depth_max = int(refine.get("depth_max", 0))  # > 0 also refines sub-solve hits, whose improvements admit UNCONDITIONALLY (dependency rail)
+        self.refine_metric_epsilon = float(refine.get("metric_epsilon", 0.005))
+        self.refine_robustness_epsilon = float(refine.get("robustness_epsilon", 0.01))
+        self.refine_decay = float(refine.get("decay", 0.5))
+        self.refine_min_generations = int(refine.get("min_generations", 4))
+        self.refine_stall_generations = int(refine.get("stall_generations", 8))
+        self.refine_retire_superseded = bool(refine.get("retire_superseded", True))
         self.loop = loop
         self.library = library
         self.state = state
@@ -171,6 +217,17 @@ class Orchestrator:
             "decompose_subtask_failed": 0,
             "decompose_parent_failed": 0,
         }
+        if self.refine_budget_k > 0:  # registered only in learn mode so live-mode summaries stay byte-identical
+            self.counters.update(
+                {
+                    "refine_attempts": 0,
+                    "refine_improvements": 0,
+                    "refine_no_gain": 0,
+                    "refine_skipped_decayed": 0,
+                    "refine_skipped_no_strategy": 0,
+                    "refine_generations": 0,
+                }
+            )
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
 
@@ -186,8 +243,7 @@ class Orchestrator:
         hit = self._lookup(task, spec)
         if hit is not None:
             self.counters["library_hits"] += 1
-            self._record(Attempt(task=name, depth=depth, outcome="library_hit", metric=hit.metric, generations=0, library_key=hit.key))
-            return hit
+            return self._handle_library_hit(hit, task, spec, depth)
         self.counters["library_misses"] += 1
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
@@ -256,6 +312,142 @@ class Orchestrator:
             if remaining <= 0:
                 break
         return max(results, key=lambda item: item.metric)
+
+    # --- learn-mode refinement of library hits --------------------------------------------------------
+
+    def _handle_library_hit(self, hit: Solution, task: Task, spec: CompTaskSpec, depth: int) -> Solution:
+        """STEP 1b: a hit is free, but learn mode (refine budget_k > 0) spends a bounded, decaying
+        budget trying to beat the stored solution before settling for it. The guard runs FIRST with
+        zero side effects, so budget_k = 0 (live mode) is byte-identical to the plain hit path. The
+        task can never regress: a failed refinement returns the original hit."""
+        refine_generations = 0
+        if self.refine_budget_k > 0 and depth <= self.refine_depth_max and hit.key is not None:
+            improved, refine_generations = self._refine_hit(hit, task, spec, depth)
+            if improved is not None:
+                return improved  # _refine_hit already recorded the "refined" attempt
+        self._record(Attempt(task=task.meta.name, depth=depth, outcome="library_hit", metric=hit.metric, generations=0, library_key=hit.key, refine_generations=refine_generations))
+        return hit
+
+    def _refine_hit(self, hit: Solution, task: Task, spec: CompTaskSpec, depth: int) -> tuple[Solution | None, int]:
+        """Seed a bounded evolve from the stored solution and admit only a strict lexicographic
+        improvement (metric, then robustness, then lower complexity). Runs ONLY the strategy
+        matching the entry shape, so K stays focused and `_evolve`'s share arithmetic is untouched."""
+        assert hit.key is not None
+        entry = self.library.load(hit.key)
+        strategy_name = "direct" if entry.entry_type == MODULE else "composition"
+        strategy = dict(self.strategies).get(strategy_name)
+        if strategy is None:
+            self.counters["refine_skipped_no_strategy"] += 1
+            return None, 0
+        effective_budget = self._effective_refine_budget(entry)
+        if effective_budget < self.refine_min_generations:
+            self.counters["refine_skipped_decayed"] += 1
+            return None, 0
+        self.counters["refine_attempts"] += 1
+        # The target is deliberately NOT clamped to 1.0: an incumbent at 1.0 makes it unreachable,
+        # so the strategy runs to its (refine-local) stall and the tie-breaks decide afterward;
+        # a beatable incumbent lets the strategy's early exit stop the moment it wins.
+        runtime = self._refine_runtime(hit.metric + self.refine_metric_epsilon)
+        if entry.entry_type == MODULE:
+            result = strategy(task, spec, runtime, budget=effective_budget, seed_entries=[entry])
+        else:
+            result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
+        self.counters["refine_generations"] += result.generations_used
+
+        candidate = self._candidate_rank(result)
+        incumbent = self._incumbent_rank(hit, entry)
+        improves = (
+            candidate is not None
+            # A robustness/size tie-break can sit epsilon below an at-the-bar incumbent; never shelve below the bar.
+            and result.metric >= self.accept_threshold
+            and refinement_improves(candidate, incumbent, metric_epsilon=self.refine_metric_epsilon, robustness_epsilon=self.refine_robustness_epsilon)
+        )
+        if not improves:
+            self.library.record_refinement(hit.key, improved=False)
+            self.counters["refine_no_gain"] += 1
+            return None, result.generations_used
+
+        key = self._admit_result(result, task, depth, decompose_op=None)
+        if key == hit.key:
+            # Evolution returned the identical payload (dedupe); a self-refresh is not a gain.
+            self.library.record_refinement(hit.key, improved=False)
+            self.counters["refine_no_gain"] += 1
+            return None, result.generations_used
+        # Decay resets only when the gain was actually shelved; a policy-rejected gain still returns
+        # the improved solution this run but counts as a failure so full-K retries do not repeat.
+        self.library.record_refinement(hit.key, improved=key is not None)
+        if key is not None and self.refine_retire_superseded and candidate is not None:
+            self._retire_if_dominated(hit.key, candidate)
+        self.counters["refine_improvements"] += 1
+        self._record(
+            Attempt(
+                task=task.meta.name,
+                depth=depth,
+                outcome="refined",
+                metric=result.metric,
+                generations=result.generations_used,
+                library_key=key,
+                strategy=result.strategy,
+                refine_generations=result.generations_used,
+            )
+        )
+        return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric), result.generations_used
+
+    def _effective_refine_budget(self, entry: LibraryEntry) -> int:
+        summary = self.library.summary(entry.key) or {}
+        failures = int((summary.get("stats") or {}).get("refine_failures_since_gain", 0))
+        return int(self.refine_budget_k * (self.refine_decay**failures))
+
+    def _refine_runtime(self, target_metric: float) -> StrategyRuntime:
+        """Like `_runtime`, but the bar is beating the incumbent and the flatline window is the
+        refine-local one (K is a cap, not a fixed cost: a saturated refinement stalls out early).
+        The detector's half-budget floor check can never fire: the seed already scores above floor."""
+
+        def refine_stall_factory(budget: int) -> StallDetector:
+            return StallDetector(stall_generations=self.refine_stall_generations, stall_epsilon=self.stall_epsilon, floor=self.floor, budget=budget, metric_of=self._metric)
+
+        return StrategyRuntime(
+            loop=self.loop,
+            library=self.library,
+            state=self.state,
+            accept_threshold=target_metric,
+            metric_of=self._metric,
+            stall_factory=refine_stall_factory,
+            on_generation=self._on_generation,
+        )
+
+    def _candidate_rank(self, result: StrategyResult) -> RefinementRank | None:
+        robustness = float(result.champion_metrics.get("weight_robustness", 0.0))
+        if result.champion_genome is not None:
+            return RefinementRank(metric=result.metric, robustness=robustness, complexity=result.champion_genome.complexity(), entry_type=MODULE)
+        if result.champion_comp is not None:
+            return RefinementRank(metric=result.metric, robustness=robustness, complexity=result.champion_comp.comp.complexity(), entry_type=COMPOSITION)
+        return None
+
+    def _incumbent_rank(self, hit: Solution, entry: LibraryEntry) -> RefinementRank:
+        # The metric is the quick metric just measured on THIS task, not the stale stored one.
+        # Robustness is stored-at-admission (the index max over re-admissions); recomputing it fresh
+        # would cost a weight-samples evaluation per hit, against the cheap-hit contract, and the
+        # asymmetry only matters inside the metric-tie tier where the epsilon band absorbs it.
+        summary = self.library.summary(entry.key) or {}
+        robustness = float(summary.get("weight_robustness", entry.provenance.get("weight_robustness", 0.0)))
+        if entry.entry_type == MODULE:
+            complexity = genome_from_dict(entry.payload).complexity()
+        else:
+            complexity = comp_from_dict(entry.payload).complexity()
+        return RefinementRank(metric=hit.metric, robustness=robustness, complexity=complexity, entry_type=entry.entry_type)
+
+    def _retire_if_dominated(self, old_key: str, candidate: RefinementRank) -> None:
+        """Retire the superseded entry only when the shelved improvement weakly dominates its STORED
+        ranking fields: `query` orders by (robustness, metric), so a dominated entry can never be
+        the preferable lookup and only burns a niche slot. Mixed trade-offs (metric up, robustness
+        down) keep distinct value and stay live for the archive policy to manage."""
+        summary = self.library.summary(old_key)
+        if summary is None:
+            return
+        if candidate.metric >= float(summary.get("accepted_metric", 0.0)) and candidate.robustness >= float(summary.get("weight_robustness", 0.0)):
+            self.library.retire(old_key)
+            logger.info("retired superseded library entry %s (refined replacement dominates)", old_key)
 
     # --- ladder steps -------------------------------------------------------------------------------
 

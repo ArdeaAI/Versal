@@ -374,6 +374,26 @@ class ModuleLibrary:
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
         self._write_index()
 
+    def summary(self, key: str) -> dict[str, Any] | None:
+        """A copy of the index row for `key` (ranking fields + stats), or None if unknown."""
+        summary = self._index.get(key)
+        return dict(summary) if summary is not None else None
+
+    def record_refinement(self, key: str, *, improved: bool) -> None:
+        """Record a learn-mode refinement attempt against `key`. The refine keys appear LAZILY on
+        first call (never in the stats defaults or `add`), so libraries untouched by refinement
+        stay byte-identical on disk."""
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["refine_attempts"] = int(stats.get("refine_attempts", 0)) + 1
+        stats["refine_failures_since_gain"] = 0 if improved else int(stats.get("refine_failures_since_gain", 0)) + 1
+        entry = self.load(key)
+        entry.stats = stats
+        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_index()
+
 
 def macro_resolver(library: "ModuleLibrary") -> Callable[[str], Genome]:
     """Decode-time resolver for macro refs. Entries are immutable, so genomes cache per key."""

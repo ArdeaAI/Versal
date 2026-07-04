@@ -196,6 +196,37 @@ def test_bump_stats_tracks_use(tmp_path: Path, solving_genome: Genome) -> None:
     assert entry.stats["max_attributed_fitness"] == 0.7
 
 
+def test_record_refinement_increments_and_resets(tmp_path: Path, solving_genome: Genome) -> None:
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    key = _module_entry(library, solving_genome)
+    library.record_refinement(key, improved=False)
+    library.record_refinement(key, improved=False)
+    entry = library.load(key)
+    assert entry.stats["refine_attempts"] == 2
+    assert entry.stats["refine_failures_since_gain"] == 2
+    library.record_refinement(key, improved=True)  # a shelved gain resets the decay
+    reopened = ModuleLibrary(root)  # persisted through both index.json and the entry JSON
+    summary = reopened.summary(key)
+    assert summary is not None
+    assert summary["stats"]["refine_attempts"] == 3
+    assert summary["stats"]["refine_failures_since_gain"] == 0
+    assert reopened.load(key).stats["refine_failures_since_gain"] == 0
+    library.record_refinement("missing", improved=True)  # unknown keys are a no-op, like bump_stats
+
+
+def test_summary_accessor_and_legacy_stats_default(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    assert library.summary("missing") is None
+    key = _module_entry(library, solving_genome)
+    summary = library.summary(key)
+    assert summary is not None and summary["key"] == key
+    # A never-refined entry reads as zero failures AND carries no refine keys at all, so libraries
+    # untouched by learn mode stay byte-identical on disk.
+    assert "refine_attempts" not in summary["stats"]
+    assert int(summary["stats"].get("refine_failures_since_gain", 0)) == 0
+
+
 def test_summaries_filters_retired_and_dependency(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
     library = ModuleLibrary(tmp_path / "lib")
     kept = _module_entry(library, solving_genome)

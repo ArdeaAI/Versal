@@ -181,21 +181,22 @@ class OrchestratedTrial(Proctor):
             return []
 
     def _record_task(self, entry: TaskEntry, attempt: Any, new_library_keys: list[str], library_size: int) -> None:
-        self.task_records.append(
-            {
-                "rung": entry.rung,
-                "task": entry.name,
-                "outcome": attempt.outcome if attempt is not None else "unknown",
-                "metric": attempt.metric if attempt is not None else 0.0,
-                "strategy": attempt.strategy if attempt is not None else None,
-                "generations": attempt.generations if attempt is not None else 0,
-                "depth": attempt.depth if attempt is not None else 0,
-                "decompose_op": attempt.decompose_op if attempt is not None else None,
-                "failure_stage": attempt.failure_stage if attempt is not None else None,
-                "new_library_keys": list(new_library_keys),
-                "library_size": library_size,
-            }
-        )
+        record = {
+            "rung": entry.rung,
+            "task": entry.name,
+            "outcome": attempt.outcome if attempt is not None else "unknown",
+            "metric": attempt.metric if attempt is not None else 0.0,
+            "strategy": attempt.strategy if attempt is not None else None,
+            "generations": attempt.generations if attempt is not None else 0,
+            "depth": attempt.depth if attempt is not None else 0,
+            "decompose_op": attempt.decompose_op if attempt is not None else None,
+            "failure_stage": attempt.failure_stage if attempt is not None else None,
+            "new_library_keys": list(new_library_keys),
+            "library_size": library_size,
+        }
+        if attempt is not None and getattr(attempt, "refine_generations", 0):  # only when refinement ran (live mode stays byte-identical)
+            record["refine_generations"] = attempt.refine_generations
+        self.task_records.append(record)
 
     def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:
         """The always-on, cheap, durable record of a run: one row per attempted task plus aggregate

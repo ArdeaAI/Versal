@@ -202,10 +202,17 @@ class Evolver:
             # Recombination/toggling can produce a cyclic genome; repair to feedforward and retry.
             return adapter.decode(make_acyclic(genome))
 
-    def seed_state(self, adapter: Adapter, rng: random.Random) -> EvolverState:
-        """Build the initial population for `adapter`, score it, and return a fresh run state."""
+    def seed_state(self, adapter: Adapter, rng: random.Random, *, seeded_front: Callable[[InnovationTracker], list[Genome]] | None = None) -> EvolverState:
+        """Build the initial population for `adapter`, score it, and return a fresh run state.
+
+        `seeded_front` (a callback because grafting needs the run's tracker, which is born here)
+        replaces the FRONT of the init population with warm-start genomes; they flow through the
+        same assess_many as every other member. None is byte-identical to the unseeded path."""
         genomes = [self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng) for _ in range(self.pop_size)]
         state = EvolverState(population=[], innovations=InnovationTracker.from_genomes(genomes), rng=rng)
+        if seeded_front is not None:
+            for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
+                genomes[index] = genome
         state.population = self.assess_many(genomes, adapter, state)
         state.best = max(state.population, key=lambda item: item.fitness)
         self.species_history = state.species_history

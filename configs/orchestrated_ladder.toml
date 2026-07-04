@@ -66,6 +66,22 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   [orchestrator.evolve_budget]  # relative budget shares within one depth allocation (direct leads)
   direct = 0.6
   composition = 0.4
+  [orchestrator.refine]       # LEARN MODE: on a library hit, spend up to budget_k generations seeded
+                              # from the stored solution trying to beat it (lexicographic: metric,
+                              # then robustness, then LOWER complexity), admit only strict wins, and
+                              # fall back to the known topology otherwise. budget_k = 0 is LIVE mode:
+                              # hits stay zero-cost, byte-identical to the pre-refine behavior.
+  budget_k = 24               # 10 percent of depth0; a per-hit CAP, not a fixed cost (stall stops early)
+  depth_max = 0               # refine top-level hits only; raising it refines sub-solve hits too, whose
+                              # improvements admit UNCONDITIONALLY via the dependency rail (unbounded)
+  metric_epsilon = 0.005
+  robustness_epsilon = 0.01
+  decay = 0.5                 # effective-K multiplier per consecutive no-gain on an entry (24->12->6->skip);
+                              # any shelved improvement resets the entry's decay (DreamCoder-ish cooldown)
+  min_generations = 4         # decayed budgets below this skip refinement entirely
+  stall_generations = 8       # refine-local flatline window (the global 28 would exceed typical budgets)
+  retire_superseded = true    # tombstone the old entry when the shelved improvement weakly dominates
+                              # its stored (robustness, metric) ranking; mixed trade-offs stay live
   [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
                               # fallback (two-spirals class) and the source of task-shaped modules.
                               # TIME-axis tasks run through the stepped recurrent substrate here.

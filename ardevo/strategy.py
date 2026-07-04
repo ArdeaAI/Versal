@@ -22,10 +22,10 @@ from typing import Any, Callable
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
 from ardevo.evaluation import input_width, output_features
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
-from ardevo.evolution.genome import Genome
+from ardevo.evolution.genome import Genome, InnovationTracker
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
-from ardevo.library import ModuleLibrary
+from ardevo.library import LibraryEntry, ModuleLibrary, graft
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
 
@@ -162,6 +162,7 @@ class DirectStrategy:
         *,
         budget: int,
         seed_comps: list | None = None,
+        seed_entries: list[LibraryEntry] | None = None,
     ) -> StrategyResult:
         adapter = self._adapter(task)
         # The direct population's library-reading mutators must sample from the SAME library the
@@ -176,9 +177,20 @@ class DirectStrategy:
             from ardevo.evolution.init import stamp_input_coordinates
 
             self.evolver.init_op = lambda n_inputs, n_outputs, *, rng: stamp_input_coordinates(original_init(n_inputs, n_outputs, rng=rng), grid)
+
+        def seeded_front(tracker: InnovationTracker) -> list[Genome]:
+            # Refine-on-hit warm start: grafted entries take the front of the population and are
+            # trained/assessed like every other member. Grid stamping keeps geometry mutators live.
+            grafted = [graft(entry, tracker) for entry in (seed_entries or [])]
+            if grid is not None:
+                from ardevo.evolution.init import stamp_input_coordinates
+
+                grafted = [stamp_input_coordinates(genome, grid) for genome in grafted]
+            return grafted
+
         try:
             # Shared rng: keeps the whole solve deterministic per seed and checkpoint-coherent.
-            state = self.evolver.seed_state(adapter, runtime.state.rng)
+            state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
         finally:
             self.evolver.init_op = original_init
         stop = runtime.stall_factory(budget)
