@@ -1,0 +1,93 @@
+{
+  "key": "c2_0dae27dcee6e",
+  "entry_type": "composition",
+  "level": 2,
+  "io": {
+    "inputs": [
+      {
+        "signature": "CONTINUOUS|C",
+        "width": 2
+      }
+    ],
+    "output": {
+      "signature": "CATEGORICAL|",
+      "width": 2
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 1986,
+        "kind": "input",
+        "ref": "CONTINUOUS|C",
+        "in_width": 0,
+        "out_width": 2,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 1987,
+        "kind": "input",
+        "ref": "__bias__",
+        "in_width": 0,
+        "out_width": 1,
+        "aggregation": "sum",
+        "trainable": true
+      },
+      {
+        "id": 1988,
+        "kind": "output",
+        "ref": "two_spirals",
+        "in_width": 2,
+        "out_width": 0,
+        "aggregation": "sum",
+        "trainable": true
+      }
+    ],
+    "edges": [
+      {
+        "in": 1986,
+        "out": 1988,
+        "enabled": true,
+        "innovation": 3901,
+        "glue": [
+          -0.6453877687454224,
+          -0.18647268414497375,
+          0.28796306252479553,
+          -0.27597975730895996
+        ],
+        "glue_rank": 0
+      },
+      {
+        "in": 1987,
+        "out": 1988,
+        "enabled": false,
+        "innovation": 3902,
+        "glue": [
+          0.41728897541580884,
+          0.8262659016678667
+        ],
+        "glue_rank": 0
+      }
+    ]
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "two_spirals",
+    "rung": 3,
+    "depth": 0,
+    "decompose_op": null,
+    "accepted_metric": 0.546875,
+    "weight_robustness": 0.5,
+    "behavior": [
+      "m0",
+      "L2"
+    ],
+    "stepping_stone": true,
+    "dependency": true
+  },
+  "stats": {
+    "use_count": 298,
+    "max_attributed_fitness": 3.10332834098224
+  }
+}

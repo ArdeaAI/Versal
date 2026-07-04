@@ -1,0 +1,224 @@
+{
+  "key": "m4_b43af0c8263b",
+  "entry_type": "module",
+  "level": 4,
+  "io": {
+    "inputs": [
+      {
+        "signature": "BINARY|C",
+        "width": 8
+      }
+    ],
+    "output": {
+      "signature": "BINARY|C",
+      "width": 1
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 10,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 11,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 12,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 13,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 14,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 15,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 16,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 17,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 18,
+        "kind": "bias",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 19,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 20,
+        "kind": "hidden",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      }
+    ],
+    "connections": [
+      {
+        "in": 10,
+        "out": 19,
+        "weight": 0.08579106628894806,
+        "enabled": true,
+        "innovation": 9,
+        "recurrent": false
+      },
+      {
+        "in": 11,
+        "out": 19,
+        "weight": -0.2986474335193634,
+        "enabled": false,
+        "innovation": 10,
+        "recurrent": false
+      },
+      {
+        "in": 12,
+        "out": 19,
+        "weight": 0.04616139084100723,
+        "enabled": true,
+        "innovation": 11,
+        "recurrent": false
+      },
+      {
+        "in": 13,
+        "out": 19,
+        "weight": -0.08261080086231232,
+        "enabled": true,
+        "innovation": 12,
+        "recurrent": false
+      },
+      {
+        "in": 14,
+        "out": 19,
+        "weight": 2.6591284040478058e-05,
+        "enabled": true,
+        "innovation": 13,
+        "recurrent": false
+      },
+      {
+        "in": 15,
+        "out": 19,
+        "weight": 4.3034473492298275e-05,
+        "enabled": true,
+        "innovation": 14,
+        "recurrent": false
+      },
+      {
+        "in": 16,
+        "out": 19,
+        "weight": 1.2059728760505095e-05,
+        "enabled": true,
+        "innovation": 15,
+        "recurrent": false
+      },
+      {
+        "in": 17,
+        "out": 19,
+        "weight": 1.5119754607439972e-05,
+        "enabled": true,
+        "innovation": 16,
+        "recurrent": false
+      },
+      {
+        "in": 18,
+        "out": 19,
+        "weight": 0.018350036814808846,
+        "enabled": false,
+        "innovation": 17,
+        "recurrent": false
+      },
+      {
+        "in": 20,
+        "out": 19,
+        "weight": 2.792726755142212,
+        "enabled": true,
+        "innovation": 18,
+        "recurrent": false
+      }
+    ],
+    "macros": [
+      {
+        "ref": "library:m3_604a9759225d",
+        "inputs": [
+          18,
+          14,
+          15,
+          10,
+          12,
+          17,
+          13,
+          11
+        ],
+        "outputs": [
+          20
+        ],
+        "innovation": 19,
+        "trainable": false
+      }
+    ],
+    "refine_steps": 1
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "parity.n4.b0",
+    "rung": 2,
+    "depth": 0,
+    "strategy": "direct",
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.3333333432674408,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "refined_from": "m4_378e6109c6ce"
+  },
+  "stats": {
+    "use_count": 104,
+    "max_attributed_fitness": 1.9956052400165372,
+    "refine_attempts": 1,
+    "refine_failures_since_gain": 0
+  }
+}

@@ -86,7 +86,8 @@ class EvolutionTrial(Proctor):
 
     def _champion_model(self, best: Assessed) -> dict[str, Any]:
         """The champion genome dict with enabled weights taken from the exact scored network."""
-        tuned = best.module.export_weights()
+        # A floored (undecodable) champion means the whole population is corpses; save the genome as-is.
+        tuned = best.module.export_weights() if best.module is not None else {}
         genome = genome_to_dict(best.genome)
         for connection in genome["connections"]:
             edge = (connection["in"], connection["out"], connection.get("recurrent", False))

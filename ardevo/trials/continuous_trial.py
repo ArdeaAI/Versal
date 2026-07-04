@@ -232,7 +232,8 @@ class ContinuousTrial(Proctor):
         return f"champion mean query_acc {sum(accuracies) / len(accuracies):.2f} over {len(accuracies)} seen tasks"
 
     def _champion_model(self, champion: Assessed) -> dict[str, Any]:
-        tuned = champion.module.export_weights()
+        # A floored (undecodable) champion means the whole population is corpses; save the genome as-is.
+        tuned = champion.module.export_weights() if champion.module is not None else {}
         genome = genome_to_dict(champion.genome)
         for connection in genome["connections"]:
             edge = (connection["in"], connection["out"], connection.get("recurrent", False))

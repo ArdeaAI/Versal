@@ -263,3 +263,61 @@ def test_graft_remaps_macros_with_fresh_markers(tmp_path: Path, solving_genome: 
     assert all(node_id >= 500 for node_id in (*macro.input_node_ids, *macro.output_node_ids))
     assert macro.innovation >= 500  # fresh marker through the receiving tracker
     assert macro.ref == host.macros[0].ref  # library identity survives
+
+
+def _macro_chain(library: ModuleLibrary, solving_genome: Genome, links: int) -> list[str]:
+    """Admit a chain of module entries where entry N carries a macro ref to entry N-1."""
+    keys: list[str] = []
+    for link in range(links):
+        payload = genome_to_dict(solving_genome)
+        payload["connections"][0]["weight"] += link + 1  # unique key per link
+        if keys:
+            # A decode-valid placement: the inner (solving_genome) has 2 inputs / 1 output, so the
+            # macro reads both host inputs and lands on one hidden node as its output stub.
+            input_ids = [node["id"] for node in payload["nodes"] if node["kind"] == "input"]
+            stub = next(node["id"] for node in payload["nodes"] if node["kind"] == "hidden")
+            payload["macros"] = [{"ref": f"library:{keys[-1]}", "inputs": input_ids, "outputs": [stub], "innovation": 50 + link, "trainable": False}]
+        keys.append(library.add(entry_type=MODULE, payload=payload, io=_IO, provenance={"accepted_metric": 1.0}))
+    return keys
+
+
+def test_macro_subtree_depth_walks_the_chain(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)
+    assert [library.macro_subtree_depth(key) for key in keys] == [0, 1, 2, 3, 4]
+    assert library.macro_subtree_depth("m1_missing") == 999  # never a safe macro target
+
+
+def test_add_macro_node_never_nests_past_the_decode_cap(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    """The wall-ledger lesson: seed-then-embed cycles deepen the macro chain one level per attempt
+    until decode dies at _MAX_MACRO_DEPTH. The mutation must refuse targets that would get there."""
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)  # depths 0..4; only depths <= 3 are embeddable
+    ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh"], default_activation="tanh", library=library)
+    for seed in range(40):
+        child = add_macro_node(linear_genome, ctx, rng=random.Random(seed), prob=1.0)
+        assert child.macros and child.macros[0].ref != f"library:{keys[4]}"  # the depth-4 entry is never chosen
+        decode(child, 2, 1, macro_resolver=macro_resolver(library))  # every proposed child DECODES
+
+
+def test_undecodable_genome_floors_instead_of_killing_the_run(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
+    """A corpse in the population is buried by assessment, never fatal: serial, pooled-worker, and
+    champion-verification paths all floor (the two_spirals pool.map crash regression test)."""
+    from ardevo.evolution.evolver import _FLOOR_FITNESS, EvolverState, _assess_in_worker
+    from ardevo.evolution.registry import build_evolver
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    dead = solving_genome.clone()
+    dead.macros.append(MacroGene(ref="library:m1_gone", input_node_ids=(0,), output_node_ids=(3,), innovation=99, trainable=False))
+
+    evolver = build_evolver(_loop_config())
+    state = EvolverState(population=[], innovations=InnovationTracker.from_genomes([dead]), rng=random.Random(0))
+    floored = evolver.assess(dead, xor_adapter, state)
+    assert floored.fitness == _FLOOR_FITNESS and floored.module is None and floored.metrics["decode_failed"] == 1.0
+    assert evolver.evaluate_only(dead, xor_adapter).fitness == _FLOOR_FITNESS
+
+    genome, metrics, fitness = _assess_in_worker(dead, adapter=xor_adapter, train_op=evolver.train_op, evaluate_op=evolver.evaluate_op, fitness=evolver.fitness)
+    assert fitness == _FLOOR_FITNESS and metrics["decode_failed"] == 1.0
+
+    mixed = evolver.assess_many([dead, solving_genome], xor_adapter, state)  # a corpse among the living
+    assert mixed[0].fitness == _FLOOR_FITNESS and mixed[1].fitness > _FLOOR_FITNESS

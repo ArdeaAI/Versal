@@ -348,6 +348,7 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         return genome
     from ardevo.library import MODULE as MODULE_ENTRY
     from ardevo.library import ModuleLibrary
+    from ardevo.substrate import _MAX_MACRO_DEPTH
 
     library = ctx.library if ctx.library is not None else _cached_library(path)
     assert isinstance(library, ModuleLibrary)
@@ -364,8 +365,13 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         nodes = entry.payload.get("nodes", [])
         k = sum(1 for node in nodes if node.get("kind") == "input")
         m = sum(1 for node in nodes if node.get("kind") == "output")
-        if 1 <= k <= len(host_sources) and 1 <= m <= max_outputs:
-            candidates.append((entry, k, m))
+        if not (1 <= k <= len(host_sources) and 1 <= m <= max_outputs):
+            continue
+        # Embedding this entry nests its whole macro chain one level deeper; past the decode cap
+        # the child is a dead phenotype (the wall ledger's seed-then-embed cycles get there fast).
+        if library.macro_subtree_depth(entry.key) > _MAX_MACRO_DEPTH - 1:
+            continue
+        candidates.append((entry, k, m))
     if not candidates:
         return genome
     entry, k, m = candidates[rng.randrange(len(candidates))]

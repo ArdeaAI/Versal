@@ -66,12 +66,22 @@ class TaskAdapter:
         return evaluate(module, self.encoded, self.encoder)
 
 
+# A genome that cannot DECODE (macro nesting past the cap, a vanished macro ref) is a nonviable
+# phenotype: it scores the floor and selection removes it. It must never kill the run; mutation is
+# allowed to propose corpses, assessment just buries them.
+_FLOOR_FITNESS = -1e9
+
+
+def _floored_metrics() -> dict[str, float]:
+    return {"support_accuracy": 0.0, "query_accuracy": 0.0, "support_loss": 1e9, "query_loss": 1e9, "weight_robustness": 0.0, "decode_failed": 1.0}
+
+
 @dataclass
 class Assessed:
     genome: Genome
     metrics: dict[str, float]
     fitness: float
-    module: SubstrateModule  # the exact trained network that produced these metrics (for faithful saving)
+    module: SubstrateModule | None  # the exact trained network that produced these metrics; None for a floored (undecodable) genome
 
 
 @dataclass
@@ -129,14 +139,20 @@ class Evolver:
 
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""
-        module = self._decode(genome, adapter)
+        try:
+            module = self._decode(genome, adapter)
+        except (ValueError, KeyError):
+            return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
         metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self.fitness(genome, metrics), module)
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
-        module = self._decode(genome, adapter)
+        try:
+            module = self._decode(genome, adapter)
+        except (ValueError, KeyError):
+            return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self.fitness(genome, metrics), module)
 
@@ -153,15 +169,26 @@ class Evolver:
 
             with ThreadPoolExecutor(max_workers=self.parallel_assess) as pool:
                 return list(pool.map(lambda genome: self.assess(genome, adapter, state), genomes))
-        modules = [self._decode(genome, adapter) for genome in genomes]
-        pairs = self.train_population_op(genomes, modules, adapter.encoded, rng=state.rng)
+        decoded: list[SubstrateModule | None] = []
+        for genome in genomes:
+            try:
+                decoded.append(self._decode(genome, adapter))
+            except (ValueError, KeyError):
+                decoded.append(None)  # nonviable phenotype: floored below, never in the batch program
+        viable = [(genome, module) for genome, module in zip(genomes, decoded) if module is not None]
+        pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng) if viable else []
         from ardevo.evolution import train as train_stage
 
         self.assess_stats = dict(train_stage.last_batch_stats)
+        trained = iter(pairs)
         assessed = []
-        for genome, module in pairs:
-            metrics = self.evaluate_op(genome, module, adapter)
-            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), module))
+        for module in decoded:
+            if module is None:
+                assessed.append(Assessed(genomes[len(assessed)], _floored_metrics(), _FLOOR_FITNESS, None))
+                continue
+            genome, trained_module = next(trained)
+            metrics = self.evaluate_op(genome, trained_module, adapter)
+            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), trained_module))
         return assessed
 
     def _assess_pooled(self, genomes: list[Genome], adapter: Adapter) -> list[Assessed]:
@@ -172,7 +199,7 @@ class Evolver:
         worker = partial(_assess_in_worker, adapter=adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
         chunksize = max(1, len(genomes) // (self.assess_workers * 4))
         results = pool.map(worker, genomes, chunksize=chunksize)
-        return [Assessed(genome, metrics, fitness, self._decode(genome, adapter)) for genome, metrics, fitness in results]
+        return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
 
     def _ensure_pool(self) -> "Pool":
         if _SHARED_POOL is not None:
@@ -373,8 +400,13 @@ def _assess_in_worker(
     fitness: FitnessAggregator,
 ) -> tuple[Genome, dict[str, float], float]:
     """Decode, train, and evaluate one genome in a worker process. Returns the plain-data triple
-    (trained genome, metrics, fitness); the main process re-decodes the module from the genome."""
-    module = Evolver._decode(genome, adapter)
+    (trained genome, metrics, fitness); the main process re-decodes the module from the genome.
+    An undecodable genome floors here instead of raising: a worker exception would kill the WHOLE
+    pool.map and with it the run (the two_spirals macro-nesting crash of 2026-07-04)."""
+    try:
+        module = Evolver._decode(genome, adapter)
+    except (ValueError, KeyError):
+        return genome, _floored_metrics(), _FLOOR_FITNESS
     genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
     metrics = evaluate_op(genome, module, adapter)
     return genome, metrics, fitness(genome, metrics)

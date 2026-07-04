@@ -242,6 +242,7 @@ class ModuleLibrary:
         self._entries_dir = self.root / "entries"
         self._index_path = self.root / "index.json"
         self._index: dict[str, dict[str, Any]] = {}
+        self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
 
@@ -359,6 +360,26 @@ class ModuleLibrary:
             raise KeyError(f"no library entry {key!r} under {self.root}")
         return LibraryEntry.from_dict(json.loads(path.read_text()))
 
+    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Depth of the macro-reference chain under `key`: 0 = no macros, 1 + deepest target
+        otherwise. This is what the decode cap (`substrate._MAX_MACRO_DEPTH`) actually limits, so
+        macro-adding mutations consult it to never manufacture a genome that cannot decode (the
+        wall-ledger lesson: repeated seed-then-embed cycles deepen the chain one level per attempt).
+        A missing or cyclic ref reads as unboundedly deep: never a safe macro target."""
+        cached = self._macro_depth_cache.get(key)
+        if cached is not None:
+            return cached
+        if key in _visiting:
+            return 999  # defensive: immutable append-only entries cannot cycle, but never recurse forever
+        try:
+            entry = self.load(key)
+        except KeyError:
+            return 999
+        refs = payload_refs(entry.entry_type, entry.payload)
+        depth = 0 if not refs else 1 + max(self.macro_subtree_depth(ref, _visiting | {key}) for ref in refs)
+        self._macro_depth_cache[key] = depth
+        return depth
+
     def collect_garbage(self, *, protect: Iterable[str] = (), dry_run: bool = False) -> list[str]:
         """Physically delete retired entries nothing retained still references. Mark-and-sweep:
         roots are every LIVE entry plus `protect` (router vertices, resumable checkpoint macro
@@ -385,6 +406,7 @@ class ModuleLibrary:
             return swept
         for key in swept:
             del self._index[key]
+            self._macro_depth_cache.pop(key, None)
             (self._entries_dir / f"{key}.json").unlink(missing_ok=True)
             (self.root / "images" / f"{key}.png").unlink(missing_ok=True)
         self._write_index()
