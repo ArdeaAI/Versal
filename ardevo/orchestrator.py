@@ -228,6 +228,8 @@ class Orchestrator:
                     "refine_generations": 0,
                 }
             )
+        if any(name == "routed" for name, _strategy in self.strategies):  # registered only when the routed strategy is configured
+            self.counters.update({"routed_solved": 0, "routed_zero_shot": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
 
@@ -253,7 +255,7 @@ class Orchestrator:
             key = self._admit_result(result, task, depth, decompose_op=None)
             self.counters["accepts"] += 1
             self._record(Attempt(task=name, depth=depth, outcome="evolved", metric=result.metric, generations=result.generations_used, library_key=key, strategy=result.strategy))
-            return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric)
+            return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
 
         if depth < self.max_depth:
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
@@ -391,7 +393,7 @@ class Orchestrator:
                 refine_generations=result.generations_used,
             )
         )
-        return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric), result.generations_used
+        return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric), result.generations_used
 
     def _effective_refine_budget(self, entry: LibraryEntry) -> int:
         summary = self.library.summary(entry.key) or {}
@@ -542,7 +544,7 @@ class Orchestrator:
                 strategy=result.strategy,
             )
             self._record(attempt)
-            return Solution(key=key, entry_type=COMPOSITION if result.champion_comp is not None else MODULE, metric=result.metric)
+            return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
         # Every part solved but the wired parent still missed the bar.
         self.counters["decompose_parent_failed"] += 1
         self._failure_stage = "parent_re_evolve"
@@ -582,8 +584,22 @@ class Orchestrator:
             logger.info("retired library entry %s (%s)", retired_key, decision.reason)
         return self.library.add(entry_type=entry_type, payload=payload, io=io, provenance=provenance, level=level)
 
+    @staticmethod
+    def _entry_type_of(result: StrategyResult) -> str:
+        """The entry-type label for a strategy winner's Solution (keeps the ledger truthful)."""
+        if result.champion_routed is not None:
+            return "routed"
+        return COMPOSITION if result.champion_comp is not None else MODULE
+
     def _admit_result(self, result: StrategyResult, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Route a strategy winner to the right admission shape."""
+        if result.champion_routed is not None:
+            # A routed win is solved-but-not-shelved (Solution.key = None): its executable state is
+            # the persisted router, not a library payload. Distillation to a composition is future scope.
+            self.counters["routed_solved"] += 1
+            if getattr(result.champion_routed, "zero_shot", False):
+                self.counters["routed_zero_shot"] += 1
+            return None
         if result.champion_comp is not None:
             return self._admit(result.champion_comp, task, depth, decompose_op)
         if result.champion_genome is not None:

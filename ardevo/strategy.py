@@ -55,6 +55,9 @@ class StrategyResult:
     champion_comp: AssessedComposition | None = None  # composition-shaped winner (verified fresh)
     champion_genome: Genome | None = None  # module-shaped winner (trained weights written back)
     champion_metrics: dict[str, float] = field(default_factory=dict)
+    # A routed winner is a RECORD (ardevo.routing.RoutedSolution), not an admissible payload: the
+    # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
+    champion_routed: Any | None = None
 
 
 @EVOLVE_STRATEGY.register("composition")
@@ -219,6 +222,14 @@ class DirectStrategy:
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
         )
+
+
+@EVOLVE_STRATEGY.register("routed")
+def _build_routed(config: dict[str, Any]) -> Any:
+    # Lazy import (the train.py pattern): routing pulls in torch-heavy machinery only when configured.
+    from ardevo.routing import build_routed_strategy
+
+    return build_routed_strategy(config)
 
 
 def build_strategies(config: dict[str, Any]) -> list[tuple[str, Callable[..., StrategyResult]]]:
