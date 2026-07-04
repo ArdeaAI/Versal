@@ -1,5 +1,5 @@
 {
-  "key": "m1_013795cc7e95",
+  "key": "m1_381eb330cd97",
   "entry_type": "module",
   "level": 1,
   "io": {
@@ -84,7 +84,7 @@
       {
         "in": 0,
         "out": 5,
-        "weight": 0.3598251938819885,
+        "weight": 0.8964728116989136,
         "enabled": true,
         "innovation": 0,
         "recurrent": false
@@ -92,7 +92,7 @@
       {
         "in": 0,
         "out": 6,
-        "weight": 0.14203210175037384,
+        "weight": -0.28791239857673645,
         "enabled": true,
         "innovation": 1,
         "recurrent": false
@@ -100,7 +100,7 @@
       {
         "in": 0,
         "out": 7,
-        "weight": 0.052014872431755066,
+        "weight": 0.5312348008155823,
         "enabled": true,
         "innovation": 2,
         "recurrent": false
@@ -108,7 +108,7 @@
       {
         "in": 0,
         "out": 8,
-        "weight": 0.009311500936746597,
+        "weight": -0.3422037661075592,
         "enabled": true,
         "innovation": 3,
         "recurrent": false
@@ -116,7 +116,7 @@
       {
         "in": 1,
         "out": 5,
-        "weight": 0.44277116656303406,
+        "weight": 0.440841406583786,
         "enabled": true,
         "innovation": 4,
         "recurrent": false
@@ -124,7 +124,7 @@
       {
         "in": 1,
         "out": 6,
-        "weight": 1.1108449697494507,
+        "weight": 1.1647511720657349,
         "enabled": true,
         "innovation": 5,
         "recurrent": false
@@ -132,7 +132,7 @@
       {
         "in": 1,
         "out": 7,
-        "weight": 0.5741236805915833,
+        "weight": 0.3565945029258728,
         "enabled": true,
         "innovation": 6,
         "recurrent": false
@@ -140,7 +140,7 @@
       {
         "in": 1,
         "out": 8,
-        "weight": -0.010976575314998627,
+        "weight": -0.59059739112854,
         "enabled": true,
         "innovation": 7,
         "recurrent": false
@@ -148,7 +148,7 @@
       {
         "in": 2,
         "out": 5,
-        "weight": -0.29341593384742737,
+        "weight": -0.4851248264312744,
         "enabled": true,
         "innovation": 8,
         "recurrent": false
@@ -156,7 +156,7 @@
       {
         "in": 2,
         "out": 6,
-        "weight": -0.4583036005496979,
+        "weight": -0.03733646869659424,
         "enabled": true,
         "innovation": 9,
         "recurrent": false
@@ -164,7 +164,7 @@
       {
         "in": 2,
         "out": 7,
-        "weight": -0.4259771704673767,
+        "weight": 0.1538083702325821,
         "enabled": true,
         "innovation": 10,
         "recurrent": false
@@ -172,7 +172,7 @@
       {
         "in": 2,
         "out": 8,
-        "weight": 0.07389111071825027,
+        "weight": -0.15316452085971832,
         "enabled": true,
         "innovation": 11,
         "recurrent": false
@@ -180,7 +180,7 @@
       {
         "in": 3,
         "out": 5,
-        "weight": 0.5197853446006775,
+        "weight": 0.5153501629829407,
         "enabled": true,
         "innovation": 12,
         "recurrent": false
@@ -188,7 +188,7 @@
       {
         "in": 3,
         "out": 6,
-        "weight": 0.03607683628797531,
+        "weight": 0.18663617968559265,
         "enabled": true,
         "innovation": 13,
         "recurrent": false
@@ -196,7 +196,7 @@
       {
         "in": 3,
         "out": 7,
-        "weight": 0.6067953705787659,
+        "weight": 0.6395012140274048,
         "enabled": true,
         "innovation": 14,
         "recurrent": false
@@ -204,7 +204,7 @@
       {
         "in": 3,
         "out": 8,
-        "weight": 1.0046485662460327,
+        "weight": -0.11941395699977875,
         "enabled": true,
         "innovation": 15,
         "recurrent": false
@@ -212,7 +212,7 @@
       {
         "in": 4,
         "out": 5,
-        "weight": -0.008605838753283024,
+        "weight": -0.18763095140457153,
         "enabled": true,
         "innovation": 16,
         "recurrent": false
@@ -220,7 +220,7 @@
       {
         "in": 4,
         "out": 6,
-        "weight": 0.08112911134958267,
+        "weight": -0.011043570935726166,
         "enabled": true,
         "innovation": 17,
         "recurrent": false
@@ -228,7 +228,7 @@
       {
         "in": 4,
         "out": 7,
-        "weight": 0.09505672007799149,
+        "weight": -0.34601685404777527,
         "enabled": true,
         "innovation": 18,
         "recurrent": false
@@ -236,7 +236,7 @@
       {
         "in": 4,
         "out": 8,
-        "weight": -0.037486687302589417,
+        "weight": 1.1103781461715698,
         "enabled": true,
         "innovation": 19,
         "recurrent": false
@@ -247,7 +247,7 @@
   },
   "weights_frozen": true,
   "provenance": {
-    "task": "pole.b36",
+    "task": "pole.b34",
     "rung": 4,
     "depth": 0,
     "strategy": "direct",

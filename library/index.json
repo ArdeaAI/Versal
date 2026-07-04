@@ -1,35 +1,6 @@
 [
   {
-    "key": "c2_0ab5783bd22c",
-    "entry_type": "composition",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.6666666865348816,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "m2",
-      "L2"
-    ],
-    "stats": {
-      "use_count": 2584,
-      "max_attributed_fitness": 3.1476923191547392
-    }
-  },
-  {
-    "key": "c3_2a1ca258d4f9",
+    "key": "c3_25fda4f454fa",
     "entry_type": "composition",
     "level": 3,
     "io": {
@@ -45,7 +16,7 @@
       }
     },
     "accepted_metric": 1.0,
-    "weight_robustness": 0.6153846383094788,
+    "weight_robustness": 0.4727807065512024,
     "retired": false,
     "dependency": false,
     "behavior": [
@@ -53,157 +24,12 @@
       "L3"
     ],
     "stats": {
-      "use_count": 2131,
-      "max_attributed_fitness": 3.242040447187786
+      "use_count": 73,
+      "max_attributed_fitness": 3.132437660588616
     }
   },
   {
-    "key": "c3_411956eebf41",
-    "entry_type": "composition",
-    "level": 3,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.4615384638309479,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "m1",
-      "L3"
-    ],
-    "stats": {
-      "use_count": 2648,
-      "max_attributed_fitness": 3.2020911169696484
-    }
-  },
-  {
-    "key": "c4_20d56ce213a5",
-    "entry_type": "composition",
-    "level": 4,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.6153846383094788,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "m1",
-      "L4"
-    ],
-    "stats": {
-      "use_count": 1603,
-      "max_attributed_fitness": 3.0519584071027
-    }
-  },
-  {
-    "key": "c4_663fe112a72a",
-    "entry_type": "composition",
-    "level": 4,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.692307710647583,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "m2",
-      "L4"
-    ],
-    "stats": {
-      "use_count": 1832,
-      "max_attributed_fitness": 3.144044331116356
-    }
-  },
-  {
-    "key": "c4_d3ee58095874",
-    "entry_type": "composition",
-    "level": 4,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.692307710647583,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "m1",
-      "L4"
-    ],
-    "stats": {
-      "use_count": 862,
-      "max_attributed_fitness": 2.984998495008572
-    }
-  },
-  {
-    "key": "c4_e42e16a12bb8",
-    "entry_type": "composition",
-    "level": 4,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.5384615659713745,
-    "retired": true,
-    "dependency": false,
-    "behavior": [
-      "m1",
-      "L4"
-    ],
-    "stats": {
-      "use_count": 549,
-      "max_attributed_fitness": 3.0786685150205915
-    }
-  },
-  {
-    "key": "m1_013795cc7e95",
+    "key": "m1_381eb330cd97",
     "entry_type": "module",
     "level": 1,
     "io": {
@@ -235,7 +61,41 @@
     }
   },
   {
-    "key": "m1_46b89b1c2394",
+    "key": "m1_548a5f1fd4a2",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_619c08623617",
     "entry_type": "module",
     "level": 1,
     "io": {
@@ -251,66 +111,34 @@
       }
     },
     "accepted_metric": 1.0,
-    "weight_robustness": 0.6666666865348816,
+    "weight_robustness": 0.4727807065512024,
     "retired": false,
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2931,
-      "max_attributed_fitness": 3.1221540839848565
+      "use_count": 76,
+      "max_attributed_fitness": 3.2267316551022898
     }
   },
   {
-    "key": "m1_9fe99ce9f177",
-    "entry_type": "module",
-    "level": 1,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.4727807065512024,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "h0",
-      "ff",
-      "single",
-      "sum",
-      "flat"
-    ],
-    "stats": {
-      "use_count": 1072,
-      "max_attributed_fitness": 3.130224252482189
-    }
-  },
-  {
-    "key": "m1_acb1060852c7",
+    "key": "m1_712bbdfa1c2c",
     "entry_type": "module",
     "level": 1,
     "io": {
       "inputs": [
         {
           "signature": "CONTINUOUS|C,T",
-          "width": 32
+          "width": 24
         }
       ],
       "output": {
         "signature": "CONTINUOUS|C",
-        "width": 4
+        "width": 3
       }
     },
-    "accepted_metric": 0.9750000238418579,
+    "accepted_metric": 1.0,
     "weight_robustness": 0.0,
-    "retired": false,
+    "retired": true,
     "dependency": false,
     "behavior": [
       "h0",
@@ -321,11 +149,47 @@
     ],
     "stats": {
       "use_count": 0,
-      "max_attributed_fitness": 0.0
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
     }
   },
   {
-    "key": "m1_adf47e7bd116",
+    "key": "m1_a8d9450d9007",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_f7be685d57d4",
     "entry_type": "module",
     "level": 1,
     "io": {
@@ -357,39 +221,7 @@
     }
   },
   {
-    "key": "m1_f64d7961ab56",
-    "entry_type": "module",
-    "level": 1,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 2
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.3651638342708421,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "h0",
-      "ff",
-      "single",
-      "sum",
-      "flat"
-    ],
-    "stats": {
-      "use_count": 3400,
-      "max_attributed_fitness": 3.1641777985515627
-    }
-  },
-  {
-    "key": "m2_4ef5f5fa65fa",
+    "key": "m2_95b2b0f9a3fe",
     "entry_type": "module",
     "level": 2,
     "io": {
@@ -405,97 +237,13 @@
       }
     },
     "accepted_metric": 1.0,
-    "weight_robustness": 0.6153846383094788,
+    "weight_robustness": 0.4727807065512024,
     "retired": false,
     "dependency": true,
     "behavior": [],
     "stats": {
-      "use_count": 2616,
-      "max_attributed_fitness": 3.1474238354326087
-    }
-  },
-  {
-    "key": "m2_f5d185abe3ab",
-    "entry_type": "module",
-    "level": 2,
-    "io": {
-      "inputs": [
-        {
-          "signature": "ANY",
-          "width": 4
-        }
-      ],
-      "output": {
-        "signature": "ANY",
-        "width": 2
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.4615384638309479,
-    "retired": false,
-    "dependency": true,
-    "behavior": [],
-    "stats": {
-      "use_count": 2859,
-      "max_attributed_fitness": 3.1374752058946447
-    }
-  },
-  {
-    "key": "m3_03da3064d6fc",
-    "entry_type": "module",
-    "level": 3,
-    "io": {
-      "inputs": [
-        {
-          "signature": "ANY",
-          "width": 4
-        }
-      ],
-      "output": {
-        "signature": "ANY",
-        "width": 2
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.692307710647583,
-    "retired": false,
-    "dependency": true,
-    "behavior": [],
-    "stats": {
-      "use_count": 2101,
-      "max_attributed_fitness": 3.2276415587934615
-    }
-  },
-  {
-    "key": "m3_07b1f2da7dfa",
-    "entry_type": "module",
-    "level": 3,
-    "io": {
-      "inputs": [
-        {
-          "signature": "BINARY|C",
-          "width": 8
-        }
-      ],
-      "output": {
-        "signature": "BINARY|C",
-        "width": 1
-      }
-    },
-    "accepted_metric": 1.0,
-    "weight_robustness": 0.5384615659713745,
-    "retired": false,
-    "dependency": false,
-    "behavior": [
-      "h1",
-      "rec",
-      "single",
-      "sum",
-      "macro"
-    ],
-    "stats": {
-      "use_count": 2268,
-      "max_attributed_fitness": 3.209332115177132
+      "use_count": 72,
+      "max_attributed_fitness": 3.1516896751930004
     }
   }
 ]

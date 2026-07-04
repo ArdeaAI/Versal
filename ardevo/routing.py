@@ -389,13 +389,16 @@ class RouterService:
         edge_bias: bool = False,
         persist_dir: Path | None = None,
         persist_strict: bool = False,
+        image_dir: Path | None = None,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
         self.persist_strict = persist_strict
+        self.image_dir = image_dir  # <library_dir>/images; where overmind.png lands
         self.adapter_rank = adapter_rank
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
+        self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
         self.net = RoutedNet(
             d_model=d_model,
             top_k=top_k,
@@ -411,7 +414,43 @@ class RouterService:
             self._load(persist_dir)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
-        return self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal)
+        added = self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal)
+        if added:
+            self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
+        return added
+
+    def render_overmind(self) -> None:
+        """Draw the WHOLE routed model (every expert embedded, wired to the shared bus) to
+        <library_dir>/images/overmind.png. Refreshed on structural growth; never raises, so a bad
+        render can no more kill a run than a library-entry render can."""
+        if self.image_dir is None:
+            return
+        live = len(self.net._vertex_order)
+        if live == self._rendered_vertex_count:
+            return
+        try:
+            from ardevo.rendering import OvermindVertex, OvermindView, render_overmind
+
+            vertices = [
+                OvermindVertex(
+                    key=vertex.original_key,
+                    label=f"{vertex.original_key}  ({self.net.last_gate_stats.get(name, 0.0):.0%})" + ("  retired" if name in self.net._retired else ""),
+                    retired=name in self.net._retired,
+                )
+                for name, vertex in ((name, self.net._vertices[name]) for name in self.net._vertex_order)
+            ]
+            view = OvermindView(
+                vertices=vertices,
+                input_signatures=list(self.net.input_adapter_widths),
+                output_signatures=list(self.net.output_head_widths),
+                d_model=self.net.d_model,
+                top_k=self.net.top_k,
+                max_steps=self.net.max_steps,
+            )
+            render_overmind(self.image_dir / "overmind.png", view, library=self.library)
+            self._rendered_vertex_count = live
+        except Exception as error:  # a render must never break a run
+            logger.debug("overmind render skipped: %s", error)
 
     def record_task(self, row: dict[str, Any]) -> None:
         self.train_history.append(row)
@@ -534,6 +573,7 @@ class RoutedStrategy:
                 edge_bias=self.edge_bias,
                 persist_dir=(Path(self.library_dir) / "router") if self.persist else None,
                 persist_strict=self.persist_strict,
+                image_dir=Path(self.library_dir) / "images",  # overmind.png lands beside the entry renders
             )
         return self.service
 

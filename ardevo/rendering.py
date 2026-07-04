@@ -624,3 +624,83 @@ def render_library_gallery(library: ModuleLibrary, out_path: Path, *, columns: i
     figure.savefig(out_path, dpi=150, facecolor=figure.get_facecolor())
     plt.close(figure)
     return out_path
+
+
+# --- overmind: the whole routed model in one frame -------------------------------------------------
+
+
+@dataclass(slots=True)
+class OvermindVertex:
+    """A read-only view of one routed-model expert, so rendering stays decoupled from `routing.py`."""
+
+    key: str  # the library key (or "" for a synthetic vertex); resolved to its embedded network
+    label: str  # display label (usage share, retired marker, ...)
+    retired: bool = False
+
+
+@dataclass(slots=True)
+class OvermindView:
+    """Everything the overmind render needs about a routed model, as plain data. `routing.py` builds
+    this from a live `RoutedNet`; the renderer never imports the router."""
+
+    vertices: list[OvermindVertex]
+    input_signatures: list[str]  # one per input adapter (e.g. "BINARY|K:2")
+    output_signatures: list[str]  # one per output head
+    d_model: int
+    top_k: int
+    max_steps: int
+
+
+def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> RenderSpec:
+    """The whole routed model in one spec: the shared bus (input adapters -> gate -> output heads)
+    is the HOST network, and every expert is a fully-embedded CALLOUT wired to the gate, reusing the
+    exact recursion that draws a composition's referenced modules. Growth just adds callouts.
+
+    Never raises: an unresolvable/oversized expert degrades to a labeled opaque box, like everywhere."""
+    spec = RenderSpec()
+    # The bus host: input-adapter nodes (left), the gate hub (center), output-head nodes (right),
+    # laid out as three columns in the shared frame, wired input -> gate -> output.
+    inputs = view.input_signatures or ["(no input adapter yet)"]
+    outputs = view.output_signatures or ["(no output head yet)"]
+    column_gap = 3.0 + _H_GAP
+    host_height = max(len(inputs), len(outputs), 1) * (1.0 + _V_GAP)
+    gate_pos = (column_gap, host_height / 2)
+
+    def _column(signatures: list[str], x: float, color: str, marker: str) -> list[tuple[float, float]]:
+        total = len(signatures) + _V_GAP * (len(signatures) - 1)
+        cursor = host_height / 2 + total / 2 - 0.5
+        placed: list[tuple[float, float]] = []
+        for _signature in signatures:
+            spec.nodes.append(SpecNode(x, cursor, color=color, size=1.4, marker=marker))
+            placed.append((x, cursor))
+            cursor -= 1.0 + _V_GAP
+        return placed
+
+    input_positions = _column(inputs, 0.0, THEME["node_input"], "s")
+    output_positions = _column(outputs, 2 * column_gap, THEME["node_output"], "s")
+    spec.nodes.append(SpecNode(gate_pos[0], gate_pos[1], color=THEME["node_module"], size=2.2, marker="D"))  # the gate hub
+    for position in input_positions:
+        spec.edges.append(SpecEdge(position[0], position[1], gate_pos[0], gate_pos[1], width=1.4, color=THEME["edge_glue"], alpha=0.6))
+    for position in output_positions:
+        spec.edges.append(SpecEdge(gate_pos[0], gate_pos[1], position[0], position[1], width=1.4, color=THEME["edge_glue"], alpha=0.6))
+    host_width = 2 * column_gap
+
+    budget = _Budget(node_budget)
+    callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
+    for vertex in view.vertices:
+        child = _build_ref(f"library:{vertex.key}", resolve=resolve, budget=budget, depth=0, stack=()) if vertex.key else _opaque_built(vertex.label)
+        child.label = vertex.label
+        child.opaque = child.opaque or vertex.retired  # retired experts read as opaque footprints
+        callouts.append((child, [gate_pos]))
+    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth=1)
+    return spec
+
+
+def render_overmind(out_path: Path, view: OvermindView, *, library: ModuleLibrary | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> Path:
+    """Render the entire routed model (every expert embedded, wired to the shared bus) to one PNG.
+    Intended for `<library_dir>/images/overmind.png`, refreshed whenever the model grows."""
+    resolve = library_resolver(library) if library is not None else None
+    spec = build_overmind_spec(view, resolve=resolve, node_budget=node_budget)
+    live = sum(1 for vertex in view.vertices if not vertex.retired)
+    title = f"overmind: {live} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
+    return _render_spec_png(out_path, spec, title)

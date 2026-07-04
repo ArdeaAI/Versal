@@ -224,6 +224,41 @@ def test_edge_bias_params_are_per_vertex_and_growth_stays_append_only(tmp_path: 
     assert all(torch.equal(before[key], after[key]) for key in before)  # a new vertex never resizes old rows
 
 
+def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    torch.manual_seed(0)
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    image_dir = tmp_path / "lib" / "images"
+    service = RouterService(library, d_model=16, top_k=2, max_steps=2, persist_dir=tmp_path / "lib" / "router", image_dir=image_dir)
+    service.sync()  # one vertex -> first render
+    overmind = image_dir / "overmind.png"
+    assert overmind.exists()
+    first_mtime = overmind.stat().st_mtime_ns
+    # A new library entry is a "significant addition": the portrait refreshes.
+    library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    assert service.sync() == 1
+    assert overmind.stat().st_mtime_ns >= first_mtime  # rewritten on growth
+
+
+def test_build_overmind_spec_embeds_experts_and_degrades(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec, library_resolver
+
+    library = _seed_library(tmp_path, xor_task, solving_genome, with_composition=True)
+    keys = library.keys()
+    view = OvermindView(
+        vertices=[OvermindVertex(key=keys[0], label=keys[0]), OvermindVertex(key="does_not_exist", label="ghost"), OvermindVertex(key=keys[1], label=keys[1], retired=True)],
+        input_signatures=["BINARY|K:2"],
+        output_signatures=["BINARY|K:1"],
+        d_model=16,
+        top_k=2,
+        max_steps=3,
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library))
+    # Bus host contributes input + gate + output nodes; the real expert embeds its own network too.
+    assert spec.node_count > 3
+    labels = [box.label for box in spec.containers]
+    assert any("ghost" in label for label in labels)  # a missing key degrades to a labeled opaque box, never raises
+
+
 def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable_task: Task, solving_genome: Genome) -> None:
     """The Stage A risk experiment: are frozen experts contributing signal the adapters alone
     cannot ("adapter bypass")? Runs the identical router with real vs zeroed experts, same seed and
