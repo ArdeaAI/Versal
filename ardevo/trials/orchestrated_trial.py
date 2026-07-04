@@ -69,6 +69,11 @@ class OrchestratedTrial(Proctor):
         self.skipped_rungs = report.skipped
         for skipped in self.skipped_rungs:
             console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
+        if self.skipped_rungs and bool(schedule_cfg.get("require_all_rungs", False)):
+            # NO SKIPPING: the ladder is climbed whole or the run refuses to start. Silent rung
+            # tolerance is how a wall stops being attempted without anyone deciding that.
+            reasons = "; ".join(f"rung {s.rung}: {s.error_type}: {s.message}" for s in self.skipped_rungs)
+            raise RuntimeError(f"require_all_rungs: {len(self.skipped_rungs)} rung(s) failed to load ({reasons}); probe with `uv run rung_doctor`")
         if not self.pool:
             reasons = "; ".join(f"rung {s.rung}: {s.error_type}" for s in self.skipped_rungs) or "no rungs configured"
             raise RuntimeError(f"no tasks found for rungs {self.rungs} in {config['dataset']!r} ({reasons})")
@@ -87,6 +92,8 @@ class OrchestratedTrial(Proctor):
         self.scheduler = build_schedule(schedule_cfg)
         self.resume_dir = config.get("resume")
         self.run_dir = Path(results.DEFAULT_ROOT)
+        self.gc_enabled = bool(config.get("library", {}).get("gc", False))
+        self.gc_removed: list[str] | None = None  # set by the run-end sweep, reported in run_summary
 
     def run(self) -> dict[str, Any]:
         if self.resume_dir:
@@ -140,6 +147,8 @@ class OrchestratedTrial(Proctor):
             raise
 
         self._persist_resume_state(orchestrator, state, task_cursor)
+        if self.gc_enabled:
+            self._run_gc(state)
         self._write_run_summary(orchestrator, state, task_cursor, status="done")
         self.results = {
             "tasks_attempted": task_cursor,
@@ -152,6 +161,29 @@ class OrchestratedTrial(Proctor):
         console.print(f"[bold green]Done[/bold green]: {task_cursor} tasks, library {len(self.library)} entries, counters {orchestrator.counters}")
         self.finalize()
         return self.results
+
+    def _run_gc(self, state: HierarchicalState) -> None:
+        """Run-end sweep of unreferenced tombstones ([library] gc = true). Rooted in the LIVE state:
+        macro refs inside the pooled/champion genomes are protected because the final checkpoint
+        just serialized exactly those, so resuming this run can never dangle. Dead router vertices
+        are pruned (tolerant reload + save) after the sweep."""
+        from ardevo.evolution.genome import genome_to_dict
+        from ardevo.library import payload_refs
+
+        protect: set[str] = set()
+        for module in state.modules:
+            protect |= payload_refs(MODULE, genome_to_dict(module.genome))
+        for genome in state.species_champions.values():
+            protect |= payload_refs(MODULE, genome_to_dict(genome))
+        self.gc_removed = self.library.collect_garbage(protect=protect)
+        router_dir = Path(self.library.root) / "router"
+        if self.gc_removed and (router_dir / "router_meta.json").exists():
+            from ardevo.tools.library_gc import prune_router
+
+            pruned = prune_router(self.library, router_dir)
+            console.print(f"[dim]gc: removed {len(self.gc_removed)} tombstones, pruned {pruned} router vertices[/dim]")
+        elif self.gc_removed:
+            console.print(f"[dim]gc: removed {len(self.gc_removed)} tombstones[/dim]")
 
     def _restore(self) -> tuple[HierarchicalState, int, list[Any], dict[str, int]]:
         # Prefer the rolling run-root checkpoint (written EVERY task, so it is the true latest
@@ -217,6 +249,9 @@ class OrchestratedTrial(Proctor):
             "skipped_rungs": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
             "tasks": self.task_records,
         }
+        gc_removed = getattr(self, "gc_removed", None)  # tolerate partially-constructed trials (white-box tests)
+        if gc_removed is not None:
+            summary["gc_removed"] = len(gc_removed)
         (self.run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
 
     def _persist_resume_state(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:

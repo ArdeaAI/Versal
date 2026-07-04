@@ -634,3 +634,56 @@ def test_refine_compression_gain_spends_lineage_cooldown(tmp_path: Path, xor_tas
     )
     assert improved is None and generations == 0
     assert orchestrator.counters["refine_skipped_decayed"] == 1
+
+
+def _wall_table(**overrides) -> dict:
+    return {"wall": {"ledger": True, "min_metric": 0.4, "seed_top_k": 1, **overrides}, "max_depth": 0, "decompose": []}
+
+
+def test_wall_ledger_shelves_seeds_and_replaces(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """Failure leaves a trace: the best champion shelves as a below-bar dependency stone, the next
+    attempt on the signature warm-starts from it, and the stone only upgrades on a strict win."""
+    orchestrator = _orchestrator(tmp_path, table=_wall_table())
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, calls))]
+
+    assert orchestrator.solve(xor_task) is None  # below the 0.95 accept bar
+    stone_key = orchestrator.attempts[-1].library_key
+    assert stone_key is not None
+    stone = orchestrator.library.load(stone_key)
+    assert stone.provenance["stepping_stone"] is True and stone.provenance["accepted_metric"] == 0.6
+    stone_summary = orchestrator.library.summary(stone_key)
+    assert stone_summary is not None and stone_summary["dependency"] is True  # out of caps, out of signature_group
+    assert orchestrator.counters["wall_stones_admitted"] == 1
+    assert calls[0]["seed_entries"] is None  # nothing to seed from on the first assault
+
+    assert orchestrator.solve(xor_task) is None  # lookup misses (a stone never clears quick-eval)
+    assert calls[1]["seed_entries"] is not None and calls[1]["seed_entries"][0].key == stone_key
+    assert orchestrator.counters["wall_seeded_attempts"] == 1
+    # The identical champion (same fingerprint) must NOT mint a second stone.
+    assert orchestrator.counters["wall_stones_admitted"] == 1 and orchestrator.counters["wall_stones_improved"] == 0
+
+    better = genome_to_dict(solving_genome)
+    orchestrator.strategies = [("direct", _fake_direct(0.7, 0.2, genome_from_dict(better), calls))]  # strict metric win, new topology
+    assert orchestrator.solve(xor_task) is None
+    new_stone_key = orchestrator.attempts[-1].library_key
+    assert new_stone_key is not None and new_stone_key != stone_key
+    assert orchestrator.library.is_retired(stone_key)  # one stone per lineage
+    assert orchestrator.library.load(new_stone_key).provenance["refined_from"] == stone_key
+    assert orchestrator.counters["wall_stones_improved"] == 1
+
+
+def test_wall_ledger_below_min_metric_shelves_nothing(tmp_path: Path, xor_task: Task, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_wall_table(min_metric=0.65))
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, []))]
+    assert orchestrator.solve(xor_task) is None
+    assert orchestrator.attempts[-1].library_key is None
+    assert len(orchestrator.library) == 0 and orchestrator.counters["wall_stones_admitted"] == 0
+
+
+def test_wall_ledger_off_is_byte_identical(tmp_path: Path, xor_task: Task, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"max_depth": 0, "decompose": []})
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, []))]
+    assert orchestrator.solve(xor_task) is None
+    assert not any(name.startswith("wall") for name in orchestrator.counters)
+    assert len(orchestrator.library) == 0

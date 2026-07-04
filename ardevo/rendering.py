@@ -39,6 +39,7 @@ THEME: dict[str, Any] = {
     "edge_macro": "#bb9af7",
     "edge_glue": "#7dcfff",
     "edge_callout": "#6fd08c",
+    "edge_pathway": "#ff9e64",  # observed expert-to-expert routing traffic in the overmind
     "node_input": "#7aa2f7",
     "node_bias": "#566190",
     "node_output": "#f7768e",
@@ -210,12 +211,22 @@ def _place_child(spec: RenderSpec, child: _Built, center: tuple[float, float], d
     spec.containers.append(SpecContainer(cx - half_w - _PAD, cy - half_h - _PAD, cx + half_w + _PAD, cy + half_h + _PAD, label=child.label, depth=depth, opaque=child.opaque))
 
 
-def _attach_callouts(spec: RenderSpec, callouts: list[tuple[_Built, list[tuple[float, float]]]], host_width: float, host_height: float, depth: int) -> tuple[float, float]:
+def _attach_callouts(
+    spec: RenderSpec,
+    callouts: list[tuple[_Built, list[tuple[float, float]]]],
+    host_width: float,
+    host_height: float,
+    depth: int,
+    *,
+    edge_width: Callable[[int], float] | None = None,
+) -> tuple[float, float, list[tuple[float, float]]]:
     """Pack the expanded child boxes into rows across the TOP of the host frame and draw a green
     line from each box to the footprint nodes it occupies down in the host network. Returns the
-    combined (width, height) of host + callout band."""
+    combined (width, height) of host + callout band plus each box's CENTER in callout order, so a
+    caller can wire boxes to each other (the overmind's pathway edges). `edge_width` optionally
+    maps a callout index to its anchor-line width (usage-weighted gate wiring)."""
     if not callouts:
-        return host_width, host_height
+        return host_width, host_height, []
     boxes = [(child.spec.width + 2 * _PAD, child.spec.height + 2 * _PAD) for child, _ in callouts]
     available = max(host_width, max(box_w for box_w, _ in boxes))
 
@@ -236,6 +247,7 @@ def _attach_callouts(spec: RenderSpec, callouts: list[tuple[_Built, list[tuple[f
             rows[-1].append(index)
             cursor += advance
 
+    centers: list[tuple[float, float]] = [(0.0, 0.0)] * len(callouts)
     row_base = host_height + _CALLOUT_GAP
     for row in rows:
         row_height = max(boxes[i][1] for i in row)
@@ -245,13 +257,14 @@ def _attach_callouts(spec: RenderSpec, callouts: list[tuple[_Built, list[tuple[f
             box_w, box_h = boxes[i]
             child, anchors = callouts[i]
             cx, cy = x_cursor + box_w / 2, row_base + box_h / 2
+            centers[i] = (cx, cy)
             _place_child(spec, child, (cx, cy), depth)
             for anchor_x, anchor_y in anchors:
-                spec.edges.append(SpecEdge(cx, row_base, anchor_x, anchor_y, width=1.0, color=THEME["edge_callout"], alpha=0.55))
+                spec.edges.append(SpecEdge(cx, row_base, anchor_x, anchor_y, width=edge_width(i) if edge_width else 1.0, color=THEME["edge_callout"], alpha=0.55))
             x_cursor += box_w + _H_GAP
         row_base += row_height + _V_GAP
 
-    return available, row_base - _V_GAP
+    return available, row_base - _V_GAP, centers
 
 
 def _build_ref(ref: str, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
@@ -374,7 +387,7 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
         child = _build_ref(macro.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
         anchors = [positions[stub_id] for stub_id in macro.output_node_ids if stub_id in positions]
         callouts.append((child, anchors))
-    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
+    spec.width, spec.height, _centers = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
     return _Built(spec=spec)
 
 
@@ -429,7 +442,7 @@ def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _
         if node.kind is CompNodeKind.MODULE:
             child = _build_ref(node.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
             callouts.append((child, [positions[node.id]]))
-    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
+    spec.width, spec.height, _centers = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
     return _Built(spec=spec)
 
 
@@ -636,6 +649,7 @@ class OvermindVertex:
     key: str  # the library key (or "" for a synthetic vertex); resolved to its embedded network
     label: str  # display label (usage share, retired marker, ...)
     retired: bool = False
+    usage: float = 0.0  # lifetime gate-mass share in [0, 1]; scales the gate wiring width
 
 
 @dataclass(slots=True)
@@ -649,6 +663,10 @@ class OvermindView:
     d_model: int
     top_k: int
     max_steps: int
+    # REAL routing paths: directed (source_index, target_index, weight in [0, 1]) between vertices,
+    # from observed step-to-step traffic (or the edge_bias prior as a fallback). Drawn as curved
+    # weighted edges between the expert boxes.
+    pathways: list[tuple[int, int, float]] = field(default_factory=list)
 
 
 def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> RenderSpec:
@@ -692,7 +710,21 @@ def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None,
         child.label = vertex.label
         child.opaque = child.opaque or vertex.retired  # retired experts read as opaque footprints
         callouts.append((child, [gate_pos]))
-    spec.width, spec.height = _attach_callouts(spec, callouts, host_width, host_height, depth=1)
+
+    def gate_wire_width(index: int) -> float:
+        return _edge_width(view.vertices[index].usage * 3)  # lifetime traffic share, not uniform wiring
+
+    spec.width, spec.height, centers = _attach_callouts(spec, callouts, host_width, host_height, depth=1, edge_width=gate_wire_width)
+    # THE ROUTING PATHS: curved weighted edges between expert boxes, from observed traffic (or the
+    # edge_bias prior). Retired vertices carry no pathways. This whole-graph portrait is for the
+    # current scale; at thousands of vertices this becomes a density-map problem, not more edges.
+    for source, target, weight in view.pathways:
+        if not (0 <= source < len(centers) and 0 <= target < len(centers)) or source == target:
+            continue
+        if view.vertices[source].retired or view.vertices[target].retired:
+            continue
+        (x0, y0), (x1, y1) = centers[source], centers[target]
+        spec.edges.append(SpecEdge(x0, y0, x1, y1, width=_edge_width(weight * 3), color=THEME["edge_pathway"], curve=0.25, alpha=0.25 + 0.6 * min(weight, 1.0)))
     return spec
 
 

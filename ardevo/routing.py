@@ -430,6 +430,11 @@ class RouterService:
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
         # only (a cross-run newcomer just gets the mean+noise init, which is fine).
         self.pending_embeddings: dict[str, torch.Tensor] = {}
+        # Lifetime routing TRAFFIC (persisted in meta): summed gate mass per vertex and observed
+        # step-to-step co-firing between vertices. This is what makes the overmind's pathway edges
+        # REAL observed routing, not just the learned prior, and it survives offline renders.
+        self.usage_totals: dict[str, float] = {}
+        self.transition_totals: dict[str, dict[str, float]] = {}
         self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
         self.net = RoutedNet(
             d_model=d_model,
@@ -454,6 +459,85 @@ class RouterService:
     def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
         self.pending_embeddings[fingerprint] = embedding.detach().clone()
 
+    def record_traffic(self) -> None:
+        """Fold the LAST route()'s gate decisions into the lifetime traffic ledgers: per-vertex gate
+        mass (usage_totals) and consecutive-step co-firing (transition_totals, directed). Called once
+        per routed task after its final evaluation, so the ledgers reflect what the router actually
+        did, batch-averaged, across its whole life."""
+        net = self.net
+        if not net.last_selections:
+            return
+        live_names = [name for name in net._vertex_order if name not in net._retired]
+        if not live_names:
+            return
+        step_weights: list[torch.Tensor] = []
+        for selections, probs in zip(net.last_selections, net.last_probs):
+            weights = torch.zeros(len(live_names)).scatter_add_(0, selections.reshape(-1), probs.reshape(-1).to(torch.float32)) / selections.shape[0]
+            step_weights.append(weights)
+        for weights in step_weights:
+            for name, weight in zip(live_names, weights.tolist()):
+                if weight > 1e-4:
+                    self.usage_totals[name] = self.usage_totals.get(name, 0.0) + weight
+        for earlier, later in zip(step_weights, step_weights[1:]):
+            for source, source_weight in zip(live_names, earlier.tolist()):
+                if source_weight <= 1e-3:
+                    continue
+                row = self.transition_totals.setdefault(source, {})
+                for target, target_weight in zip(live_names, later.tolist()):
+                    if target_weight <= 1e-3:
+                        continue
+                    row[target] = row.get(target, 0.0) + source_weight * target_weight
+
+    def _pathways(self, ordered_names: list[str], *, per_vertex: int = 3, floor: float = 1e-3) -> list[tuple[int, int, float]]:
+        """Directed (source, target, weight) pathway edges over `ordered_names` indices: observed
+        transition traffic when any exists, else the edge_bias prior (positive entries only), both
+        normalized so the strongest edge is 1.0. Capped per source vertex to stay readable."""
+        index_of = {name: index for index, name in enumerate(ordered_names)}
+        raw: dict[tuple[int, int], float] = {}
+        if self.transition_totals:
+            for source, row in self.transition_totals.items():
+                if source not in index_of:
+                    continue
+                for target, weight in row.items():
+                    if target in index_of and weight > 0.0:
+                        raw[(index_of[source], index_of[target])] = weight
+        elif self.net.edge_bias and len(self.net.vertex_edge_out) > 0:
+            with torch.no_grad():
+                for source in ordered_names:
+                    if source not in self.net.vertex_edge_out:
+                        continue
+                    for target in ordered_names:
+                        if target not in self.net.vertex_edge_in:
+                            continue
+                        bias = float(self.net.vertex_edge_out[source] @ self.net.vertex_edge_in[target])
+                        if bias > 0.0:
+                            raw[(index_of[source], index_of[target])] = bias
+        if not raw:
+            return []
+        peak = max(raw.values())
+        by_source: dict[int, list[tuple[int, int, float]]] = {}
+        for (source, target), weight in raw.items():
+            normalized = weight / peak
+            if normalized >= floor:
+                by_source.setdefault(source, []).append((source, target, normalized))
+        pathways: list[tuple[int, int, float]] = []
+        for edges in by_source.values():
+            pathways.extend(sorted(edges, key=lambda edge: -edge[2])[:per_vertex])
+        return pathways
+
+    def _embedding_order(self) -> list[str]:
+        """Vertex names ordered by the 1D principal projection of their gate embeddings, so experts
+        the gate treats as similar sit ADJACENT in the portrait (the latent locality made visible)."""
+        names = list(self.net._vertex_order)
+        if len(names) < 3:
+            return names
+        with torch.no_grad():
+            stacked = torch.stack([self.net.vertex_embeddings[name].detach() for name in names])
+            centered = stacked - stacked.mean(dim=0)
+            _u, _s, v = torch.linalg.svd(centered, full_matrices=False)
+            projection = (centered @ v[0]).tolist()
+        return [name for _value, name in sorted(zip(projection, names), key=lambda pair: pair[0])]
+
     def render_overmind(self) -> None:
         """Draw the WHOLE routed model (every expert embedded, wired to the shared bus) to
         <library_dir>/images/overmind.png. Refreshed on structural growth; never raises, so a bad
@@ -466,14 +550,20 @@ class RouterService:
         try:
             from ardevo.rendering import OvermindVertex, OvermindView, render_overmind
 
-            vertices = [
-                OvermindVertex(
-                    key=vertex.original_key,
-                    label=f"{vertex.original_key}  ({self.net.last_gate_stats.get(name, 0.0):.0%})" + ("  retired" if name in self.net._retired else ""),
-                    retired=name in self.net._retired,
+            ordered_names = self._embedding_order()
+            total_usage = sum(self.usage_totals.values()) or 1.0
+            vertices = []
+            for name in ordered_names:
+                vertex = self.net._vertices[name]
+                share = self.usage_totals.get(name, 0.0) / total_usage
+                vertices.append(
+                    OvermindVertex(
+                        key=vertex.original_key,
+                        label=f"{vertex.original_key}  ({share:.0%})" + ("  retired" if name in self.net._retired else ""),
+                        retired=name in self.net._retired,
+                        usage=share,
+                    )
                 )
-                for name, vertex in ((name, self.net._vertices[name]) for name in self.net._vertex_order)
-            ]
             view = OvermindView(
                 vertices=vertices,
                 input_signatures=list(self.net.input_adapter_widths),
@@ -481,6 +571,7 @@ class RouterService:
                 d_model=self.net.d_model,
                 top_k=self.net.top_k,
                 max_steps=self.net.max_steps,
+                pathways=self._pathways(ordered_names),
             )
             render_overmind(self.image_dir / "overmind.png", view, library=self.library)
             self._rendered_vertex_count = live
@@ -495,6 +586,7 @@ class RouterService:
 
     def _meta(self) -> dict[str, Any]:
         vertex_keys = [self.net._vertices[name].original_key for name in self.net._vertex_order]
+        known = set(self.net._vertex_order)
         return {
             "format_version": ROUTER_FORMAT_VERSION,
             "d_model": self.net.d_model,
@@ -509,6 +601,9 @@ class RouterService:
             "input_adapter_keys": [{"key": key, "width": width} for key, width in self.net.input_adapter_widths.items()],
             "output_head_keys": [{"key": key, "width": width} for key, width in self.net.output_head_widths.items()],
             "train_history": self.train_history,
+            # Lifetime routing traffic, pruned to current vertices (a GC'd vertex takes its traffic with it).
+            "usage_totals": {name: value for name, value in self.usage_totals.items() if name in known},
+            "transition_totals": {source: {target: value for target, value in row.items() if target in known} for source, row in self.transition_totals.items() if source in known},
         }
 
     def save(self) -> None:
@@ -545,11 +640,23 @@ class RouterService:
             os.replace(directory, stale)
             return
         # Rebuild the skeleton exactly as saved (rows in order, lazy surfaces recreated), THEN load.
+        # TOLERANT of vanished vertices: a garbage-collected entry (tombstone physically deleted)
+        # simply drops out, taking its state rows and traffic with it; the next save() persists the
+        # pruned skeleton. Everything that DID survive still loads strict.
+        dropped: set[str] = set()
         for key in meta["vertex_keys"]:
-            entry = self.library.load(key)  # tombstoned entries still load: rows never dangle
+            sanitized = sanitize_key(key)
+            try:
+                entry = self.library.load(key)  # tombstoned entries still load unless GC removed them
+            except KeyError:
+                logger.warning("persisted router vertex %s no longer exists (garbage-collected); dropping its rows", key)
+                dropped.add(sanitized)
+                continue
             vertex = build_vertex(entry, self.library)
             if vertex is None:
-                raise ValueError(f"persisted router vertex {key!r} no longer decodes; state is unusable")
+                logger.warning("persisted router vertex %s no longer decodes; dropping its rows", key)
+                dropped.add(sanitized)
+                continue
             self.net.register_vertex(vertex)
         for item in meta["input_adapter_keys"]:
             self.net.input_adapters[item["key"]] = _bottleneck_linear(int(item["width"]), self.net.d_model, self.net.adapter_rank)
@@ -558,9 +665,18 @@ class RouterService:
             self.net.output_heads[item["key"]] = nn.Linear(self.net.d_model, int(item["width"]))
             self.net.output_head_widths[item["key"]] = int(item["width"])
             self.net.output_signature_embeddings[item["key"]] = nn.Parameter(torch.zeros(self.net.d_model))
-        self.net.load_state_dict(torch.load(directory / "router_state.pt", weights_only=True), strict=True)
+        state = torch.load(directory / "router_state.pt", weights_only=True)
+        if dropped:
+            vertex_dicts = ("vertex_embeddings", "vertex_in_adapters", "vertex_out_adapters", "vertex_edge_out", "vertex_edge_in")
+            state = {name: tensor for name, tensor in state.items() if not (name.split(".")[0] in vertex_dicts and name.split(".")[1] in dropped)}
+        self.net.load_state_dict(state, strict=True)
         self.version = int(meta.get("version", 0))
         self.train_history = list(meta.get("train_history", []))
+        known = set(self.net._vertex_order)
+        self.usage_totals = {name: float(value) for name, value in (meta.get("usage_totals") or {}).items() if name in known}
+        self.transition_totals = {
+            source: {target: float(value) for target, value in row.items() if target in known} for source, row in (meta.get("transition_totals") or {}).items() if source in known
+        }
         self.net.sync_with_library(self.library)  # append anything admitted since the last save
 
 
@@ -655,11 +771,13 @@ class RoutedStrategy:
         zero_shot_metrics = evaluate(view, spec.encoded, spec.encoder)
         zero_shot_metric = runtime.metric_of(self._metrics_view(zero_shot_metrics))
         if self.zero_shot_accept and zero_shot_metric >= runtime.accept_threshold:
+            service.record_traffic()  # once per task, from its final evaluation's gate decisions
             return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
         steps_used = self._train(view, spec, runtime)
         metrics = evaluate(view, spec.encoded, spec.encoder)
         metric = runtime.metric_of(self._metrics_view(metrics))
+        service.record_traffic()  # once per task, from its final evaluation's gate decisions
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
         if metric >= runtime.accept_threshold:

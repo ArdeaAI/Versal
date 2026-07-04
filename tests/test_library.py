@@ -286,3 +286,66 @@ def test_structural_fingerprint_composition_ignores_glue_values() -> None:
     disabled["edges"][0]["enabled"] = False
     assert structural_fingerprint(COMPOSITION, baseline) == structural_fingerprint(COMPOSITION, reglued)
     assert structural_fingerprint(COMPOSITION, baseline) != structural_fingerprint(COMPOSITION, disabled)
+
+
+def test_payload_refs_extracts_comp_and_macro_keys(tmp_path: Path, solving_genome: Genome) -> None:
+    import random as random_module
+
+    from ardevo.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
+    from ardevo.library import COMPOSITION, payload_refs
+
+    assert payload_refs(MODULE, genome_to_dict(solving_genome)) == set()  # no macros, no refs
+    macro_payload = genome_to_dict(solving_genome)
+    macro_payload["macros"] = [{"ref": "library:m1_aaa", "inputs": [0], "outputs": [1], "innovation": 7, "trainable": False}]
+    assert payload_refs(MODULE, macro_payload) == {"m1_aaa"}
+
+    comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random_module.Random(1))
+    comp.nodes[99] = CompNodeGene(99, CompNodeKind.MODULE, "library:m1_bbb", 2, 1)
+    assert payload_refs(COMPOSITION, comp_to_dict(comp)) == {"m1_bbb"}  # INPUT bank refs are not library keys
+
+
+def test_collect_garbage_sweeps_cascades_and_protects(tmp_path: Path, solving_genome: Genome) -> None:
+    """Only retired-and-unreferenced tombstones go; references from RETAINED entries (live or
+    protected) pin their targets; a retired chain falls together; dry-run touches nothing."""
+    import random as random_module
+
+    from ardevo.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
+    from ardevo.library import COMPOSITION
+
+    library = ModuleLibrary(tmp_path / "lib")
+
+    def module(weight_bump: float) -> str:
+        payload = genome_to_dict(solving_genome)
+        payload["connections"][0]["weight"] += weight_bump
+        return library.add(entry_type=MODULE, payload=payload, io=_IO, provenance={"accepted_metric": 1.0})
+
+    def comp_over(ref_key: str, bump: int) -> str:
+        comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=100 * bump), random_module.Random(bump))
+        comp.nodes[999] = CompNodeGene(999, CompNodeKind.MODULE, f"library:{ref_key}", 2, 1)
+        return library.add(entry_type=COMPOSITION, payload=comp_to_dict(comp), io=_IO, provenance={"accepted_metric": 1.0}, level=2)
+
+    live_dep = module(1.0)  # retired below, but referenced by the LIVE comp: must survive
+    live_comp = comp_over(live_dep, 1)
+    chain_dep = module(2.0)  # referenced only by the RETIRED comp: falls with it
+    chain_comp = comp_over(chain_dep, 2)
+    loose = module(3.0)  # retired, unreferenced: goes
+    protected = module(4.0)  # retired, unreferenced, but protected (e.g. a checkpoint macro ref)
+    for key in (live_dep, chain_dep, chain_comp, loose, protected):
+        library.retire(key)
+    image = tmp_path / "lib" / "images" / f"{loose}.png"
+    image.parent.mkdir(parents=True, exist_ok=True)
+    image.write_bytes(b"png")
+
+    would_sweep = library.collect_garbage(protect=[protected], dry_run=True)
+    assert set(would_sweep) == {chain_dep, chain_comp, loose}
+    assert len(library) == 6 and image.exists()  # dry run touched nothing
+
+    swept = library.collect_garbage(protect=[protected])
+    assert set(swept) == {chain_dep, chain_comp, loose}
+    assert set(library.keys()) == {live_dep, live_comp, protected}
+    assert not image.exists()
+    library.load(live_dep)  # the live comp's dependency still loads
+    import pytest as pytest_module
+
+    with pytest_module.raises(KeyError):
+        library.load(loose)

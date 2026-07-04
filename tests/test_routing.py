@@ -367,3 +367,100 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
     for task_name, _task, rank in variants:
         real, zeroed = results[(task_name, "none", rank)], results[(task_name, "zero", rank)]
         print(f"expert-ablation diagnostic on {task_name} (adapter_rank={rank}): real={real:.3f} zeroed={zeroed:.3f}")
+
+
+def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    torch.manual_seed(0)
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    service = RouterService(library, d_model=16, top_k=1, max_steps=3)
+    service.sync()
+    view, x, _w = _task_view(service.net, xor_task)
+    view(x)
+    service.record_traffic()
+    assert service.usage_totals and all(weight > 0 for weight in service.usage_totals.values())
+    assert service.transition_totals  # 3 steps -> at least one consecutive-step co-firing
+    for source, row in service.transition_totals.items():
+        assert source in service.net._vertex_order
+        assert all(target in service.net._vertex_order and weight > 0 for target, weight in row.items())
+
+
+def test_traffic_persists_through_meta_round_trip(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    torch.manual_seed(0)
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    router_dir = tmp_path / "lib" / "router"
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
+    service.sync()
+    view, x, _w = _task_view(service.net, xor_task)
+    view(x)
+    service.record_traffic()
+    service.save()
+    reloaded = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
+    assert reloaded.usage_totals == pytest.approx(service.usage_totals)
+    assert set(reloaded.transition_totals) == set(service.transition_totals)
+
+
+def test_tolerant_load_drops_garbage_collected_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    """A GC'd vertex drops out on reload (state rows filtered, remainder strict), and the next
+    save persists the pruned skeleton: the router and the GC stay coherent."""
+    torch.manual_seed(0)
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    doomed = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    router_dir = tmp_path / "lib" / "router"
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
+    service.sync()
+    view, x, _w = _task_view(service.net, xor_task)
+    view(x)
+    service.record_traffic()
+    service.save()
+    assert len(service.net._vertex_order) == 2
+
+    library.retire(doomed)
+    assert library.collect_garbage() == [doomed]  # unreferenced tombstone: physically gone
+    reloaded = RouterService(library, d_model=16, top_k=1, max_steps=2, persist_dir=router_dir)
+    assert len(reloaded.net._vertex_order) == 1  # dropped, not crashed
+    assert sanitize_key(doomed) not in reloaded.usage_totals
+    reloaded.save()
+    import json as json_module
+
+    meta = json_module.loads((router_dir / "router_meta.json").read_text())
+    assert meta["vertex_keys"] == [library.keys()[0]]  # the pruned skeleton persisted
+
+
+def test_pathways_prefer_observed_traffic_and_fall_back_to_prior(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    torch.manual_seed(0)
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2, edge_bias=True)
+    service.sync()
+    names = list(service.net._vertex_order)
+
+    # No traffic yet: the edge_bias prior is the fallback (positive entries only, normalized).
+    prior = service._pathways(names)
+    assert all(0.0 <= weight <= 1.0 for _s, _t, weight in prior)
+
+    service.transition_totals = {names[0]: {names[1]: 4.0, names[0]: 1.0}}
+    observed = service._pathways(names)
+    assert (0, 1, 1.0) in observed  # the strongest observed edge normalizes to 1.0
+    assert all(weight <= 1.0 for _s, _t, weight in observed)
+
+
+def test_overmind_spec_draws_pathway_edges_and_usage_wiring(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec, library_resolver
+
+    library = _seed_library(tmp_path, xor_task, solving_genome, with_composition=True)
+    keys = library.keys()
+    view = OvermindView(
+        vertices=[OvermindVertex(key=keys[0], label=keys[0], usage=1.0), OvermindVertex(key=keys[1], label=keys[1], usage=0.0)],
+        input_signatures=["BINARY|K:2"],
+        output_signatures=["BINARY|K:1"],
+        d_model=16,
+        top_k=2,
+        max_steps=3,
+        pathways=[(0, 1, 1.0)],
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library))
+    pathway_edges = [edge for edge in spec.edges if edge.color == THEME["edge_pathway"]]
+    assert len(pathway_edges) == 1 and pathway_edges[0].curve != 0.0
+    callout_edges = [edge for edge in spec.edges if edge.color == THEME["edge_callout"]]
+    assert max(edge.width for edge in callout_edges) > min(edge.width for edge in callout_edges)  # usage-scaled gate wiring

@@ -19,7 +19,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
 from ardevo.evaluation import output_features
@@ -195,6 +195,20 @@ def _canonical_key(entry_type: str, level: int, payload: dict[str, Any]) -> str:
     return f"{entry_type[0]}{level}_{digest}"
 
 
+def payload_refs(entry_type: str, payload: dict[str, Any]) -> set[str]:
+    """Every library key this payload names: composition node refs and module macro refs (both use
+    the literal "library:" prefix). The GC's edge function, and the natural motif-census hook."""
+    refs: set[str] = set()
+    if entry_type == COMPOSITION:
+        candidates = (node.get("ref", "") for node in payload.get("nodes", []))
+    else:
+        candidates = (macro.get("ref", "") for macro in payload.get("macros", []))
+    for ref in candidates:
+        if ref.startswith("library:"):
+            refs.add(ref.removeprefix("library:"))
+    return refs
+
+
 def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     """Weight-agnostic topology hash: two payloads share a fingerprint iff they are the same
     STRUCTURE (nodes, wiring, macro refs, refine depth), regardless of trained weights, glue
@@ -344,6 +358,38 @@ class ModuleLibrary:
         if not path.exists():
             raise KeyError(f"no library entry {key!r} under {self.root}")
         return LibraryEntry.from_dict(json.loads(path.read_text()))
+
+    def collect_garbage(self, *, protect: Iterable[str] = (), dry_run: bool = False) -> list[str]:
+        """Physically delete retired entries nothing retained still references. Mark-and-sweep:
+        roots are every LIVE entry plus `protect` (router vertices, resumable checkpoint macro
+        refs); marking follows `payload_refs` through RETAINED entries to fixpoint, so a retired
+        dependency named by a live composition survives, and a whole retired chain falls together.
+        Sweeping removes the entry file, the index row, and the entry's render image. This is the
+        one exception to "entries are never deleted": the tombstone contract (refs never dangle)
+        is preserved because only provably-unreferenced tombstones go."""
+        marked = {key for key, summary in self._index.items() if not summary.get("retired", False)}
+        marked.update(key for key in protect if key in self._index)
+        frontier = list(marked)
+        while frontier:
+            key = frontier.pop()
+            try:
+                entry = self.load(key)
+            except KeyError:
+                continue
+            for ref in payload_refs(entry.entry_type, entry.payload):
+                if ref in self._index and ref not in marked:
+                    marked.add(ref)
+                    frontier.append(ref)
+        swept = sorted(key for key in self._index if key not in marked)
+        if dry_run or not swept:
+            return swept
+        for key in swept:
+            del self._index[key]
+            (self._entries_dir / f"{key}.json").unlink(missing_ok=True)
+            (self.root / "images" / f"{key}.png").unlink(missing_ok=True)
+        self._write_index()
+        logger.info("garbage-collected %d unreferenced tombstones", len(swept))
+        return swept
 
     def query(
         self,

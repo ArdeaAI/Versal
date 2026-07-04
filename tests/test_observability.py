@@ -96,3 +96,57 @@ def test_load_prior_records_tolerates_missing_summary(tmp_path: Path) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
     assert trial._load_prior_records() == []
+
+
+def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    """A rung that fails to LOAD aborts the run when require_all_rungs is set; the default stays
+    tolerant (the pre-existing skip-and-report behavior)."""
+    import pytest
+
+    from ardevo.evolution import multitask
+    from ardevo.trials import orchestrated_trial
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    report = multitask.PoolReport(entries=[task_entry(xor_task)], skipped=[multitask.SkippedRung(rung=7, error_type="RuntimeError", message="synthetic load failure")])
+    monkeypatch.setattr(orchestrated_trial, "build_pool_report", lambda **_kwargs: report)
+
+    config = _loop_config()
+    config.update({"dataset": "synthetic", "n_samples": 4, "seed": 0})
+    config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "lib")}
+    config["schedule"] = {"kind": "interleave_rungs", "rungs": [1, 7], "require_all_rungs": True}
+    with pytest.raises(RuntimeError, match="require_all_rungs.*rung 7"):
+        OrchestratedTrial(config)
+
+    config["schedule"]["require_all_rungs"] = False
+    trial = OrchestratedTrial(config)  # tolerant default: skips are reported, not fatal
+    assert [skipped.rung for skipped in trial.skipped_rungs] == [7]
+
+
+def test_library_gc_cli_dry_run_and_checkpoint_protection(tmp_path: Path, monkeypatch) -> None:
+    from ardevo.evolution.genome import genome_to_dict
+    from ardevo.library import MODULE, ModuleLibrary
+    from ardevo.tools.library_gc import checkpoint_macro_refs, run_gc
+    from tests.test_recurrence import _running_parity_genome
+
+    genome = _running_parity_genome()
+    library = ModuleLibrary(tmp_path / "lib")
+    io = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
+    doomed = library.add(entry_type=MODULE, payload=genome_to_dict(genome), io=io, provenance={"accepted_metric": 0.9})
+    library.retire(doomed)
+
+    # A resumable checkpoint whose pooled genome carries a macro ref to the doomed key protects it.
+    run_dir = tmp_path / "results" / "20990101_000000_orchestrated"
+    run_dir.mkdir(parents=True)
+    pool_genome = genome_to_dict(genome)
+    pool_genome["macros"] = [{"ref": f"library:{doomed}", "inputs": [0], "outputs": [1], "innovation": 1, "trainable": False}]
+    (run_dir / "checkpoint.json").write_text(json.dumps({"loop_state": {"modules": [{"genome": pool_genome}], "species_champions": {}}}))
+    assert checkpoint_macro_refs(run_dir / "checkpoint.json") == {doomed}
+
+    protected = run_gc(tmp_path / "lib", dry_run=False, protect_checkpoint=True, results_root=tmp_path / "results")
+    assert protected["swept"] == [] and len(library.keys()) == 1  # the checkpoint pinned it
+
+    dry = run_gc(tmp_path / "lib", dry_run=True, protect_checkpoint=False, results_root=tmp_path / "results")
+    assert dry["swept"] == [doomed] and (tmp_path / "lib" / "entries" / f"{doomed}.json").exists()  # dry run touched nothing
+
+    swept = run_gc(tmp_path / "lib", dry_run=False, protect_checkpoint=False, results_root=tmp_path / "results")
+    assert swept["swept"] == [doomed] and not (tmp_path / "lib" / "entries" / f"{doomed}.json").exists()

@@ -5,7 +5,9 @@
 # DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
 # This is the maximal exploratory run, NOT the recommended baseline: Stage C adds training dynamics
 # that should be judged against the plainer routed/hybrid configs. The routed model is portrait-ed to
-# library/images/overmind.png on every structural growth.
+# library/images/overmind.png on every structural growth, with observed routing-traffic pathways
+# drawn between experts. ALL 18 rungs are scheduled (no skipping), depth-0 failures leave stepping
+# stones behind ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
 #
 #   uv run app --config configs/orchestrated_overmind.toml
 
@@ -28,7 +30,8 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5] #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15]       # widen to "all" once the fast rungs populate the library
+rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
 tasks_per_rung = 100
 shuffle = true
 
@@ -103,6 +106,14 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   stall_generations = 8       # refine-local flatline window (the global 28 would exceed typical budgets)
   retire_superseded = true    # tombstone the old entry when the shelved improvement weakly dominates
                               # its stored (robustness, metric) ranking; mixed trade-offs stay live
+  [orchestrator.wall]         # THE WALL LEDGER: a depth-0 failure shelves its best champion as a
+                              # below-bar stepping stone (dependency entry, never a false lookup hit),
+                              # and later attempts on that signature warm-start from it. Assaults on a
+                              # hard family (two_spirals) accumulate training + structure instead of
+                              # restarting; one stone per lineage, replaced only on a strict win.
+  ledger = true
+  min_metric = 0.45           # a stone must carry SOME signal before it is worth keeping
+  seed_top_k = 1              # stones grafted into the next attempt's starting population
   [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
                               # fallback (two-spirals class) and the source of task-shaped modules.
                               # TIME-axis tasks run through the stepped recurrent substrate here.
@@ -122,6 +133,8 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
 [library]                     # admission policy: what earns a place on the shelf
 admission = "archive"         # open-ended QD archive: keep BEHAVIORALLY DIVERSE stepping stones, not
                               # just the top-k by metric ("default" = flat cap; "accept_all" = legacy)
+gc = true                     # run-end sweep of unreferenced tombstones (mark-and-sweep from live
+                              # entries; resumable state protected; dead router vertices pruned)
 min_metric = 0.9              # quality floor on the accept metric
 min_robustness = 0.0          # weight-robustness floor (raise once the library is healthy)
 per_niche_cap = 2             # max entries per (io shape, behavior niche): distinct KINDS of solution

@@ -187,7 +187,8 @@ class Orchestrator:
         self.budgets = {int(name.removeprefix("depth")): int(value) for name, value in budgets.items()} or {0: 120, 1: 60, 2: 30}
         self.decomposers = build_decomposers(table)
         library_cfg = config.get("library", {}) or {}
-        self.admission = LIBRARY_ADMISSION.get(library_cfg.get("admission", "accept_all"))(**{k: v for k, v in library_cfg.items() if k != "admission"})
+        # "gc" is the trial's run-end sweep flag, not an admission-policy knob.
+        self.admission = LIBRARY_ADMISSION.get(library_cfg.get("admission", "accept_all"))(**{k: v for k, v in library_cfg.items() if k not in ("admission", "gc")})
         self.strategies = build_strategies(config)
         shares = table.get("evolve_budget", {})
         self.evolve_shares = {name: float(shares.get(name, 1.0)) for name, _strategy in self.strategies}
@@ -202,6 +203,14 @@ class Orchestrator:
         self.refine_min_generations = int(refine.get("min_generations", 4))
         self.refine_stall_generations = int(refine.get("stall_generations", 8))
         self.refine_retire_superseded = bool(refine.get("retire_superseded", True))
+        # WALL LEDGER ([orchestrator.wall]): a depth-0 failure shelves its best champion as a
+        # below-bar stepping stone, and later attempts on that signature warm-start from it, so
+        # assaults on a hard task family (the two_spirals wall) accumulate instead of restarting.
+        # ledger = false (the default) is byte-identical to before.
+        wall = table.get("wall", {}) or {}
+        self.wall_ledger = bool(wall.get("ledger", False))
+        self.wall_min_metric = float(wall.get("min_metric", 0.45))
+        self.wall_seed_top_k = int(wall.get("seed_top_k", 1))
         self.loop = loop
         self.library = library
         self.state = state
@@ -233,9 +242,12 @@ class Orchestrator:
             # no_experts = short-circuited on an empty vertex set; undistillable = won in router space
             # but the pathway did not survive verification as a composition (reported as a miss).
             self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0})
+        if self.wall_ledger:
+            self.counters.update({"wall_stones_admitted": 0, "wall_stones_improved": 0, "wall_seeded_attempts": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
+        self._stepping_stone = False  # marks the admission inside a wall-ledger shelving
 
     # --- public API ---------------------------------------------------------------------------------
 
@@ -254,7 +266,10 @@ class Orchestrator:
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
-        result = self._evolve(task, spec, budget)
+        stone_modules, stone_comps = self._wall_stone_seeds(task) if self.wall_ledger and depth == 0 else ([], [])
+        if stone_modules or stone_comps:
+            self.counters["wall_seeded_attempts"] += 1
+        result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
         if result.metric >= self.accept_threshold:
             key = self._admit_result(result, task, depth, decompose_op=None)
             self.counters["accepts"] += 1
@@ -267,6 +282,7 @@ class Orchestrator:
                 return solution
 
         self.counters["failures"] += 1
+        stone_key = self._admit_stepping_stone(result, task) if self.wall_ledger and depth == 0 else None
         self._record(
             Attempt(
                 task=name,
@@ -274,6 +290,7 @@ class Orchestrator:
                 outcome="failed",
                 metric=result.metric,
                 generations=result.generations_used,
+                library_key=stone_key,  # the wall ledger's trace of this failure, when one was shelved
                 strategy=result.strategy,
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
@@ -295,7 +312,9 @@ class Orchestrator:
             on_generation=self._on_generation,
         )
 
-    def _evolve(self, task: Task, spec: CompTaskSpec, budget: int, seed_comps: list[CompositionGenome] | None = None) -> StrategyResult:
+    def _evolve(
+        self, task: Task, spec: CompTaskSpec, budget: int, seed_comps: list[CompositionGenome] | None = None, seed_entries: list[LibraryEntry] | None = None
+    ) -> StrategyResult:
         """Run the configured strategies in order under one shared budget. First strategy to clear
         the accept threshold wins (later ones never run); a stalled strategy's UNSPENT generations
         roll into the next allocation; the best loser is returned when nobody clears the bar."""
@@ -310,7 +329,10 @@ class Orchestrator:
                 allocation = min(remaining, max(1, round(budget * self.evolve_shares[name] / total_share)))
             if allocation <= 0:
                 break
-            outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
+            if name == "direct" and seed_entries:
+                outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
+            else:
+                outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
             if name == "routed":  # the strategy has no counter access; it stamps markers instead
                 for marker in ("routed_no_experts", "routed_undistillable"):
                     if outcome.champion_metrics.get(marker):
@@ -493,6 +515,58 @@ class Orchestrator:
             self.library.retire(old_key)
             logger.info("retired superseded library entry %s (refined replacement dominates)", old_key)
 
+    # --- the wall ledger: failure leaves a trace ------------------------------------------------------
+
+    def _wall_stones(self, task: Task) -> list[LibraryEntry]:
+        """Stepping stones matching this task's signature, best-ranked first (query order)."""
+        io = task_io(task)
+        candidates = self.library.query(input_signature=io["inputs"][0]["signature"], input_width=io["inputs"][0]["width"], output_width=io["output"]["width"])
+        return [entry for entry in candidates if entry.provenance.get("stepping_stone")]
+
+    def _wall_stone_seeds(self, task: Task) -> tuple[list[LibraryEntry], list[CompositionGenome]]:
+        """The warm start for a fresh assault on a known wall, split by shape for the seeding rails
+        (MODULE stones graft into the direct population, COMPOSITION stones seed the comp loop)."""
+        stones = self._wall_stones(task)[: self.wall_seed_top_k]
+        modules = [stone for stone in stones if stone.entry_type == MODULE]
+        comps = [comp_from_dict(stone.payload) for stone in stones if stone.entry_type == COMPOSITION]
+        return modules, comps
+
+    def _admit_stepping_stone(self, result: StrategyResult, task: Task) -> str | None:
+        """Shelve a failed attempt's best champion as a below-bar stepping stone: a dependency
+        entry (bypasses the admission policy and signature caps, invisible to `signature_group`)
+        that can never be a false lookup hit because quick-eval still gates on the accept bar.
+        One stone per signature lineage: replaced only on a strict lexicographic AND structural
+        win (the refine comparator, reused), so the wall gets chipped, not wallpapered. Free
+        synergies: stones enter module-pool absorption and the comp ref catalog through `query`,
+        and become router vertices at sync (immature circuits in the overmind, by design)."""
+        candidate = self._candidate_rank(result)
+        if candidate is None or not math.isfinite(result.metric) or result.metric < self.wall_min_metric:
+            return None
+        incumbent_stone = next(iter(self._wall_stones(task)), None)
+        if incumbent_stone is not None:
+            if self._candidate_fingerprint(result) == structural_fingerprint(incumbent_stone.entry_type, incumbent_stone.payload):
+                return None
+            stone_solution = Solution(key=incumbent_stone.key, entry_type=incumbent_stone.entry_type, metric=float(incumbent_stone.provenance.get("accepted_metric", 0.0)))
+            stone_rank = self._incumbent_rank(stone_solution, incumbent_stone)
+            if not refinement_improves(candidate, stone_rank, metric_epsilon=self.refine_metric_epsilon, robustness_epsilon=self.refine_robustness_epsilon):
+                return None
+        self._stepping_stone = True
+        self._refined_from = incumbent_stone.key if incumbent_stone is not None else None
+        try:
+            key = self._admit_result(result, task, depth=0, decompose_op=None)
+        finally:
+            self._stepping_stone = False
+            self._refined_from = None
+        if key is None:
+            return None
+        if incumbent_stone is not None:
+            self.library.retire(incumbent_stone.key)  # the strict win above is the dominance proof
+            self.counters["wall_stones_improved"] += 1
+        else:
+            self.counters["wall_stones_admitted"] += 1
+        logger.info("wall ledger shelved stepping stone %s for %s (best %s=%.3f)", key, task.meta.name, self.accept_metric, result.metric)
+        return key
+
     # --- ladder steps -------------------------------------------------------------------------------
 
     def _lookup(self, task: Task, spec: CompTaskSpec) -> Solution | None:
@@ -671,8 +745,12 @@ class Orchestrator:
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
+        if self._stepping_stone:
+            provenance["stepping_stone"] = True  # a below-bar wall-ledger trace, not a solution
         level = module_level(result.champion_genome, self.library)
-        return self._gated_add(entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
+        return self._gated_add(
+            entry_type=MODULE, payload=genome_to_dict(result.champion_genome), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
+        )
 
     def _admit(self, best: AssessedComposition, task: Task, depth: int, decompose_op: str | None) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
@@ -727,7 +805,11 @@ class Orchestrator:
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
-        return self._gated_add(entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0)
+        if self._stepping_stone:
+            provenance["stepping_stone"] = True  # a below-bar wall-ledger trace, not a solution
+        return self._gated_add(
+            entry_type=COMPOSITION, payload=comp_to_dict(detached), io=task_io(task), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
+        )
 
     # --- skeleton wiring ------------------------------------------------------------------------------
 
