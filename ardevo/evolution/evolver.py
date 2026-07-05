@@ -65,6 +65,15 @@ class TaskAdapter:
         return evaluate(module, self.encoded, self.encoder)
 
 
+@dataclass(frozen=True)
+class AdapterRef:
+    """A by-path handle to a spilled adapter: what pool.map pickles instead of the encoded task
+    tensors. Workers resolve it through a one-slot cache (`_resolve_adapter`), so each worker loads
+    a task's tensors from disk exactly once, however many chunks it processes."""
+
+    path: str
+
+
 # A genome that cannot DECODE (macro nesting past the cap, a vanished macro ref) is a nonviable
 # phenotype: it scores the floor and selection removes it. It must never kill the run; mutation is
 # allowed to propose corpses, assessment just buries them.
@@ -162,6 +171,8 @@ class Evolver:
                 decoded.append(self._decode(genome, adapter))
             except (ValueError, KeyError):
                 decoded.append(None)  # nonviable phenotype: floored below, never in the batch program
+        if self.assess_workers > 1 and sum(module is not None for module in decoded) > 1:
+            return self._assess_hybrid(genomes, decoded, adapter, state)
         viable = [(genome, module) for genome, module in zip(genomes, decoded) if module is not None]
         pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng) if viable else []
         from ardevo.evolution import train as train_stage
@@ -178,15 +189,114 @@ class Evolver:
             assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), trained_module))
         return assessed
 
+    def _assess_hybrid(self, genomes: list[Genome], decoded: list[SubstrateModule | None], adapter: Adapter, state: EvolverState) -> list[Assessed]:
+        """Population trainer + process pool together: the batchable subset trains in ONE tensor
+        program on the compute device (main process) WHILE the pool trains the serial subset
+        (refine/recurrent/product/macro candidates, through the sequential same-kind op), then the
+        batch subset's evaluation is farmed to the pool too. Same results as the inline population
+        path: the partition comes from the SAME `partition_batchable` seam the trainer uses, the
+        serial subset is exactly `_assess_in_worker` (the pool contract), and the batch subset's
+        pooled evaluation re-decodes the written-back genome (exact: float32 round-trips through
+        the genome losslessly, the invariant `_assess_pooled` already relies on)."""
+        from ardevo.evolution import train as train_stage
+
+        assert self.train_population_op is not None
+        keywords = dict(getattr(self.train_population_op, "keywords", {}))
+        steps = int(keywords.get("steps", 20))
+        max_padded_nodes = int(keywords.get("max_padded_nodes", 1024))
+        min_batch_nodes = int(keywords.get("min_batch_nodes", 0))
+        writeback = bool(keywords.get("writeback", True))
+
+        viable = [(index, module) for index, module in enumerate(decoded) if module is not None]
+        viable_indices = [index for index, _module in viable]
+        cores = [module.core() for _index, module in viable]
+        batch_local, serial_local = train_stage.partition_batchable(cores, steps=steps, max_padded_nodes=max_padded_nodes, min_batch_nodes=min_batch_nodes)
+        batch_indices = [viable_indices[i] for i in batch_local]
+        serial_indices = [viable_indices[i] for i in serial_local]
+
+        pool = self._ensure_pool()
+        pooled_adapter = self._pooled_adapter(adapter)
+        serial_async = None
+        if serial_indices:
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            chunksize = max(1, len(serial_indices) // (self.assess_workers * 4))
+            serial_async = pool.map_async(worker, [genomes[index] for index in serial_indices], chunksize=chunksize)
+
+        results: list[Assessed | None] = [None] * len(genomes)
+        for index, module in enumerate(decoded):
+            if module is None:
+                results[index] = Assessed(genomes[index], _floored_metrics(), _FLOOR_FITNESS, None)
+
+        trained_pairs: list[tuple[Genome, SubstrateModule]] = []
+        if batch_indices:
+            trained_pairs = self.train_population_op([genomes[index] for index in batch_indices], [decoded[index] for index in batch_indices], adapter.encoded, rng=state.rng)
+        self.assess_stats = dict(train_stage.last_batch_stats)
+        if viable_indices:
+            self.assess_stats["fallback"] = len(serial_indices) / len(viable_indices)
+
+        if batch_indices and writeback:
+            evaluator = partial(_evaluate_in_worker, adapter=pooled_adapter, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            chunksize = max(1, len(batch_indices) // (self.assess_workers * 4))
+            eval_async = pool.map_async(evaluator, [genome for genome, _module in trained_pairs], chunksize=chunksize)
+            for index, (evaluated, pair) in zip(batch_indices, zip(eval_async.get(), trained_pairs)):
+                genome, metrics, fitness = evaluated
+                results[index] = Assessed(genome, metrics, fitness, pair[1])
+        elif batch_indices:
+            # Without writeback the tuned weights exist ONLY on the trained modules, so a pooled
+            # re-decode would score untrained weights; evaluate inline exactly like the batched path.
+            for index, (genome, module) in zip(batch_indices, trained_pairs):
+                metrics = self.evaluate_op(genome, module, adapter)
+                results[index] = Assessed(genome, metrics, self.fitness(genome, metrics), module)
+
+        if serial_async is not None:
+            for index, (genome, metrics, fitness) in zip(serial_indices, serial_async.get()):
+                module = None if metrics.get("decode_failed") else self._decode(genome, adapter)
+                results[index] = Assessed(genome, metrics, fitness, module)
+        return [item for item in results if item is not None]
+
     def _assess_pooled(self, genomes: list[Genome], adapter: Adapter) -> list[Assessed]:
         """Assess independent genomes across a persistent process pool (true multi-core). Workers
         return (trained genome, metrics, fitness); the module is re-decoded here from the written-back
         genome (faithful and cheap, no retrain), so the returned Assessed matches the sequential path."""
         pool = self._ensure_pool()
-        worker = partial(_assess_in_worker, adapter=adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+        worker = partial(_assess_in_worker, adapter=self._pooled_adapter(adapter), train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
         chunksize = max(1, len(genomes) // (self.assess_workers * 4))
         results = pool.map(worker, genomes, chunksize=chunksize)
         return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
+
+    def _pooled_adapter(self, adapter: Adapter) -> "Adapter | AdapterRef":
+        """Spill the adapter to disk ONCE per task so pool.map pickles a tiny path per chunk
+        instead of the encoded tensors every time (~4MB x chunks x generations for CIFAR).
+        Content-addressed under `<library_dir>/encoded_cache/`, so a stale file is impossible;
+        the previous task's spill is unlinked on replacement (its map calls have completed: assess
+        is synchronous per generation). Any failure falls back to pickling the adapter directly."""
+        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
+        if slot is not None and slot[0] is adapter:
+            return AdapterRef(slot[1])
+        try:
+            import hashlib
+            import io
+            import os
+            from pathlib import Path
+
+            import torch
+
+            buffer = io.BytesIO()
+            torch.save(adapter, buffer)
+            payload = buffer.getvalue()
+            directory = Path(self.library_dir) / "encoded_cache"
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{hashlib.sha256(payload).hexdigest()[:16]}.pt"
+            if not path.exists():
+                staging = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+                staging.write_bytes(payload)
+                staging.replace(path)
+            if slot is not None and slot[1] != str(path):
+                Path(slot[1]).unlink(missing_ok=True)
+            self._adapter_spill = (adapter, str(path))
+            return AdapterRef(str(path))
+        except Exception:  # pragma: no cover - spill is an optimization, never a failure mode
+            return adapter
 
     def _ensure_pool(self) -> "Pool":
         if _SHARED_POOL is not None:
@@ -202,6 +312,12 @@ class Evolver:
 
     def close_pool(self) -> None:
         """Close only this evolver's OWN lazy pool; the shared pool is owned by create_assess_pool."""
+        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
+        if slot is not None:
+            from pathlib import Path
+
+            self._adapter_spill = None
+            Path(slot[1]).unlink(missing_ok=True)
         pool = getattr(self, "_pool", None)
         if pool is not None:
             self._pool = None
@@ -354,10 +470,29 @@ def _init_worker(library_dir: str) -> None:
     set_macro_resolver(macro_resolver(_WORKER_LIBRARY))
 
 
+# One-slot adapter cache per worker: tasks are processed sequentially, so a worker only ever needs
+# the CURRENT task's tensors; a growing cache would hold every visited task's encodings in memory.
+_WORKER_ADAPTER: tuple[str, Adapter] | None = None
+
+
+def _resolve_adapter(adapter: "Adapter | AdapterRef") -> Adapter:
+    if not isinstance(adapter, AdapterRef):
+        return adapter
+    global _WORKER_ADAPTER
+    if _WORKER_ADAPTER is None or _WORKER_ADAPTER[0] != adapter.path:
+        import torch
+
+        # weights_only=False is required (the spill holds adapter dataclasses, not bare tensors)
+        # and safe: the path is only ever produced by this run's own `_pooled_adapter` spill into
+        # its library dir, never taken from external input.
+        _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False))
+    return _WORKER_ADAPTER[1]
+
+
 def _assess_in_worker(
     genome: Genome,
     *,
-    adapter: Adapter,
+    adapter: "Adapter | AdapterRef",
     train_op: Callable[..., tuple[Genome, SubstrateModule]],
     evaluate_op: Callable[..., dict[str, float]],
     fitness: FitnessAggregator,
@@ -366,10 +501,31 @@ def _assess_in_worker(
     (trained genome, metrics, fitness); the main process re-decodes the module from the genome.
     An undecodable genome floors here instead of raising: a worker exception would kill the WHOLE
     pool.map and with it the run (the two_spirals macro-nesting crash of 2026-07-04)."""
+    adapter = _resolve_adapter(adapter)
     try:
         module = Evolver._decode(genome, adapter)
     except (ValueError, KeyError):
         return genome, _floored_metrics(), _FLOOR_FITNESS
     genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
+    metrics = evaluate_op(genome, module, adapter)
+    return genome, metrics, fitness(genome, metrics)
+
+
+def _evaluate_in_worker(
+    genome: Genome,
+    *,
+    adapter: "Adapter | AdapterRef",
+    evaluate_op: Callable[..., dict[str, float]],
+    fitness: FitnessAggregator,
+) -> tuple[Genome, dict[str, float], float]:
+    """Evaluate one ALREADY-TRAINED (written-back) genome in a worker process: the hybrid assess
+    path's batch subset. Decoding the written-back genome reproduces the trained module exactly
+    (float32 weights round-trip through the genome losslessly). Floors instead of raising for the
+    same pool-safety reason as `_assess_in_worker`."""
+    adapter = _resolve_adapter(adapter)
+    try:
+        module = Evolver._decode(genome, adapter)
+    except (ValueError, KeyError):
+        return genome, _floored_metrics(), _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
     return genome, metrics, fitness(genome, metrics)

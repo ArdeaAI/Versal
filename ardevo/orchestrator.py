@@ -18,7 +18,8 @@ reference them, so library entries never dangle across runs.
 """
 
 import math
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
@@ -71,9 +72,14 @@ class Attempt:
     strategy: str | None = None  # which evolve strategy produced the winner (or the best loser)
     failure_stage: str | None = None  # for failed decomposed tasks: "subtask:<name>" | "parent_re_evolve"
     refine_generations: int = 0  # learn-mode generations spent refining a library hit (bounded extra compute)
+    # Wall-clock forensics: where this solve actually SPENT its time, so a wedged stage shows up
+    # in run_summary.json instead of requiring a live `sample` of the process (the 2026-07-05
+    # 8-hour CIFAR mutation wedge was invisible in every record).
+    seconds: float = 0.0
+    stage_seconds: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        data = {
+        data: dict[str, Any] = {
             "task": self.task,
             "depth": self.depth,
             "outcome": self.outcome,
@@ -86,6 +92,10 @@ class Attempt:
         }
         if self.refine_generations:  # only when refinement ran, so live-mode summaries stay byte-identical
             data["refine_generations"] = self.refine_generations
+        if self.seconds:
+            data["seconds"] = self.seconds
+        if self.stage_seconds:
+            data["stage_seconds"] = self.stage_seconds
         return data
 
     @classmethod
@@ -101,6 +111,8 @@ class Attempt:
             strategy=data.get("strategy"),
             failure_stage=data.get("failure_stage"),
             refine_generations=int(data.get("refine_generations", 0)),
+            seconds=float(data.get("seconds", 0.0)),
+            stage_seconds=dict(data.get("stage_seconds", {})),
         )
 
 
@@ -253,6 +265,17 @@ class Orchestrator:
     # --- public API ---------------------------------------------------------------------------------
 
     def solve(self, task: Task, depth: int = 0) -> Solution | None:
+        # Per-solve wall-clock forensics, save/restored so recursive sub-solves time themselves
+        # without clobbering the parent's ledger.
+        previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None))
+        self._solve_started: float | None = time.perf_counter()
+        self._active_stages: dict[str, float] | None = {}
+        try:
+            return self._solve_timed(task, depth)
+        finally:
+            self._solve_started, self._active_stages = previous_timing
+
+    def _solve_timed(self, task: Task, depth: int = 0) -> Solution | None:
         spec = comp_task_spec(task)
         name = task.meta.name
         if depth == 0:
@@ -278,7 +301,12 @@ class Orchestrator:
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
 
         if depth < self.max_depth:
+            decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
+            # Wall time of the whole decompose phase (probe evolves + sub-solves; sub-solve attempts
+            # also carry their own rows). Probe strategy time additionally shows under strategy keys.
+            if self._active_stages is not None:
+                self._active_stages["decompose"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
 
@@ -330,10 +358,14 @@ class Orchestrator:
                 allocation = min(remaining, max(1, round(budget * self.evolve_shares[name] / total_share)))
             if allocation <= 0:
                 break
+            stage_started = time.perf_counter()
             if name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
+            stages = getattr(self, "_active_stages", None)
+            if stages is not None:
+                stages[name] = round(stages.get(name, 0.0) + (time.perf_counter() - stage_started), 3)
             if name == "routed":  # the strategy has no counter access; it stamps markers instead
                 for marker in ("routed_no_experts", "routed_undistillable"):
                     if outcome.champion_metrics.get(marker):
@@ -888,6 +920,11 @@ class Orchestrator:
         return float(metrics.get(self.accept_metric, 0.0))
 
     def _record(self, attempt: Attempt) -> None:
+        # Stamp wall-clock forensics from the enclosing solve() unless the caller already did.
+        started = getattr(self, "_solve_started", None)
+        if attempt.seconds == 0.0 and started is not None:
+            attempt.seconds = round(time.perf_counter() - started, 3)
+            attempt.stage_seconds = dict(getattr(self, "_active_stages", None) or {})
         self.attempts.append(attempt)
         logger.info("attempt: %s", attempt.to_dict())
 

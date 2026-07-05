@@ -60,6 +60,24 @@ def test_batched_samples_parity_with_serial(xor_adapter: TaskAdapter, solving_ge
         assert abs(fast[key] - slow[key]) < 1e-6, key
 
 
+def test_batched_samples_auto_gates_on_node_count(xor_adapter: TaskAdapter, solving_genome: Genome, monkeypatch) -> None:
+    """`"auto"` uses the stacked path only at the measured break-even node count and above."""
+    from ardevo.evolution import evaluate as evaluate_module
+
+    stacked_calls: list[int] = []
+    original = evaluate_module._stacked_sample_metrics
+    monkeypatch.setattr(evaluate_module, "_stacked_sample_metrics", lambda *args, **kwargs: stacked_calls.append(1) or original(*args, **kwargs))
+
+    module = xor_adapter.decode(solving_genome)
+    serial = weight_samples(solving_genome, module, xor_adapter, batched_samples="auto")
+    assert not stacked_calls  # tiny net: below the threshold, exact serial path
+    assert serial == weight_samples(solving_genome, xor_adapter.decode(solving_genome), xor_adapter, batched_samples=False)
+
+    monkeypatch.setattr(evaluate_module, "STACKED_AUTO_MIN_NODES", 1)
+    weight_samples(solving_genome, module, xor_adapter, batched_samples="auto")
+    assert stacked_calls  # threshold crossed: stacked path engaged
+
+
 def test_batched_samples_leave_module_weights_untouched(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
     module = xor_adapter.decode(solving_genome)
     before = module.export_weights()
@@ -152,7 +170,8 @@ def test_frozen_parameters_are_never_filled_during_sampling(tmp_path, xor_adapte
     inner = net.inner_modules[f"library:{key}"]
 
     observed: list[float] = []
-    inner.register_forward_pre_hook(lambda module, args: observed.append(float(module.weights.detach()[0, 3])))
+    first_conn = solving_genome.connections[0]
+    inner.register_forward_pre_hook(lambda module, args: observed.append(module.export_weights()[(first_conn.in_id, first_conn.out_id, False)]))
     weight_samples(comp, net, xor_adapter, batched_samples=True)  # ComposedNet falls back to serial
     original = float(solving_genome.connections[0].weight)
     assert observed and all(value == original for value in observed)  # inner never filled mid-sampling

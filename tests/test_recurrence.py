@@ -95,7 +95,7 @@ def test_gradient_flows_through_recurrent_weights() -> None:
     assert grad is not None
     # The self-loop weight (hidden -> hidden) must receive gradient through the unrolled steps.
     position = module._position[3]
-    assert abs(float(grad[position, position])) > 0.0
+    assert abs(float(grad[position, module._col_of[position]])) > 0.0
 
 
 def test_export_and_writeback_round_trip_recurrent_weights() -> None:

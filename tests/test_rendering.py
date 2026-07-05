@@ -311,3 +311,33 @@ def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
     tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
     image = mpimg.imread(tall)
     assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square
+
+
+def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_genome: Genome) -> None:
+    """An image-scale expert (the 798-node MNIST stepping stone class) must degrade to its opaque
+    footprint instead of embedding a ~784-node input column that degenerates the whole portrait
+    into a tall-narrow bar and starves every other cell's budget."""
+    from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec
+
+    nodes = {i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(784)}
+    nodes[784] = NodeGene(784, NodeKind.OUTPUT, "identity")
+    wide = Genome(nodes=nodes, connections=[ConnectionGene(i, 784, 0.1, True, i) for i in range(784)])
+
+    library = ModuleLibrary(tmp_path / "lib")
+    wide_key = library.add(entry_type=MODULE, payload=genome_to_dict(wide), io=_IO, provenance={"accepted_metric": 0.7})
+    small_key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
+    view = OvermindView(
+        vertices=[OvermindVertex(key=wide_key, label="wide stone"), OvermindVertex(key=small_key, label="small", embedding_rank=1)],
+        input_signatures=["IN_784"],
+        output_signatures=["OUT_10"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    wide_boxes = [box for box in spec.containers if "wide stone" in (box.label or "")]
+    assert wide_boxes and all(box.opaque for box in wide_boxes)  # capped: footprint, not a 784-node bar
+    small_boxes = [box for box in spec.containers if (box.label or "").startswith("small")]
+    assert small_boxes and not all(box.opaque for box in small_boxes)  # small experts keep full detail
+    assert max(spec.width, spec.height) / max(min(spec.width, spec.height), 1e-6) < 6.0  # sane aspect

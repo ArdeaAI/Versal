@@ -78,6 +78,7 @@ def build_pool_report(
     shuffle: bool,
     seed: int,
     dataset_factory: Any = None,
+    load_workers: int = 4,
 ) -> PoolReport:
     """Load every task across the configured rungs as schedulable entries, RUNG BY RUNG.
 
@@ -86,26 +87,44 @@ def build_pool_report(
     loader's 2 GB chunk limit is recorded as a `SkippedRung` instead of raising. (`source` is the
     hyphen `hf_repo`.) A rung that loads but yields ZERO tasks is also recorded: silence here is
     how coverage gaps hide. `dataset_factory` is the offline-test seam (defaults to IcarusDataset).
+
+    Rungs load on a small thread pool (I/O-bound HF fetches; the arrow cache uses file locks, and
+    torch encode work releases the GIL): an 18-rung startup overlaps its downloads instead of
+    paying them serially. Results keep the exact configured rung ORDER regardless of completion
+    order, so schedules and skip reports are unchanged; `load_workers = 1` is the serial path.
     """
     factory = dataset_factory or IcarusDataset
-    entries: list[TaskEntry] = []
-    skipped: list[SkippedRung] = []
-    for rung in rungs:
+
+    def _load_rung(rung: int) -> tuple[list[TaskEntry], SkippedRung | None]:
         dataset = None
-        loaded = 0
+        rung_entries: list[TaskEntry] = []
         try:
             dataset = factory(rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source)
             for index in range(len(dataset)):
-                entries.append(task_entry(dataset[index]))
-                loaded += 1
-            if loaded == 0:
-                skipped.append(SkippedRung(rung=rung, error_type="EmptyRung", message="dataset loaded but yielded zero tasks"))
+                rung_entries.append(task_entry(dataset[index]))
+            if not rung_entries:
+                return rung_entries, SkippedRung(rung=rung, error_type="EmptyRung", message="dataset loaded but yielded zero tasks")
         except Exception as error:  # broad: many failure modes (arrow overflow, network, missing config); skip the rung and continue
             logger.warning("skipping rung %s: could not load it (%s: %s)", rung, type(error).__name__, error)
-            skipped.append(SkippedRung(rung=rung, error_type=type(error).__name__, message=str(error)[:300]))
-            continue
+            return rung_entries, SkippedRung(rung=rung, error_type=type(error).__name__, message=str(error)[:300])
         finally:
             if dataset is not None:
                 dataset.close()
-                gc.collect()
+        return rung_entries, None
+
+    if load_workers > 1 and len(rungs) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(load_workers, len(rungs))) as pool:
+            results = list(pool.map(_load_rung, rungs))  # map preserves the configured rung order
+    else:
+        results = [_load_rung(rung) for rung in rungs]
+    gc.collect()
+
+    entries: list[TaskEntry] = []
+    skipped: list[SkippedRung] = []
+    for rung_entries, skip in results:
+        entries.extend(rung_entries)
+        if skip is not None:
+            skipped.append(skip)
     return PoolReport(entries=entries, skipped=skipped)

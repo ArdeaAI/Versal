@@ -34,3 +34,12 @@ def test_bounded_loss_does_not_swamp_accuracy_and_robustness() -> None:
 def test_bounded_components_are_registered() -> None:
     assert FITNESS.get("bounded_negative_support_loss") is bounded_negative_support_loss
     assert FITNESS.get("bounded_negative_query_loss")(None, {"query_loss": 3.0}) == 0.25
+
+
+def test_non_finite_fitness_floors_instead_of_propagating() -> None:
+    """A NaN/inf loss (an exploded recurrent unroll) must score the corpse floor, never poison
+    downstream stages (speciation's share arithmetic crashed on NaN: rung 8 ecg, 2026-07-05)."""
+    aggregator = FitnessAggregator([(negative_support_loss, 1.0), (support_accuracy, 1.0)])
+    assert aggregator(None, {"support_loss": float("nan"), "support_accuracy": 0.5}) == -1e9
+    assert aggregator(None, {"support_loss": float("inf"), "support_accuracy": 0.5}) == -1e9
+    assert aggregator(None, {"support_loss": 0.5, "support_accuracy": 0.5}) > -1e9

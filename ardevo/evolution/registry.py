@@ -93,12 +93,30 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     train_cfg = evolution.get("train", {})
     train_kind = train_cfg.get("kind", "none")
     train_population_op = None
-    if train_kind in train.TRAIN_POPULATION.names():
+    sequential_params = {k: v for k, v in train_cfg.items() if k in ("steps", "lr", "writeback", "weight_decay")}
+    if train_kind in train.TRAIN_POPULATION.names() and bool(train_cfg.get("batched", True)):
+        from ardevo.utils.device import resolve_compute_device
+
         # Population trainers batch a whole generation; single-candidate calls (resume re-scoring,
-        # task switches) still need a sequential op, so bind `gradient` with the shared params.
-        train_population_op = partial(train.TRAIN_POPULATION.get(train_kind), **{k: v for k, v in train_cfg.items() if k != "kind"})
-        sequential = {k: v for k, v in train_cfg.items() if k in ("steps", "lr", "writeback", "weight_decay")}
-        train_op = partial(train.TRAIN.get("gradient"), **sequential)
+        # task switches) and the batch program's serial fallback still need a sequential op. Bind
+        # the SAME kind's sequential form when one exists (gradient_refine must keep deep
+        # supervision on refine genomes everywhere), else `gradient`. The compute device resolves
+        # from the run config unless the table pins one, so a LatticeCUDA run lands population
+        # training on cuda with zero config edits; the padding budget widens on GPU (CIFAR-scale
+        # n fits comfortably once the batch stacks compact [P, n, h] columns).
+        population_params = {k: v for k, v in train_cfg.items() if k not in ("kind", "batched")}
+        if "device" not in population_params:
+            population_params["device"] = str(resolve_compute_device(config))
+        if "max_padded_nodes" not in population_params:
+            population_params["max_padded_nodes"] = 1024 if population_params["device"] == "cpu" else 4096
+        train_population_op = partial(train.TRAIN_POPULATION.get(train_kind), **population_params)
+        sequential_kind = train_kind if train_kind in train.TRAIN.names() else "gradient"
+        train_op = partial(train.TRAIN.get(sequential_kind), **sequential_params)
+    elif train_kind in train.TRAIN_POPULATION.names():
+        # `batched = false`: the kill-switch back to the pool-only path. Population-only kinds
+        # degrade to their sequential form (`gradient` when no same-name TRAIN op exists).
+        sequential_kind = train_kind if train_kind in train.TRAIN.names() else "gradient"
+        train_op = partial(train.TRAIN.get(sequential_kind), **sequential_params)
     else:
         train_op = partial(
             train.TRAIN.get(train_kind),
@@ -119,10 +137,12 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     speciation_cfg = evolution.get("speciation", {})
     speciate = speciation.SPECIATION.get(speciation_cfg.get("kind", "none"))(**{k: v for k, v in speciation_cfg.items() if k != "kind"})
 
+    from ardevo.utils.device import resolve_worker_count
+
     return Evolver(
         pop_size=int(evolution.get("pop_size", 64)),
         elitism=int(evolution.get("elitism", 1)),
-        assess_workers=int(evolution.get("assess_workers", 0)),
+        assess_workers=resolve_worker_count(evolution.get("assess_workers", 0)),
         library_dir=str(config.get("library_dir", "library")),
         seed=int(config.get("seed", 0)),
         init_op=init_op,

@@ -27,6 +27,48 @@ from ardevo.evolution.genome import Genome, NodeKind, genome_from_dict, macro_im
 from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, payload_refs
 from ardevo.motifs import FORWARD_EDGE, MACRO_EDGE, RECURRENT_EDGE, MotifRecord, NodeLabel
 
+# --- async rendering ------------------------------------------------------------------------------
+# Every RUNTIME render site (admission net portraits, speciation plots, the overmind portrait)
+# funnels through `submit_render` so matplotlib's pyplot state only ever runs on ONE thread (pyplot
+# is not thread-safe). Async mode ([run] render_async) moves renders off the run loop (a big
+# admission PNG takes seconds); `flush_renders` joins before artifact upload, before library GC
+# (which deletes images), and at run end. An async render failure logs and is dropped: a portrait
+# is observability, never run state. Sync mode (the default) is byte-identical to before.
+_RENDER_EXECUTOR: Any = None
+_PENDING_RENDERS: list[Any] = []
+
+
+def enable_async_rendering() -> None:
+    global _RENDER_EXECUTOR
+    if _RENDER_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+
+
+def submit_render(render: Callable[..., object], *args: Any, **kwargs: Any) -> None:
+    if _RENDER_EXECUTOR is None:
+        render(*args, **kwargs)
+        return
+
+    def _safe() -> None:
+        try:
+            render(*args, **kwargs)
+        except Exception as error:
+            from ardevo.utils.logging import Logger
+
+            Logger.get_logger().warning("async render failed: %s: %s", type(error).__name__, error)
+
+    _PENDING_RENDERS.append(_RENDER_EXECUTOR.submit(_safe))
+
+
+def flush_renders() -> None:
+    global _PENDING_RENDERS
+    pending, _PENDING_RENDERS = _PENDING_RENDERS, []
+    for future in pending:
+        future.result()
+
+
 THEME: dict[str, Any] = {
     "background": "#10131a",
     "panel_even": "#171c26",
@@ -849,7 +891,9 @@ def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tu
     return _LEGEND_WIDTH
 
 
-def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET, columns: int = 4, legend: bool = True) -> RenderSpec:
+def build_overmind_spec(
+    view: OvermindView, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET, cell_node_budget: int = 160, columns: int = 4, legend: bool = True
+) -> RenderSpec:
     """The whole routed model as a top-down flow portrait: input adapters band across the TOP, every
     expert a fully-embedded cell in a `columns`-wide grid (row order = observed firing order, so an
     input can be traced downward through the paths it actually takes), output heads across the
@@ -857,7 +901,13 @@ def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None,
     carry the learned routing). This whole-graph portrait is for the current scale; at thousands of
     vertices it becomes a density-map problem, not more edges.
 
-    Never raises: an unresolvable/oversized expert degrades to a labeled opaque box, like everywhere."""
+    Never raises: an unresolvable/oversized expert degrades to a labeled opaque box, like everywhere.
+
+    `cell_node_budget` is the PER-EXPERT detail cap, separate from the shared `node_budget`: one
+    image-scale entry (the 798-node MNIST stepping stone, 2026-07-05) otherwise fits the shared
+    budget, embeds as a ~784-node input column, and its cell height degenerates the whole portrait
+    into a tall-narrow bar while starving every other cell's budget. Above the cap an expert reads
+    as its labeled opaque footprint; its own full-detail portrait still lives in images/<key>.png."""
     spec = RenderSpec()
     inputs = view.input_signatures or ["(no input adapter yet)"]
     outputs = view.output_signatures or ["(no output head yet)"]
@@ -866,7 +916,13 @@ def build_overmind_spec(view: OvermindView, *, resolve: ResolveFn | None = None,
     budget = _Budget(node_budget)
     children: list[_Built] = []
     for vertex in view.vertices:
-        child = _build_ref(f"library:{vertex.key}", resolve=resolve, budget=budget, depth=0, stack=()) if vertex.key else _opaque_built(vertex.label)
+        if vertex.key:
+            allowance = min(cell_node_budget, budget.remaining)
+            cell_budget = _Budget(allowance)
+            child = _build_ref(f"library:{vertex.key}", resolve=resolve, budget=cell_budget, depth=0, stack=())
+            budget.remaining -= allowance - cell_budget.remaining
+        else:
+            child = _opaque_built(vertex.label)
         child.label = vertex.label
         child.opaque = child.opaque or vertex.retired  # retired experts read as opaque footprints
         children.append(child)

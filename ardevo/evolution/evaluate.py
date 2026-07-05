@@ -82,21 +82,29 @@ def _stacked_sample_metrics(net: "GraphNet", columns: torch.Tensor | None, adapt
     return per_sample
 
 
-def _sample_metrics(module: SubstrateModule, adapter: "Adapter", samples: Sequence[float], batched_samples: bool = False) -> tuple[dict[str, float], list[dict[str, float]], int]:
+# The stacked path's break-even node count on the compact-column substrate (T2, 2026-07-04:
+# 0.56x/0.68x/0.83x/1.04x/1.14x at widths 16/64/256/784/3072). "auto" turns it on from here up.
+STACKED_AUTO_MIN_NODES = 768
+
+
+def _sample_metrics(
+    module: SubstrateModule, adapter: "Adapter", samples: Sequence[float], batched_samples: bool | str = False
+) -> tuple[dict[str, float], list[dict[str, float]], int]:
     """Evaluate with all TRAINABLE weights filled to each shared sample value; restore after.
 
     Frozen parameters (macro inners, library entries inside compositions) are deliberately
     excluded: robustness measures exactly the surface evolution and training control. The stacked
-    fast path exists but DEFAULTS OFF: `uv run benchmark` measured it 0.2-0.4x at widths
-    16-256 because the batched forward does full-width level math (D times the FLOPs of the
-    serial path's per-level column slicing); enable it only if the bench shows a win for your
-    population shape. Non-batchable modules (recurrent, product, composed) always use the serial
-    fill/restore loop. The restore is mandatory on that path: in hybrid
-    mode the module holds gradient-trained weights the trial later exports and saves.
-    Returns (robustness metrics, per-sample metrics, best index).
+    fast path DEFAULTS OFF: on the compact-column substrate `uv run benchmark` measured it below
+    break-even until ~768 nodes (0.56x-0.83x at widths 16-256) and only 1.04x-1.14x at image
+    widths. `batched_samples = "auto"` enables it exactly where it measured a win (node count >=
+    STACKED_AUTO_MIN_NODES); `true` forces it everywhere. Non-batchable modules (recurrent,
+    product, composed) always use the serial fill/restore loop. The restore is mandatory on that
+    path: in hybrid mode the module holds gradient-trained weights the trial later exports and
+    saves. Returns (robustness metrics, per-sample metrics, best index).
     """
     core_net, columns = module.core()
-    if batched_samples and core_net is not None and getattr(adapter, "encoder", None) is not None and getattr(adapter, "encoded", None) is not None:
+    stacked = batched_samples is True or (batched_samples == "auto" and core_net is not None and core_net.n >= STACKED_AUTO_MIN_NODES)
+    if stacked and core_net is not None and getattr(adapter, "encoder", None) is not None and getattr(adapter, "encoded", None) is not None:
         per_sample = _stacked_sample_metrics(core_net, columns, adapter, samples)
     else:
         trainable = [parameter for parameter in module.parameters() if parameter.requires_grad]
@@ -136,7 +144,7 @@ def weight_samples(
     adapter: "Adapter",
     *,
     samples: Sequence[float] = DEFAULT_WEIGHT_SAMPLES,
-    batched_samples: bool = False,
+    batched_samples: bool | str = False,
     **_params: object,
 ) -> dict[str, float]:
     """Pure weight-agnostic scoring: standard metric keys come from the BEST shared-weight sample."""
@@ -151,7 +159,7 @@ def hybrid(
     adapter: "Adapter",
     *,
     samples: Sequence[float] = DEFAULT_WEIGHT_SAMPLES,
-    batched_samples: bool = False,
+    batched_samples: bool | str = False,
     **_params: object,
 ) -> dict[str, float]:
     """Trained-weight metrics under the standard keys, plus the robustness metrics merged in."""

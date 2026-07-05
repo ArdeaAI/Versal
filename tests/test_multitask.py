@@ -52,7 +52,9 @@ def test_build_pool_report_closes_backend_datasets(monkeypatch) -> None:
     report = multitask.build_pool_report("unused", [1, 2], n_samples=4, support_fraction=0.8, tasks_per_rung=1, shuffle=False, seed=0)
 
     assert [entry.rung for entry in report.entries] == [1, 2]
-    assert closed == [1, 2]
+    # Rungs load on a thread pool, so CLOSE order follows completion order; the guarantee is that
+    # every dataset closes and the ENTRY order stays the configured rung order.
+    assert sorted(closed) == [1, 2]
 
 
 def test_scheduler_state_round_trips() -> None:

@@ -5,6 +5,7 @@ Each component is a registered `(genome, metrics) -> float`. `FitnessAggregator`
 purely from config.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -105,4 +106,9 @@ class FitnessAggregator:
     components: list[tuple[FitnessComponent, float]]
 
     def __call__(self, genome: Any, metrics: dict[str, float]) -> float:
-        return sum(weight * component(genome, metrics) for component, weight in self.components)
+        total = sum(weight * component(genome, metrics) for component, weight in self.components)
+        # A candidate whose forward exploded (NaN/inf loss, e.g. a deep recurrent unroll on a
+        # TIME-axis task) is a nonviable phenotype, exactly like an undecodable genome: it scores
+        # the floor and selection buries it. Letting NaN through poisoned speciation's share
+        # arithmetic and crashed the run (rung 8 ecg, 2026-07-05).
+        return total if math.isfinite(total) else -1e9

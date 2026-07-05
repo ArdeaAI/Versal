@@ -578,7 +578,7 @@ class RouterService:
         if live == self._rendered_vertex_count:
             return
         try:
-            from ardevo.rendering import OvermindVertex, OvermindView, render_overmind
+            from ardevo.rendering import OvermindVertex, OvermindView, render_overmind, submit_render
 
             embedding_ordered = self._embedding_order()
             rank = {name: index for index, name in enumerate(embedding_ordered)}
@@ -625,7 +625,8 @@ class RouterService:
                 max_steps=self.net.max_steps,
                 pathways=self._pathways(ordered_names),
             )
-            render_overmind(self.image_dir / "overmind.png", view, library=self.library)
+            # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
+            submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library)
             self._rendered_vertex_count = live
         except Exception as error:  # a render must never break a run
             logger.debug("overmind render skipped: %s", error)

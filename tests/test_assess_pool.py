@@ -63,6 +63,46 @@ def test_flat_process_pool_matches_serial(xor_adapter, linear_genome: Genome, so
     assert results[0] == results[1]
 
 
+def test_adapter_spill_is_cached_resolves_exactly_and_cleans_up(xor_adapter, tmp_path) -> None:
+    """The pool pickles an AdapterRef (a path) instead of the encoded tensors; workers resolve it
+    through a one-slot cache; close_pool removes the spill file."""
+    import torch
+
+    from ardevo.evolution import evolver as ev_mod
+    from ardevo.evolution.evolver import AdapterRef
+
+    config = {
+        "seed": 0,
+        "library_dir": str(tmp_path),
+        "evolution": {
+            "pop_size": 2,
+            "init": {"kind": "minimal"},
+            "selection": {"kind": "tournament", "tournament_size": 2},
+            "crossover": {"kind": "none"},
+            "mutation": {"operators": []},
+            "train": {"kind": "gradient", "steps": 2, "lr": 0.05},
+        },
+        "fitness": {"components": ["support_accuracy"]},
+    }
+    evolver = build_evolver(config)
+    ref = evolver._pooled_adapter(xor_adapter)
+    assert isinstance(ref, AdapterRef)
+    assert ref.path.startswith(str(tmp_path)) and "encoded_cache" in ref.path
+
+    again = evolver._pooled_adapter(xor_adapter)
+    assert isinstance(again, AdapterRef) and again.path == ref.path  # identity slot: spilled once
+
+    loaded = ev_mod._resolve_adapter(ref)
+    assert torch.equal(loaded.encoded.support_input[0], xor_adapter.encoded.support_input[0])
+    assert loaded.n_inputs == xor_adapter.n_inputs and loaded.n_outputs == xor_adapter.n_outputs
+    assert ev_mod._resolve_adapter(ref) is loaded  # one-slot worker cache: no second disk read
+
+    from pathlib import Path
+
+    evolver.close_pool()
+    assert not Path(ref.path).exists()
+
+
 def test_partitioned_batched_training_handles_mixed_generations(xor_adapter, linear_genome: Genome, solving_genome: Genome) -> None:
     """T4: one non-batchable candidate must not force the whole generation onto the serial path."""
     from tests.test_aggregation import _product_xor_genome

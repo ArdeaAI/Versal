@@ -19,7 +19,7 @@ would. Padded and non-edge entries start at zero with zero gradient and stay zer
 import random
 import time
 from dataclasses import replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
@@ -28,6 +28,9 @@ from ardevo.evaluation import support_loss, support_loss_deep
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
 from ardevo.substrate import SubstrateModule
+
+if TYPE_CHECKING:
+    from ardevo.substrate import GraphNet
 
 TrainOp = Callable[..., tuple[Genome, SubstrateModule]]
 PopulationTrainOp = Callable[..., list[tuple[Genome, SubstrateModule]]]
@@ -113,33 +116,25 @@ def gradient_refine(
     return genome, module
 
 
-@TRAIN_POPULATION.register("gradient_batched")
-def gradient_batched(
-    genomes: list[Genome],
-    modules: list[SubstrateModule],
-    encoded: EncodedTask,
+def partition_batchable(
+    cores: "list[tuple[GraphNet | None, torch.Tensor | None]]",
     *,
-    rng: random.Random,
-    steps: int = 20,
-    lr: float = 0.01,
-    writeback: bool = True,
-    weight_decay: float = 0.0,
-    device: str = "auto",
-    max_padded_nodes: int = 1024,
-) -> list[tuple[Genome, SubstrateModule]]:
-    """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
-    params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
-    product/macro/composed substrates, oversized padding, mismatched heads) no longer force the
-    WHOLE generation onto the sequential path; `fallback` reports the serial fraction."""
-    from ardevo.substrate_batched import BatchedGraphNet
-
-    started = time.perf_counter()
-    cores = [module.core() for module in modules]
+    steps: int,
+    max_padded_nodes: int,
+    min_batch_nodes: int = 0,
+) -> tuple[list[int], list[int]]:
+    """Split candidate indices into (batchable, serial). The single partition seam shared by the
+    population trainers and the Evolver's hybrid assess router, so the two can never disagree
+    about which candidates the batch program will take. Batchable = a plain GraphNet core within
+    the padding budget whose I/O signature + head columns match the FIRST batchable candidate.
+    `min_batch_nodes` is the WIDTH FLOOR: below it the pool wins (measured: 12 workers beat the
+    MPS batch program at grown-from-minimal sizes), so small candidates go serial and the device
+    engages only where it measured a win. 0 = no floor (the pre-knob behavior)."""
     batch_indices: list[int] = []
     serial_indices: list[int] = []
     reference: tuple[tuple[int, int], torch.Tensor | None] | None = None
     for index, (net, columns) in enumerate(cores):
-        if steps <= 0 or net is None or net.n > max_padded_nodes:
+        if net is None or steps <= 0 or net.n > max_padded_nodes or net.n < min_batch_nodes:
             serial_indices.append(index)
             continue
         signature = (int(net.input_pos.numel()), int(net.output_pos.numel()))
@@ -154,16 +149,123 @@ def gradient_batched(
     if len(batch_indices) < 2:  # padding a single candidate buys nothing over the plain path
         serial_indices = sorted(serial_indices + batch_indices)
         batch_indices = []
+    return batch_indices, serial_indices
+
+
+@TRAIN_POPULATION.register("gradient_batched")
+def gradient_batched(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 20,
+    lr: float = 0.01,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+    device: str = "auto",
+    max_padded_nodes: int = 1024,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+) -> list[tuple[Genome, SubstrateModule]]:
+    """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
+    params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
+    product/macro/composed substrates, oversized padding, mismatched heads) no longer force the
+    WHOLE generation onto the sequential path; `fallback` reports the serial fraction."""
+    return _gradient_batched_impl(
+        genomes,
+        modules,
+        encoded,
+        rng=rng,
+        steps=steps,
+        lr=lr,
+        writeback=writeback,
+        weight_decay=weight_decay,
+        device=device,
+        max_padded_nodes=max_padded_nodes,
+        min_batch_nodes=min_batch_nodes,
+        adam_fused=adam_fused,
+        torch_compile=torch_compile,
+        serial_op=gradient,
+    )
+
+
+@TRAIN_POPULATION.register("gradient_refine")
+def gradient_refine_population(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 20,
+    lr: float = 0.01,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+    device: str = "auto",
+    max_padded_nodes: int = 1024,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+) -> list[tuple[Genome, SubstrateModule]]:
+    """Population form of `gradient_refine`. Correct by exclusion: `core()` keeps every refine/
+    recurrent/product/macro module OUT of the batch (they train through sequential
+    `gradient_refine`, deep supervision intact), and for the plain-GraphNet remainder
+    `gradient_refine` IS plain `gradient` (no `refine_trace`), which is exactly the batch program's
+    math. Registered under the same name so `[orchestrator.direct.train] kind = "gradient_refine"`
+    batches with zero config edits; `batched = false` on the table restores the pool-only path."""
+    return _gradient_batched_impl(
+        genomes,
+        modules,
+        encoded,
+        rng=rng,
+        steps=steps,
+        lr=lr,
+        writeback=writeback,
+        weight_decay=weight_decay,
+        device=device,
+        max_padded_nodes=max_padded_nodes,
+        min_batch_nodes=min_batch_nodes,
+        adam_fused=adam_fused,
+        torch_compile=torch_compile,
+        serial_op=gradient_refine,
+    )
+
+
+def _gradient_batched_impl(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int,
+    lr: float,
+    writeback: bool,
+    weight_decay: float,
+    device: str,
+    max_padded_nodes: int,
+    serial_op: TrainOp,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+) -> list[tuple[Genome, SubstrateModule]]:
+    from ardevo.substrate_batched import BatchedGraphNet
+
+    started = time.perf_counter()
+    cores = [module.core() for module in modules]
+    batch_indices, serial_indices = partition_batchable(cores, steps=steps, max_padded_nodes=max_padded_nodes, min_batch_nodes=min_batch_nodes)
 
     results: list[tuple[Genome, SubstrateModule] | None] = [None] * len(modules)
     for index in serial_indices:
-        results[index] = gradient(genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+        results[index] = serial_op(genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
 
     n_max = 0.0
     pad_efficiency = 0.0
     if batch_indices:
+        from ardevo.utils.device import auto_device
+
         nets = [net for index in batch_indices if (net := cores[index][0]) is not None]
-        resolved = torch.device("mps") if device == "auto" and torch.backends.mps.is_available() else torch.device(device if device != "auto" else "cpu")
+        resolved = auto_device() if device == "auto" else torch.device(device)
         batched = BatchedGraphNet(nets, device=resolved)
         x, _descriptor = encoded.support_input
         target, mask, descriptor = encoded.support_target
@@ -174,10 +276,15 @@ def gradient_batched(
         population = len(nets)
 
         if batched.mask.any():
-            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay)
+            # Both knobs default OFF: fused Adam is cuda-only and not bit-equal to the unfused
+            # step; torch.compile recompiles as the population shape churns generation to
+            # generation, so it must prove itself on `uv run benchmark` before use.
+            fused = bool(adam_fused and resolved.type == "cuda")
+            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay, fused=fused)
+            program = torch.compile(batched, dynamic=True) if torch_compile else batched
             for _ in range(steps):
                 optimizer.zero_grad()
-                out = batched(x_device)  # [P, B, n_out]
+                out = program(x_device)  # [P, B, n_out]
                 if columns is not None:
                     out = out.index_select(2, columns)
                 folded = out.reshape(population * x_device.shape[0], -1)

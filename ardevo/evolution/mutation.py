@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ardevo.evolution.genome import (
     ConnectionGene,
+    ForwardReachability,
     Genome,
     InnovationTracker,
     MacroGene,
@@ -75,11 +76,16 @@ def add_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     rng.shuffle(sources)
     rng.shuffle(targets)
+    # Per-call precomputation instead of per-pair O(E) scans: the wide-input pair sweep was the
+    # image-rung wedge (see ForwardReachability). Same iteration order, same accept decisions,
+    # no rng draws touched, so children are bitwise-identical to the scanning form.
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    reach = ForwardReachability(child)
     for source in sources:
         for target in targets:
-            if source == target or child.has_connection(source, target):
+            if source == target or (source, target) in existing:
                 continue
-            if would_create_cycle(child, source, target):
+            if reach.creates_cycle(source, target):
                 continue
             innovation = ctx.innovations.innovation(source, target)
             child.connections.append(ConnectionGene(source, target, rng.gauss(0.0, 1.0), True, innovation))
@@ -449,9 +455,15 @@ def add_local_connection(genome: Genome, ctx: MutationContext, *, rng: random.Ra
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     candidates: list[tuple[int, int]] = []
     weights: list[float] = []
+    # This full pair sweep (every input x every target on a stamped grid) was THE image-rung wedge:
+    # per-pair has_connection/would_create_cycle scans measured 4.9s PER CALL at width 3072 on the
+    # main thread. Precompute once; the sweep itself is preserved verbatim (same candidate order,
+    # same weights, same rng draws), so evolution is bitwise-identical.
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    reach = ForwardReachability(child)
     for source in sources:
         for target in targets:
-            if source == target or child.has_connection(source, target) or would_create_cycle(child, source, target):
+            if source == target or (source, target) in existing or reach.creates_cycle(source, target):
                 continue
             distance = coordinate_distance(child.nodes[source].coordinate, child.nodes[target].coordinate)
             if math.isinf(distance):
@@ -520,8 +532,13 @@ def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random
             continue
         new_id = ctx.innovations.new_node_id()
         child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, child.nodes[template].activation, _centroid(coords))
+        # One reachability snapshot per copy instead of a per-source adjacency rebuild. Mid-loop
+        # appends only add edges INTO new_id, which cannot extend any walk FROM new_id, so the
+        # snapshot answers exactly what the per-call rebuild answered (structurally always False
+        # today: new_id is a sink until its output readouts land below).
+        reach = ForwardReachability(child)
         for source in field:
-            if not would_create_cycle(child, source, new_id):
+            if not reach.creates_cycle(source, new_id):
                 child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
         for output in outputs:
             child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))

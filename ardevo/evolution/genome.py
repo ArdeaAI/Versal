@@ -123,12 +123,56 @@ class Genome:
         return max(self.nodes) if self.nodes else -1
 
 
+class ForwardReachability:
+    """Cycle checks for a BATCH of candidate edges against one genome snapshot.
+
+    `would_create_cycle` rebuilds the forward adjacency and BFSes per call, which is fine for a
+    single check but quadratic death inside the geometry mutators' source x target enumeration
+    (measured: ONE `add_local_connection` at width 3072 took 4.9s and pegged the run's main thread
+    for hours on image rungs). This builds the adjacency ONCE and memoizes the full reach-set per
+    queried target, so a whole pair sweep pays at most |distinct targets| BFS walks. Answers are
+    exactly `would_create_cycle`'s: a forward edge in -> out closes a cycle iff out already
+    reaches in, or they are equal. The snapshot goes stale if the genome gains forward edges;
+    build a fresh instance after structural appends."""
+
+    def __init__(self, genome: Genome) -> None:
+        self._adjacency: dict[int, list[int]] = {}
+        for conn in genome.forward_connections():
+            self._adjacency.setdefault(conn.in_id, []).append(conn.out_id)
+        for source, target in macro_implied_edges(genome):
+            self._adjacency.setdefault(source, []).append(target)
+        self._reach: dict[int, set[int]] = {}
+
+    def creates_cycle(self, in_id: int, out_id: int) -> bool:
+        if in_id == out_id:
+            return True
+        reach = self._reach.get(out_id)
+        if reach is None:
+            reach = self._reach_from(out_id)
+            self._reach[out_id] = reach
+        return in_id in reach
+
+    def _reach_from(self, start: int) -> set[int]:
+        queue = deque([start])
+        seen = {start}
+        while queue:
+            current = queue.popleft()
+            for nxt in self._adjacency.get(current, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return seen
+
+
 def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
     """True if adding a FORWARD edge `in_id -> out_id` would make the forward graph cyclic.
 
     A cycle appears iff `out_id` can already reach `in_id` along enabled forward edges (or they are
-    equal). Recurrent edges are time-delayed and never participate.
-    """
+    equal). Recurrent edges are time-delayed and never participate. Single-shot form with an
+    early-exit BFS; batch callers (the geometry mutators) use `ForwardReachability`, and
+    `make_acyclic` maintains its own incremental adjacency: wrapping this around a per-call
+    `ForwardReachability` was measured as a constructor/GC storm on the module-pool advance
+    (2026-07-05, the second parity wedge)."""
     if in_id == out_id:
         return True
     adjacency: dict[int, list[int]] = {}
@@ -281,17 +325,48 @@ def make_acyclic(genome: Genome) -> Genome:
     Recombination (innovation-aligned crossover) and re-enabling edges can introduce cycles into an
     otherwise feedforward genome; this repair keeps the substrate decodable. Edges are considered in
     order, so earlier (typically older) genes are preferred when a conflict arises.
+
+    Two performance shapes, identical decisions (the module pool runs this per child per
+    generation, so it must stay O(V+E) in the common case):
+    - FAST PATH: already-acyclic genomes (the overwhelming majority) are detected with one
+      `topological_order` pass over the exact same edge set the repair checks (enabled forward +
+      macro-implied); the repair would disable nothing, so an unmodified copy is returned.
+    - REPAIR: one incrementally-grown adjacency + an early-exit BFS per candidate edge, instead of
+      rebuilding the adjacency per edge (the old per-edge `would_create_cycle` calls).
     """
-    kept = Genome(nodes=dict(genome.nodes), connections=[], macros=list(genome.macros))
+    try:
+        topological_order(genome)
+    except ValueError:
+        pass  # a cycle exists somewhere: run the ordered repair below
+    else:
+        return Genome(nodes=dict(genome.nodes), connections=list(genome.connections), macros=list(genome.macros), refine_steps=genome.refine_steps)
+
+    adjacency: dict[int, list[int]] = {}
+    for source, target in macro_implied_edges(genome):
+        adjacency.setdefault(source, []).append(target)
+
+    def reaches(start: int, goal: int) -> bool:
+        queue = deque([start])
+        seen = {start}
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                return True
+            for nxt in adjacency.get(current, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return False
+
     repaired: list[ConnectionGene] = []
     for conn in genome.connections:
         if not conn.enabled or conn.recurrent:
             # Recurrent edges are time-delayed: cycles through them are legal, so they pass through.
             repaired.append(conn)
-        elif conn.in_id == conn.out_id or would_create_cycle(kept, conn.in_id, conn.out_id):
+        elif conn.in_id == conn.out_id or reaches(conn.out_id, conn.in_id):
             repaired.append(replace(conn, enabled=False))
         else:
-            kept.connections.append(conn)
+            adjacency.setdefault(conn.in_id, []).append(conn.out_id)
             repaired.append(conn)
     return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps)
 

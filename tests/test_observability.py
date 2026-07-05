@@ -37,6 +37,27 @@ def _trial(tmp_path: Path, orchestrator) -> OrchestratedTrial:
     return trial
 
 
+def test_attempts_carry_wall_clock_and_stage_forensics(xor_task: Task, tmp_path: Path) -> None:
+    """Every solve stamps seconds + per-stage seconds so a wedged stage shows in run_summary.json
+    instead of requiring a live process sample (the 2026-07-05 CIFAR mutation wedge)."""
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator.solve(xor_task)
+    attempt = orchestrator.attempts[-1]
+    assert attempt.seconds > 0.0
+    assert attempt.stage_seconds  # at least one strategy timed
+    assert all(value >= 0.0 for value in attempt.stage_seconds.values())
+    row = attempt.to_dict()
+    assert row["seconds"] == attempt.seconds and row["stage_seconds"] == attempt.stage_seconds
+    assert Attempt.from_dict(row).stage_seconds == attempt.stage_seconds
+
+
+def test_attempts_from_old_checkpoints_without_timing_still_restore() -> None:
+    legacy = {"task": "xor", "depth": 0, "outcome": "evolved", "metric": 1.0, "generations": 2}
+    attempt = Attempt.from_dict(legacy)
+    assert attempt.seconds == 0.0 and attempt.stage_seconds == {}
+    assert "seconds" not in attempt.to_dict()  # zero stays absent: old summaries byte-identical
+
+
 def test_run_summary_records_a_task_that_admits_nothing(tmp_path: Path, xor_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)

@@ -18,11 +18,15 @@
 project = "ardevo"
 experiment = "orchestrated_overmind"
 clearml = true
-machine = "MonadMetal"
+machine = "MonadCPU"        # also picks the population-batched compute device: MonadMetal -> mps,
+                              # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
 seed = 0
 log_level = "INFO"
 output_uri = false
 repo = "https://github.com/ArdeaAI/ardevo.git"
+render_async = true           # admission/overmind PNGs draw on a background thread instead of
+                              # blocking the run loop (flushed before uploads, GC, and run end)
+tf32 = false                  # opt-in TF32 CUDA matmuls: faster on Ampere+, changes numerics
   [run.duration]
   generations = 1000          # informational; the orchestrated run is bounded by [orchestrator] tasks
 
@@ -33,7 +37,7 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
 tasks_per_rung = 100
 shuffle = true
@@ -66,7 +70,11 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   routed = 0.2                  # routed's slice is small because it bills generation_cost, not real gens)
   direct = 0.5
   composition = 0.3
-  [orchestrator.routed]       # the learned routed substrate: a sparse MoE over FROZEN library entries
+  [orchestrator.routed]       # the learned routed substrate: a sparse MoE over FROZEN library entries.
+                              # Router training stays on CPU deliberately: d_model 64 kernels are far
+                              # below the measured GPU break-even (T4/T5 showed even the pop-64 batch
+                              # program loses to CPU at these sizes), so a device knob here would only
+                              # invite a slower configuration.
   d_model = 64                # the shared bus width; growth is an append, never a resize
   top_k = 2
   max_steps = 4               # bounded unroll: the no-stuck-loop guarantee (cycles are legal)
@@ -130,7 +138,21 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # (independent genomes, rng-free training); the dominant run cost.
     [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
                                  # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
+                                 # The kind ALSO names a population trainer: batched = true trains
+                                 # each generation's batchable plain-core subset as ONE tensor
+                                 # program on the machine's compute device ([run] machine:
+                                 # MonadMetal -> mps, LatticeCUDA -> cuda) while the pool trains the
+                                 # refine/recurrent/product/macro rest and runs all evaluation. Same
+                                 # math (1e-4 batch contract, tests/test_assess_hybrid.py).
+                                 # MEASURED (M4 Max, slim substrate, T5 end-to-end): the 12-worker
+                                 # pool BEATS the MPS hybrid at BOTH image widths (784: 1556 vs
+                                 # 1838 ms/gen; 3072: 4468 vs 6069 ms/gen, 2026-07-05), so batched
+                                 # stays FALSE here. Flip it on LatticeCUDA after `uv run benchmark`
+                                 # T4/T5 show a win THERE, and set min_batch_nodes to the measured
+                                 # break-even so narrow tasks keep the pool. Overridable: device,
+                                 # max_padded_nodes (1024 cpu / 4096 gpu), min_batch_nodes (0).
     kind = "gradient_refine"
+    batched = false
     steps = 120
     lr = 0.03
     writeback = true
@@ -214,6 +236,9 @@ elitism = 1
   [evolution.evaluate]        # hybrid = trained metrics PLUS weight-robustness (library admission currency)
   kind = "hybrid"
   samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+  batched_samples = "auto"    # stack the 6 sample fills into one batched forward, but only where it
+                              # measured a win (nodes >= 768: 1.04x at 784, 1.14x at 3072; a LOSS
+                              # below that, T2 2026-07-04). false = always serial, true = always stacked.
   [evolution.speciation]      # module species are the blueprint targets the compositions reference.
                               # "neat" = compatibility-distance niching + fitness sharing, one champion
                               # per species; the threshold AUTO-ADJUSTS toward target_species each

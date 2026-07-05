@@ -10,10 +10,12 @@ capped, so checkpoints are written only when a task admits novel library entries
 import datetime
 import json
 import random
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any, cast
 
+import psutil
 import torch
 
 from ardevo import checkpoint, rendering, results
@@ -110,6 +112,9 @@ class OrchestratedTrial(Proctor):
             self.task_records = []
             console.rule(f"[bold]Orchestrated run: rungs {self.rungs}, {len(self.pool)} tasks, library {self.library.root} -> {self.run_dir}")
 
+        if bool(self.config.get("render_async", False)):
+            rendering.enable_async_rendering()
+
         # A durable record exists before the first task so a crash during setup or task 0 leaves a
         # diagnosable run_summary.json instead of an empty directory (the silent-failure mode we kill).
         orchestrator: Orchestrator | None = None
@@ -124,15 +129,19 @@ class OrchestratedTrial(Proctor):
                 entry = self.pool[index]
                 console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
                 library_keys_before = set(self.library.keys())
+                task_started = time.perf_counter()
                 solution = orchestrator.solve(entry.task)
+                task_seconds = time.perf_counter() - task_started
                 task_cursor += 1
                 self.library.flush_stats()  # deferred bump_stats writes land at the task boundary
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
                 attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
                 outcome = attempt.outcome if attempt is not None else "unknown"
                 label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
-                console.print(f"  -> {label} (library size {len(self.library)})")
-                self._log_task(orchestrator, state, task_cursor)
+                stages = dict(getattr(attempt, "stage_seconds", None) or {})
+                stage_note = f" [{', '.join(f'{k} {v:.0f}s' for k, v in stages.items())}]" if stages else ""
+                console.print(f"  -> {label} (library size {len(self.library)}, {task_seconds:.0f}s{stage_note})")
+                self._log_task(orchestrator, state, task_cursor, task_seconds)
                 # Durable record EVERY task, regardless of admission: a run is now measurable and
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
                 self._record_task(entry, attempt, new_library_keys, len(self.library))
@@ -143,12 +152,14 @@ class OrchestratedTrial(Proctor):
                     self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
             self.library.flush_stats()  # a crash still leaves the stats it had
+            rendering.flush_renders()  # pending async renders finish (their own failures only log)
             self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
             if orchestrator is not None:
                 self._persist_resume_state(orchestrator, state, task_cursor)
             raise
 
         self.library.flush_stats()
+        rendering.flush_renders()  # renders land before GC can delete images and before finalize
         self._persist_resume_state(orchestrator, state, task_cursor)
         if self.gc_enabled:
             self._run_gc(state)
@@ -231,6 +242,10 @@ class OrchestratedTrial(Proctor):
         }
         if attempt is not None and getattr(attempt, "refine_generations", 0):  # only when refinement ran (live mode stays byte-identical)
             record["refine_generations"] = attempt.refine_generations
+        if attempt is not None and getattr(attempt, "seconds", 0.0):
+            record["seconds"] = attempt.seconds
+            if getattr(attempt, "stage_seconds", None):
+                record["stage_seconds"] = dict(attempt.stage_seconds)
         self.task_records.append(record)
 
     def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:
@@ -273,7 +288,7 @@ class OrchestratedTrial(Proctor):
             ),
         )
 
-    def _log_task(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
+    def _log_task(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, task_seconds: float = 0.0) -> None:
         for series, value in orchestrator.counters.items():
             self.log_scalar("Orchestrator", series, value, task_cursor)
         self.log_scalar("Orchestrator", "library_size", len(self.library), task_cursor)
@@ -283,6 +298,11 @@ class OrchestratedTrial(Proctor):
         if state.modules:
             self.log_scalar("Modules", "mean_fitness", sum(m.fitness for m in state.modules) / len(state.modules), task_cursor)
         self.log_scalar("Modules", "species", len(state.species_champions), task_cursor)
+        # Wall-clock + memory per task: a wedged stage or a leaking process must be visible in
+        # the run record, not only via sampling a live process.
+        if task_seconds:
+            self.log_scalar("Throughput", "task_seconds", task_seconds, task_cursor)
+        self.log_scalar("Resources", "main_rss_gb", psutil.Process().memory_info().rss / 1e9, task_cursor)
         self.log_hardware_stats(task_cursor)
 
     def _checkpoint(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, new_library_keys: list[str], solution: Solution | None) -> None:
@@ -303,8 +323,10 @@ class OrchestratedTrial(Proctor):
                 counters=orchestrator.counters,
             ),
         )
-        results.render_speciation(directory, state.module_species_history, title=f"module species through task {task_cursor}")
+        # Snapshot the history: the async render thread must never read a list the next task mutates.
+        rendering.submit_render(results.render_speciation, directory, [dict(row) for row in state.module_species_history], title=f"module species through task {task_cursor}")
         if self.task:
+            rendering.flush_renders()  # artifacts upload only finished files
             for name in ("stats.json", "checkpoint.json", "speciation.png", "net.png"):
                 path = directory / name
                 if path.exists():
@@ -322,9 +344,9 @@ class OrchestratedTrial(Proctor):
         entry = self.library.load(key)
         title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
         if entry.entry_type == MODULE:
-            rendering.render_network(directory, genome_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(rendering.render_network, directory, genome_from_dict(entry.payload), title=title, library=self.library)
         elif entry.entry_type == COMPOSITION:
-            rendering.render_composition_network(directory, comp_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(rendering.render_composition_network, directory, comp_from_dict(entry.payload), title=title, library=self.library)
         else:
             raise ValueError(f"unknown library entry type {entry.entry_type!r}")
 
