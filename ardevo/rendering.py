@@ -710,7 +710,7 @@ def render_library_gallery(library: ModuleLibrary, out_path: Path, *, columns: i
 
 # Hidden-node tints for the atlas only: a tanh-gated motif should read at a glance without text.
 # Identity stays neutral so the interesting activations pop.
-_ACTIVATION_TINTS = {"identity": "#8b93b5", "tanh": "#7dcfff", "relu": "#9ece6a", "sigmoid": "#bb9af7"}
+_ACTIVATION_TINTS = {"identity": "#8b93b5", "tanh": "#7dcfff", "relu": "#9ece6a", "sigmoid": "#bb9af7", "sin": "#e0af68", "gaussian": "#f7768e"}
 
 
 def build_motif_spec(node_labels: tuple[NodeLabel, ...], edges: tuple[tuple[int, int, int], ...]) -> RenderSpec:

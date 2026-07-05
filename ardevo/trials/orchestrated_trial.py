@@ -246,6 +246,8 @@ class OrchestratedTrial(Proctor):
             record["seconds"] = attempt.seconds
             if getattr(attempt, "stage_seconds", None):
                 record["stage_seconds"] = dict(attempt.stage_seconds)
+        if attempt is not None and getattr(attempt, "sample_metrics", None):  # hybrid-eval G0 diagnostic; absent under standard eval
+            record["sample_metrics"] = dict(attempt.sample_metrics)
         self.task_records.append(record)
 
     def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:

@@ -128,7 +128,7 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
     overlay["library_dir"] = config.get("orchestrator", {}).get("library_dir", "library")
     # Single-task structure growth usually wants a stronger inner trainer (and sometimes a
     # different mutation recipe) than the composition loop's glue fitting; both are overridable.
-    for overridable in ("mutation", "train", "evaluate"):
+    for overridable in ("mutation", "train", "evaluate", "novelty"):
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution

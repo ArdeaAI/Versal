@@ -111,6 +111,41 @@ def test_max_depth_prevents_decomposition(tmp_path: Path, decomposable_task: Tas
     assert calls == ["half_parity"]  # one evolve attempt, no recursion
 
 
+def test_attempts_carry_champion_sample_metrics(tmp_path: Path, xor_task: Task) -> None:
+    """The G0 diagnostic: hybrid-eval champions stamp their weight-sample metrics onto the Attempt
+    (whitelisted keys only), and metrics without the weight-sample marker leave the field empty."""
+    from ardevo.evolution.composition import minimal_composition as _minimal
+
+    orchestrator = _orchestrator(tmp_path, table={"max_depth": 0})
+
+    def run_task(spec, state, *, budget, stop=None, seed_comps=None, on_generation=None):
+        comp = _minimal(spec.input_specs, spec.output_ref, spec.output_width, state.comp_innovations, state.rng)
+        metrics = {
+            "query_accuracy": 0.6,
+            "query_loss": 0.4,
+            "support_accuracy": 0.6,
+            "support_loss": 0.4,
+            "mean_sample_accuracy": 0.55,
+            "max_sample_accuracy": 0.91,
+            "min_sample_accuracy": 0.4,
+            "best_sample_weight": -1.0,
+            "weight_robustness": 0.38,
+            "mean_sample_loss": 0.7,
+        }
+        return AssessedComposition(comp=comp, metrics=metrics, fitness=0.6, net=None)
+
+    _patch_run_task(orchestrator, run_task)
+    assert orchestrator.solve(xor_task) is None  # below the bar -> failed attempt
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.sample_metrics == {"mean_sample_accuracy": 0.55, "max_sample_accuracy": 0.91, "best_sample_weight": -1.0, "weight_robustness": 0.38}
+
+    plain = _orchestrator(tmp_path / "plain", table={"max_depth": 0})
+    _patch_run_task(plain, _fake_run_task({}, []))
+    assert plain.solve(xor_task) is None
+    assert plain.attempts[-1].sample_metrics == {}  # standard-eval metrics fabricate nothing
+
+
 def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     calls: list[str] = []

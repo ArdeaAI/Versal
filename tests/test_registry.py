@@ -49,3 +49,17 @@ def test_unknown_operator_raises():
     bad["evolution"]["selection"] = {"kind": "does_not_exist"}
     with pytest.raises(KeyError, match="selection"):
         build_evolver(bad)
+
+
+def test_build_evolver_resolves_nsga2_and_objectives():
+    config = copy.deepcopy(_CONFIG)
+    config["evolution"]["selection"] = {"kind": "nsga2"}
+    config["fitness"]["objectives"] = ["query_accuracy", "connection_cost"]
+    evolver = build_evolver(config)
+    assert _op_name(evolver.selection_op) == "nsga2"
+    assert [name for name, _component in evolver.fitness.objective_components] == ["query_accuracy", "connection_cost"]
+
+
+def test_no_objectives_key_yields_empty_objective_components():
+    evolver = build_evolver(_CONFIG)
+    assert evolver.fitness.objective_components == []  # scalar configs stay scalar

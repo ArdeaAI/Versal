@@ -130,7 +130,23 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     )
 
     components = [(fitness.FITNESS.get(name), float(fitness_cfg.get(f"w_{name}", 1.0))) for name in fitness_cfg.get("components", [])]
-    aggregator = fitness.FitnessAggregator(components)
+    # `[fitness] objectives` names the Pareto vector (need not overlap `components`); absent = scalar-only.
+    objective_components = [(name, fitness.FITNESS.get(name)) for name in fitness_cfg.get("objectives", [])]
+    aggregator = fitness.FitnessAggregator(components, objective_components)
+
+    # `[evolution.novelty]`: absent table (or enabled = false) means None, the byte-identical off
+    # switch; the Evolver's post-assess hook then never computes a descriptor. A bare table header
+    # parses to {} and must mean ON with defaults, so gate on presence, never on dict truthiness.
+    novelty_cfg = evolution.get("novelty")
+    novelty_config = None
+    if novelty_cfg is not None and bool(novelty_cfg.get("enabled", True)):
+        from ardevo.evolution.novelty import NoveltyConfig
+
+        novelty_config = NoveltyConfig(
+            k=int(novelty_cfg.get("k", 15)),
+            archive_cap=int(novelty_cfg.get("archive_cap", 256)),
+            probe_rows=int(novelty_cfg.get("probe_rows", 64)),
+        )
 
     # Speciation is stateful (it remembers a representative per species), so its registry entries are
     # factories: resolve the kind, then build the configured speciator instance.
@@ -156,4 +172,5 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         speciate=speciate,
         activations=activations,
         default_activation=default_activation,
+        novelty=novelty_config,
     )

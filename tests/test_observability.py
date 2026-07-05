@@ -58,6 +58,29 @@ def test_attempts_from_old_checkpoints_without_timing_still_restore() -> None:
     assert "seconds" not in attempt.to_dict()  # zero stays absent: old summaries byte-identical
 
 
+def test_attempt_sample_metrics_round_trip_and_absent_when_empty() -> None:
+    diagnostics = {"mean_sample_accuracy": 0.55, "max_sample_accuracy": 0.9, "best_sample_weight": -1.0, "weight_robustness": 0.4}
+    attempt = Attempt(task="two_spirals", depth=0, outcome="failed", metric=0.67, generations=28, sample_metrics=dict(diagnostics))
+    row = attempt.to_dict()
+    assert row["sample_metrics"] == diagnostics
+    assert Attempt.from_dict(row).sample_metrics == diagnostics
+    legacy = {"task": "xor", "depth": 0, "outcome": "evolved", "metric": 1.0, "generations": 2}
+    restored = Attempt.from_dict(legacy)
+    assert restored.sample_metrics == {}
+    assert "sample_metrics" not in restored.to_dict()  # standard-eval rows stay byte-identical
+
+
+def test_run_summary_row_carries_sample_metrics(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    entry = task_entry(xor_task)
+    diagnostics = {"mean_sample_accuracy": 0.55, "max_sample_accuracy": 0.9}
+    trial._record_task(entry, Attempt(task=entry.name, depth=0, outcome="failed", metric=0.67, generations=28, sample_metrics=diagnostics), [], 0)
+    trial._record_task(entry, Attempt(task=entry.name, depth=0, outcome="failed", metric=0.5, generations=3), [], 0)
+    assert trial.task_records[0]["sample_metrics"] == diagnostics
+    assert "sample_metrics" not in trial.task_records[1]
+
+
 def test_run_summary_records_a_task_that_admits_nothing(tmp_path: Path, xor_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)

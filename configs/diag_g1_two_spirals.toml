@@ -1,22 +1,14 @@
-# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
-# ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
-# its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
-# Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
-# DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
-# Stage C adds training dynamics of its own; flip `halting`/`edge_bias` off individually to A/B
-# against a plainer routed setup. The routed model is portrait-ed to library/images/overmind.png
-# on every structural growth, with observed routing-traffic pathways drawn between experts. ALL 18
-# rungs are scheduled (no skipping), depth-0 failures leave stepping stones behind
-# ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
+# G1 FOCUSED ARM: the diag_g0 schedule (20 assaults on rung-3 two_spirals, cold) with the
+# Pareto/novelty flip, so the ONLY differences from the G0 run in ai/gate_g0.md are
+# [evolution.selection] kind = nsga2, [fitness] objectives, and [evolution.novelty]. The quick
+# paired signal before the full-ladder G1 arms: did divergent + wiring pressure climb off the
+# 0.55-0.66 plateau at the same budget and seed?
 #
-# Every evolutionary stage below is a registered, swappable operator: change a `kind`, reorder
-# `operators`, retune a weight, or register a new function and name it here. The loop never changes.
-#
-#   uv run app
+#   uv run app --config configs/diag_g1_two_spirals.toml
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_overmind"
+experiment = "diag_g1_two_spirals"
 clearml = true
 machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
                               # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
@@ -37,13 +29,13 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = [3]                   # two-spirals only: paired against the G0 run
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 100
+tasks_per_rung = 20
 shuffle = true
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
+tasks = 20                     # 20 assaults, matching diag_g0
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
@@ -186,8 +178,7 @@ elitism = 1
   [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
                               # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
                               # degrades to a fitness tournament on the scalar call sites)
-  kind = "tournament"
-  tournament_size = 3
+  kind = "nsga2"              # G1 arm: Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
@@ -245,10 +236,10 @@ elitism = 1
   # archive, computed by the direct path's post-assess hook and read by the "novelty" fitness
   # component / Pareto objective. Absent table = byte-identical off. archive_cap = 0 is the
   # archive-free (population-only) ablation. Overridable per path via [orchestrator.direct.novelty].
-  # [evolution.novelty]
-  # k = 15
-  # archive_cap = 256
-  # probe_rows = 64
+  [evolution.novelty]
+  k = 15
+  archive_cap = 256               # 0 = archive-free (population-only) ablation
+  probe_rows = 64
   [evolution.speciation]      # module species are the blueprint targets the compositions reference.
                               # "neat" = compatibility-distance niching + fitness sharing, one champion
                               # per species; the threshold AUTO-ADJUSTS toward target_species each
@@ -315,4 +306,4 @@ w_complexity_penalty = 0.01
 # NSGA-II selects on (raw component values; weights above shape only the scalar sum, which keeps
 # driving speciation budgets and champion tracking). Flip [evolution.selection] kind to "nsga2"
 # (drop tournament_size) and enable [evolution.novelty] alongside:
-# objectives = ["support_accuracy", "novelty", "connection_cost"]
+objectives = ["support_accuracy", "novelty", "connection_cost"]

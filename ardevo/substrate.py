@@ -22,11 +22,23 @@ from torch import nn
 
 from ardevo.evolution.genome import Genome, macro_implied_edges, topological_order
 
+
+def _gaussian(value: torch.Tensor) -> torch.Tensor:
+    # A named function, not a lambda: decoded nets store this callable in activation_groups, and
+    # the composition assess pool pickles whole trained nets back from workers (lambdas cannot
+    # pickle by reference; the 2026-07-05 diag_g0 crash).
+    return torch.exp(-value * value)
+
+
 _ACTIVATIONS: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "tanh": torch.tanh,
     "relu": torch.relu,
     "sigmoid": torch.sigmoid,
-    "identity": lambda value: value,
+    "identity": lambda value: value,  # special-cased at decode: never stored on a net, so never pickled
+    # Periodic + radial primitives (the WANN/CPPN palette): a single sin neuron can carve a spiral
+    # winding, a gaussian is a radial bump. Mutation-only; nothing seeds them (default stays tanh).
+    "sin": torch.sin,
+    "gaussian": _gaussian,
 }
 
 

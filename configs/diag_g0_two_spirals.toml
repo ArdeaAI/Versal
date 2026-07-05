@@ -1,22 +1,15 @@
-# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
-# ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
-# its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
-# Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
-# DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
-# Stage C adds training dynamics of its own; flip `halting`/`edge_bias` off individually to A/B
-# against a plainer routed setup. The routed model is portrait-ed to library/images/overmind.png
-# on every structural growth, with observed routing-traffic pathways drawn between experts. ALL 18
-# rungs are scheduled (no skipping), depth-0 failures leave stepping stones behind
-# ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
+# G0 DIAGNOSTIC (ai/two_spirals_modified_plan.md Phase 0): a focused two-spirals run that reads the
+# structure-vs-weights verdict off champion sample_metrics in run_summary.json. Derived from
+# configs/orchestrated_overmind.toml with EXACTLY three edits ([run] experiment, [schedule] rungs +
+# tasks_per_rung, [orchestrator] tasks); every search parameter stays byte-identical to the main
+# config, so the diagnostic measures the system as configured, not a hand-tuned recipe. Archive
+# library/ and results/ (into ai/archive/) before running so the search space starts cold.
 #
-# Every evolutionary stage below is a registered, swappable operator: change a `kind`, reorder
-# `operators`, retune a weight, or register a new function and name it here. The loop never changes.
-#
-#   uv run app
+#   uv run app --config configs/diag_g0_two_spirals.toml
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_overmind"
+experiment = "diag_g0_two_spirals"
 clearml = true
 machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
                               # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
@@ -37,13 +30,13 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = [3]                   # two-spirals only: the G0 readout undiluted by the other rungs
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 100
+tasks_per_rung = 20
 shuffle = true
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
+tasks = 20                     # 20 attempts give a distribution instead of a point estimate
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
@@ -184,8 +177,6 @@ elitism = 1
   kind = "minimal"
   weight_scale = 1.0
   [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
-                              # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
-                              # degrades to a fitness tournament on the scalar call sites)
   kind = "tournament"
   tournament_size = 3
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
@@ -241,14 +232,6 @@ elitism = 1
   batched_samples = "auto"    # stack the 6 sample fills into one batched forward, but only where it
                               # measured a win (nodes >= 768: 1.04x at 784, 1.14x at 3072; a LOSS
                               # below that, T2 2026-07-04). false = always serial, true = always stacked.
-  # DIVERGENT SELECTION (the G1 arm, with the nsga2 flip): k-NN behavioral novelty over a per-task
-  # archive, computed by the direct path's post-assess hook and read by the "novelty" fitness
-  # component / Pareto objective. Absent table = byte-identical off. archive_cap = 0 is the
-  # archive-free (population-only) ablation. Overridable per path via [orchestrator.direct.novelty].
-  # [evolution.novelty]
-  # k = 15
-  # archive_cap = 256
-  # probe_rows = 64
   [evolution.speciation]      # module species are the blueprint targets the compositions reference.
                               # "neat" = compatibility-distance niching + fitness sharing, one champion
                               # per species; the threshold AUTO-ADJUSTS toward target_species each
@@ -311,8 +294,3 @@ w_support_accuracy = 1.0
 w_weight_robustness = 0.5
 w_hidden_penalty = 0.05
 w_complexity_penalty = 0.01
-# PARETO MODE (the G1 arm, ai/two_spirals_modified_plan.md Phase 1): `objectives` names the vector
-# NSGA-II selects on (raw component values; weights above shape only the scalar sum, which keeps
-# driving speciation budgets and champion tracking). Flip [evolution.selection] kind to "nsga2"
-# (drop tournament_size) and enable [evolution.novelty] alongside:
-# objectives = ["support_accuracy", "novelty", "connection_cost"]

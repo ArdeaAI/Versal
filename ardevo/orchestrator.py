@@ -77,6 +77,10 @@ class Attempt:
     # 8-hour CIFAR mutation wedge was invisible in every record).
     seconds: float = 0.0
     stage_seconds: dict[str, float] = field(default_factory=dict)
+    # Champion weight-sample diagnostics (the G0 structure-vs-weights readout): present only when
+    # the evaluate op emitted them (hybrid / weight_samples), so standard-eval summaries and old
+    # checkpoints stay byte-identical.
+    sample_metrics: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -96,6 +100,8 @@ class Attempt:
             data["seconds"] = self.seconds
         if self.stage_seconds:
             data["stage_seconds"] = self.stage_seconds
+        if self.sample_metrics:
+            data["sample_metrics"] = self.sample_metrics
         return data
 
     @classmethod
@@ -113,7 +119,19 @@ class Attempt:
             refine_generations=int(data.get("refine_generations", 0)),
             seconds=float(data.get("seconds", 0.0)),
             stage_seconds=dict(data.get("stage_seconds", {})),
+            sample_metrics=dict(data.get("sample_metrics", {})),
         )
+
+
+_SAMPLE_METRIC_KEYS = ("mean_sample_accuracy", "max_sample_accuracy", "best_sample_weight", "weight_robustness")
+
+
+def _sample_metrics_of(result: StrategyResult) -> dict[str, float]:
+    # mean_sample_accuracy marks a real weight-sample measurement; _floored_metrics carries a bare
+    # weight_robustness = 0.0 that must not fabricate a diagnostic row under standard eval.
+    if "mean_sample_accuracy" not in result.champion_metrics:
+        return {}
+    return {key: float(result.champion_metrics[key]) for key in _SAMPLE_METRIC_KEYS if key in result.champion_metrics}
 
 
 @dataclass(frozen=True)
@@ -297,7 +315,18 @@ class Orchestrator:
         if result.metric >= self.accept_threshold:
             key = self._admit_result(result, task, spec, depth, decompose_op=None)
             self.counters["accepts"] += 1
-            self._record(Attempt(task=name, depth=depth, outcome="evolved", metric=result.metric, generations=result.generations_used, library_key=key, strategy=result.strategy))
+            self._record(
+                Attempt(
+                    task=name,
+                    depth=depth,
+                    outcome="evolved",
+                    metric=result.metric,
+                    generations=result.generations_used,
+                    library_key=key,
+                    strategy=result.strategy,
+                    sample_metrics=_sample_metrics_of(result),
+                )
+            )
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
 
         if depth < self.max_depth:
@@ -323,6 +352,7 @@ class Orchestrator:
                 strategy=result.strategy,
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
+                sample_metrics=_sample_metrics_of(result),
             )
         )
         logger.info("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.accept_metric, result.metric, result.strategy)
@@ -469,6 +499,7 @@ class Orchestrator:
                 library_key=key,
                 strategy=result.strategy,
                 refine_generations=result.generations_used,
+                sample_metrics=_sample_metrics_of(result),
             )
         )
         return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric), result.generations_used
@@ -696,6 +727,7 @@ class Orchestrator:
                 library_key=key,
                 decompose_op=chosen_name,
                 strategy=result.strategy,
+                sample_metrics=_sample_metrics_of(result),
             )
             self._record(attempt)
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)

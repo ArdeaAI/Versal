@@ -25,6 +25,8 @@ from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import MutationContext, MutationPipeline
+from ardevo.evolution.novelty import NoveltyConfig, archive_insert, compute_descriptor, novelty_scores, probe_tensor
+from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_key
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 
@@ -90,6 +92,12 @@ class Assessed:
     metrics: dict[str, float]
     fitness: float
     module: SubstrateModule | None  # the exact trained network that produced these metrics; None for a floored (undecodable) genome
+    # Pareto objective vector, filled lazily at the top of _next_generation ONLY when
+    # `[fitness] objectives` is configured; None on every scalar run (byte-identical path).
+    objectives: list[float] | None = None
+    # Behavioral descriptor (tanh outputs over the probe set), cached so a carried elite computes
+    # it once for its lifetime; only its population-relative SCORE is recomputed each generation.
+    descriptor: tuple[float, ...] | None = None
 
 
 @dataclass
@@ -103,6 +111,9 @@ class EvolverState:
     # Per-generation {species_id: size} snapshots, for the speciation chart.
     species_history: list[dict[int, int]] = field(default_factory=list)
     best: Assessed | None = None
+    # Rolling novelty archive ([evolution.novelty]): per-task by construction, since this state is
+    # born fresh per solve and task attempts are checkpoint-atomic (no serialization needed).
+    novelty_archive: list[tuple[float, ...]] = field(default_factory=list)
 
 
 @dataclass
@@ -134,6 +145,8 @@ class Evolver:
     # Mirror of the species history and of the latest batched-training stats, for trial logging.
     species_history: list[dict[int, int]] = field(default_factory=list)
     assess_stats: dict[str, float] = field(default_factory=dict)
+    # Behavioral-novelty config ([evolution.novelty]); None = the hook is a no-op, byte-identical.
+    novelty: NoveltyConfig | None = None
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
@@ -344,9 +357,40 @@ class Evolver:
             for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
                 genomes[index] = genome
         state.population = self.assess_many(genomes, adapter, state)
+        self._apply_novelty(state.population, state, adapter)
         state.best = max(state.population, key=lambda item: item.fitness)
         self.species_history = state.species_history
         return state
+
+    def _apply_novelty(self, population: list[Assessed], state: EvolverState, adapter: Adapter) -> None:
+        """Post-assess novelty pass: score every viable member against population + archive, inject
+        `metrics["novelty"]`, and re-aggregate scalar fitness so the score exists BEFORE the next
+        generation's speciation/selection reads it (parents and children alike). Runs at the end of
+        seed_state and _next_generation; rng-free; a no-op (byte-identical) when unconfigured.
+
+        Floored members (module None) are skipped entirely: no key, no re-aggregation, so the
+        -1e9 corpse sentinel survives untouched."""
+        if self.novelty is None:
+            return
+        probe = probe_tensor(adapter.encoded, self.novelty.probe_rows)
+        if probe is None:
+            return  # TIME-axis or degenerate task: novelty is out of scope, nothing changes
+        for item in population:
+            if item.descriptor is None and item.module is not None:
+                item.descriptor = compute_descriptor(item.module, probe)
+        scored = [item for item in population if item.descriptor is not None and item.module is not None]
+        if not scored:
+            return
+        dimension = len(scored[0].descriptor or ())
+        if any(len(entry) != dimension for entry in state.novelty_archive):
+            state.novelty_archive.clear()  # an adapter swap changed the descriptor space mid-state
+        descriptors = [item.descriptor for item in scored if item.descriptor is not None]
+        scores = novelty_scores(descriptors, state.novelty_archive, self.novelty.k)
+        for item, score in zip(scored, scores):
+            item.metrics["novelty"] = score
+            item.fitness = self.fitness(item.genome, item.metrics)
+        most_novel = max(range(len(scored)), key=lambda index: scores[index])
+        archive_insert(state.novelty_archive, descriptors[most_novel], self.novelty.archive_cap)
 
     def advance(self, state: EvolverState, adapter: Adapter) -> None:
         """Produce the next generation in place (one select -> crossover -> mutate -> ... -> replace)."""
@@ -363,6 +407,16 @@ class Evolver:
     ) -> list[Assessed]:
         genomes = [item.genome for item in assessed]
         fitnesses = [item.fitness for item in assessed]
+        # Pareto mode: vectors are (re)computed here, not at the Assessed construction sites, so the
+        # worker-pool triple contract stays untouched and population-relative metrics injected after
+        # the previous assess (novelty) are reflected. Speciation budgets stay on the scalar sum;
+        # Pareto replaces ordering only INSIDE each species. A corpse gets the floor vector: its
+        # tiny graph would otherwise win the wiring-cost axis and put undecodable genomes on front 0.
+        pareto = bool(self.fitness.objective_components)
+        if pareto:
+            floor_vector = [_FLOOR_FITNESS] * len(self.fitness.objective_components)
+            for item in assessed:
+                item.objectives = floor_vector.copy() if item.fitness <= _FLOOR_FITNESS else self.fitness.objectives(item.genome, item.metrics)
         plans = self.speciate(genomes, fitnesses, rng=state.rng, elitism=self.elitism, pop_size=self.pop_size)
         state.species_history.append({plan.species_id: len(plan.members) for plan in plans})
 
@@ -374,14 +428,23 @@ class Evolver:
         children: list[Genome] = []
         child_slots: list[int] = []
         for plan in plans:
-            members = sorted((assessed[index] for index in plan.members), key=lambda item: item.fitness, reverse=True)
+            if pareto:
+                pool = [assessed[index] for index in plan.members]
+                ranks, crowding = pareto_ranks_and_crowding([item.objectives or [] for item in pool])
+                order = pareto_sort_key(ranks, crowding, [item.fitness for item in pool])
+                members = [pool[index] for index in sorted(range(len(pool)), key=order)]
+            else:
+                members = sorted((assessed[index] for index in plan.members), key=lambda item: item.fitness, reverse=True)
             next_assessed.extend(members[: plan.n_elites])
             if plan.n_offspring <= 0:
                 continue
 
             species_genomes = [item.genome for item in members]
             species_fitnesses = [item.fitness for item in members]
-            parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring)
+            if pareto:
+                parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring, objectives=[item.objectives for item in members])
+            else:
+                parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring)
             for k in range(plan.n_offspring):
                 child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
                 child = self.mutation(child, ctx, rng=state.rng)
@@ -391,7 +454,9 @@ class Evolver:
 
         for slot, item in zip(child_slots, self.assess_many(children, adapter, state)):
             next_assessed[slot] = item
-        return [item for item in next_assessed if item is not None]
+        next_population = [item for item in next_assessed if item is not None]
+        self._apply_novelty(next_population, state, adapter)
+        return next_population
 
 
 _WORKER_RNG = random.Random(0)
