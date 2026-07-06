@@ -6,11 +6,12 @@ in or out via `[evolution.mutation].operators` with no code change. The shared `
 hands out fresh node ids / innovation numbers and the activation palette.
 """
 
+import inspect
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Callable
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Callable
 
 from ardevo.evolution.genome import (
     ConnectionGene,
@@ -58,6 +59,57 @@ class MutationPipeline:
         for operator in self.operators:
             genome = operator(genome, ctx, rng=rng)
         return genome
+
+
+def _operator_base_prob(operator: Mutator, params: dict[str, Any]) -> float:
+    """The rate an operator starts self-adapting from: its configured `prob`, else its own default."""
+    if "prob" in params:
+        return float(params["prob"])
+    parameter = inspect.signature(operator).parameters.get("prob")
+    if parameter is not None and parameter.default is not inspect.Parameter.empty:
+        return float(parameter.default)
+    return 0.1
+
+
+@dataclass
+class AdaptiveMutationPipeline:
+    """Self-adaptive mutation (lever F): each genome carries its own per-operator rates as strategy genes.
+
+    ES perturb-and-inherit (Rechenberg/Schwefel): before applying the operators to a child, perturb the
+    rates it inherited from its parent with a log-normal step (`rate * exp(learning_rate * N(0, 1))`, a
+    multiplicative random walk that stays positive), apply each operator at its own perturbed rate, then
+    stamp the perturbed rates onto the child so a fitter lineage's schedule propagates and a bad one dies
+    with its owner. The search rate thus adapts per problem instead of being hand-tuned per config.
+
+    Off is the ordinary `MutationPipeline` (a different object entirely), so the fixed-rate path is
+    byte-identical; this is constructed only under `[evolution.mutation] self_adaptive = true`. Rates seed
+    from each operator's configured `prob` on a genome that has none yet, and clamp to [min_rate, max_rate].
+    """
+
+    operators: Sequence[tuple[str, Mutator, dict[str, Any]]]
+    learning_rate: float = 0.1
+    min_rate: float = 0.001
+    max_rate: float = 1.0
+    _base_rates: dict[str, float] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        self._base_rates = {name: _operator_base_prob(operator, params) for name, operator, params in self.operators}
+
+    def __call__(self, genome: Genome, ctx: MutationContext, *, rng: random.Random) -> Genome:
+        inherited = genome.operator_rates
+        perturbed: dict[str, float] = {}
+        for name, _operator, _params in self.operators:
+            base = inherited.get(name, self._base_rates[name])
+            drifted = base * math.exp(self.learning_rate * rng.gauss(0.0, 1.0))
+            perturbed[name] = min(self.max_rate, max(self.min_rate, drifted))
+        child = genome
+        for name, operator, params in self.operators:
+            passthrough = {key: value for key, value in params.items() if key != "prob"}
+            child = operator(child, ctx, rng=rng, prob=perturbed[name], **passthrough)
+        if child is genome:  # no operator fired: never stamp rates onto a genome we do not own
+            child = genome.clone()
+        child.operator_rates = perturbed
+        return child
 
 
 @MUTATION.register("perturb_weights")

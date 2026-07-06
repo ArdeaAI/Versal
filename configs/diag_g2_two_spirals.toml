@@ -1,22 +1,23 @@
-# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
-# ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
-# its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
-# Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
-# DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
-# Stage C adds training dynamics of its own; flip `halting`/`edge_bias` off individually to A/B
-# against a plainer routed setup. The routed model is portrait-ed to library/images/overmind.png
-# on every structural growth, with observed routing-traffic pathways drawn between experts. ALL 18
-# rungs are scheduled (no skipping), depth-0 failures leave stepping stones behind
-# ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
+# G2 FOCUSED ARM: the diag_g1 two-spirals probe (20 cold assaults on rung-3, Pareto + novelty)
+# with the full gate-E fork stack layered on top, so the ONLY differences from diag_g1 are the
+# three levers that the gate-E analysis funded:
 #
-# Every evolutionary stage below is a registered, swappable operator: change a `kind`, reorder
-# `operators`, retune a weight, or register a new function and name it here. The loop never changes.
+#   1. gradient_scheduled on the direct path     warmup + cosine that defeats the training-time valley
+#   2. cppn generative init, sin/gaussian-seeded  plants periodic + radial primitives from gen 0
+#   3. self-adaptive per-genome mutation rates    ES perturb-and-inherit; rates adapt to the task
 #
-#   uv run app
+# WHY these three, here: gate E found two-spirals is a REPRESENTATION wall (zero sin nodes ever
+# evolved; max_sample_accuracy at chance in every G0/G1 arm) gated by TRAINABILITY, not search.
+# (1) is the validated valley fix (a seeded all-sin topology survives as champion at 0.651 instead
+# of dying at 0.604 under fixed lr). (2) seeds the periodic structure evolution never discovered on
+# its own, straight into the population. (3) lets the operator mix retune itself for a task where the
+# hand-set rates plateaued. This is the config to run the gate-E flip-to-GO probe from.
+#
+#   uv run app --config configs/diag_g2_two_spirals.toml
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_overmind"
+experiment = "diag_g2_two_spirals"
 clearml = true
 machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
                               # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
@@ -37,17 +38,20 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = [3]                   # two-spirals only: paired against the G0/G1 runs
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 100
+tasks_per_rung = 20
 shuffle = true
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
+tasks = 20                     # 20 assaults, matching diag_g0/g1
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
-stall_generations = 28
+stall_generations = 60        # RAISED from 28: the validated two-spirals solve accumulates depth
+                              # (0 -> ~23 hidden) in plateau-then-jump steps over ~100 generations, so a
+                              # 28-gen flatline window aborts a climb mid-growth before the next jump and
+                              # leaves the depth0=240 budget unspent. 60 gives a growth plateau room.
 stall_epsilon = 0.005
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
@@ -136,25 +140,22 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
                               # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
                               # (independent genomes, rng-free training); the dominant run cost.
-    [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
-                                 # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
-                                 # The kind ALSO names a population trainer: batched = true trains
-                                 # each generation's batchable plain-core subset as ONE tensor
-                                 # program on the machine's compute device ([run] machine:
-                                 # MonadMetal -> mps, LatticeCUDA -> cuda) while the pool trains the
-                                 # refine/recurrent/product/macro rest and runs all evaluation. Same
-                                 # math (1e-4 batch contract, tests/test_assess_hybrid.py).
-                                 # MEASURED (M4 Max, slim substrate, T5 end-to-end): the 12-worker
-                                 # pool BEATS the MPS hybrid at BOTH image widths (784: 1556 vs
-                                 # 1838 ms/gen; 3072: 4468 vs 6069 ms/gen, 2026-07-05), so batched
-                                 # stays FALSE here. Flip it on LatticeCUDA after `uv run benchmark`
-                                 # T4/T5 show a win THERE, and set min_batch_nodes to the measured
-                                 # break-even so narrow tasks keep the pool. Overridable: device,
-                                 # max_padded_nodes (1024 cpu / 4096 gpu), min_batch_nodes (0).
-    kind = "gradient_refine"
-    batched = false
-    steps = 120
-    lr = 0.03
+    [orchestrator.direct.train]  # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
+                                 # cosine decay to 5% of it. This is the validated valley fix for the
+                                 # two-spirals class: a seeded all-sin topology survives as champion at
+                                 # 0.651 with all sin nodes intact vs dying at 0.604 under fixed lr.
+                                 # `steps` is the PRIMARY knob here (gate-E fully validated at 600 on a
+                                 # single seeded genome; 250 balances that against pop-64 x up-to-240-gen
+                                 # cost with 12 workers). Raise it if the fit still plateaus mid-training.
+                                 # gradient_scheduled has no batched form, so it always runs on the
+                                 # assess pool; do NOT add a `batched` key (it is not an accepted param).
+                                 # This REPLACES gradient_refine, so refine_steps>1 genomes train on a
+                                 # final-pass loss instead of per-pass deep supervision on this path.
+                                 # Peak lr 0.01 matches the gate-E gradient_scheduled validation regime
+                                 # exactly (the valley fix was measured at 0.01, not the base fixed-lr 0.03).
+    kind = "gradient_scheduled"
+    steps = 250
+    lr = 0.01
     writeback = true
     weight_decay = 0.0002
 
@@ -171,7 +172,7 @@ max_per_signature = 12        # total live entries per io shape across all niche
                               # tombstoned (never deleted) when full, so existing refs keep assembling
 
 [substrate]
-available_activations = ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"]  # sin/gaussian: periodic + radial primitives (Phase 0.2); mutation-only, never seeded
+available_activations = ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"]  # sin/gaussian: periodic + radial primitives (Phase 0.2)
 default_activation = "tanh"
 recurrent = true              # permits recurrent genes (inert under the flat decode; the stepped
                               # substrate uses them on TIME-axis subtask evolution)
@@ -180,18 +181,30 @@ recurrent = true              # permits recurrent genes (inert under the flat de
 loop = "hierarchical"
 pop_size = 64                 # module population fallback (overridden by [evolution.modules].pop_size)
 elitism = 1
-  [evolution.init]              # "minimal" = the NEAT bipartite seed. "cppn" = the generative seed
-                                # (gate-E fork): per-member random pair-query generators compile into
-                                # sparse, spatially patterned starting wirings (params: hidden = 16,
-                                # density = 0.3, generator_hidden = 3, hidden_activations = [...]);
-                                # the rungs 11-14 init-wall lever (density * pairs edges, not n*m).
-  kind = "minimal"
+  [evolution.init]              # cppn generative seed, SEEDED WITH sin/gaussian hidden activations:
+                                # each member's random pair-query generator compiles into a sparse
+                                # starting wiring whose hidden nodes carry periodic/radial primitives
+                                # directly. This is the sharpest lever at the gate-E representation
+                                # wall (evolution never introduced a single sin node on its own), and
+                                # it also gives the population structural diversity from generation
+                                # zero. `hidden` is larger than the main config's because two-spirals
+                                # genuinely wants capacity (gate E: H=64 detector banks reached 1.000).
+  kind = "cppn"
   weight_scale = 1.0
+  hidden = 16                 # hidden nodes per generated seed (a bank of periodic detectors to grow from)
+  density = 0.8               # HIGH on purpose: cppn emits round(n_inputs * hidden * density) input->hidden
+                              # edges, and two-spirals has only 2 inputs, so at 0.3 most seeded hidden nodes
+                              # would receive NO data edge -> sin/gaussian of a bias constant is a dead
+                              # constant detector. 0.8 gives ~26 input->hidden edges over 16 nodes, so most
+                              # detectors actually SEE the inputs (the whole point of seeding them here).
+  generator_hidden = 3        # width of each member's tiny pair-query generator MLP
+  hidden_activations = ["sin", "gaussian", "tanh"]   # the seeded phenotype palette (NOTE: intentionally
+                                                     # breaks the "sin/gaussian mutation-only" invariant
+                                                     # -- that is the whole point of this arm)
   [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
                               # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
                               # degrades to a fitness tournament on the scalar call sites)
-  kind = "tournament"
-  tournament_size = 3
+  kind = "nsga2"              # G1+ arm: Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
@@ -203,6 +216,15 @@ elitism = 1
                               # owns the WEIGHTS: perturb_weights (registered) is omitted because it
                               # fights the optimizer; add_node (canonical NEAT single-edge split) is
                               # registered but slow to become useful next to add_rich_node/add_deep_node.
+                              #
+                              # SELF-ADAPTIVE RATES (lever F): each genome carries its own per-operator
+                              # probabilities as strategy genes, perturbed log-normally and inherited by
+                              # its children, so the operator mix retunes itself for the task instead of
+                              # staying at the hand-set *_prob seeds below.
+  self_adaptive = true
+  self_adaptive_learning_rate = 0.1   # log-normal step size on the rates
+  self_adaptive_min = 0.001           # rate clamp floor
+  self_adaptive_max = 1.0             # rate clamp ceiling
   operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
@@ -232,7 +254,8 @@ elitism = 1
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
                               # steps must tune a freshly-grown candidate enough for its capacity to
                               # show BEFORE it competes (champions are never re-trained); weight_decay
-                              # is what makes fits GENERALIZE (closes the support->query gap)
+                              # is what makes fits GENERALIZE (closes the support->query gap). Left as
+                              # plain gradient: the scheduled trainer's validated home is the direct path.
   kind = "gradient"
   steps = 40
   lr = 0.03
@@ -245,14 +268,13 @@ elitism = 1
   batched_samples = "auto"    # stack the 6 sample fills into one batched forward, but only where it
                               # measured a win (nodes >= 768: 1.04x at 784, 1.14x at 3072; a LOSS
                               # below that, T2 2026-07-04). false = always serial, true = always stacked.
-  # DIVERGENT SELECTION (the G1 arm, with the nsga2 flip): k-NN behavioral novelty over a per-task
-  # archive, computed by the direct path's post-assess hook and read by the "novelty" fitness
-  # component / Pareto objective. Absent table = byte-identical off. archive_cap = 0 is the
-  # archive-free (population-only) ablation. Overridable per path via [orchestrator.direct.novelty].
-  # [evolution.novelty]
-  # k = 15
-  # archive_cap = 256
-  # probe_rows = 64
+  [evolution.novelty]         # DIVERGENT SELECTION: k-NN behavioral novelty over a per-task archive,
+                              # computed by the direct path's post-assess hook and read by the
+                              # "novelty" fitness component / Pareto objective. archive_cap = 0 is the
+                              # archive-free (population-only) ablation.
+  k = 15
+  archive_cap = 256
+  probe_rows = 64
   [evolution.speciation]      # module species are the blueprint targets the compositions reference.
                               # "neat" = compatibility-distance niching + fitness sharing, one champion
                               # per species; the threshold AUTO-ADJUSTS toward target_species each
@@ -313,10 +335,17 @@ components = ["bounded_negative_support_loss", "support_accuracy", "weight_robus
 w_bounded_negative_support_loss = 2.0
 w_support_accuracy = 1.0
 w_weight_robustness = 0.5
-w_hidden_penalty = 0.05
-w_complexity_penalty = 0.01
-# PARETO MODE (the G1 arm, ai/two_spirals_modified_plan.md Phase 1): `objectives` names the vector
-# NSGA-II selects on (raw component values; weights above shape only the scalar sum, which keeps
-# driving speciation budgets and champion tracking). Flip [evolution.selection] kind to "nsga2"
-# (drop tournament_size) and enable [evolution.novelty] alongside:
-# objectives = ["support_accuracy", "novelty", "connection_cost"]
+# FREE GROWTH (the validated two-spirals solve recipe): the penalties are ZEROED here on purpose.
+# The direct path tracks its champion by this penalized SCALAR fitness (best = max(pop, key=fitness))
+# and gates the solve on that champion's query accuracy, so a nonzero hidden/complexity penalty makes
+# a ~23-hidden solving net (the measured solve size) score BELOW a tiny non-fitting net and the solve
+# can never be recorded (this is why G0/G1 logged 0 solves). connection_cost lives only in `objectives`
+# below (it shapes the Pareto front, not the scalar champion), so anti-bloat pressure is not lost
+# outright. Keep the penalties ON in the broad main config where cross-rung anti-bloat is wanted.
+w_hidden_penalty = 0.0
+w_complexity_penalty = 0.0
+# PARETO OBJECTIVES: dropped connection_cost for this arm. On 2-input two-spirals it reduces to
+# -edge_count (no input/output coordinates to measure wiring length), which directly pressures away
+# the periodic detector CAPACITY the cppn seed injects and this probe exists to grow. novelty
+# (behavioral divergence) stays: it is pro-exploration on the deceptive spiral landscape.
+objectives = ["support_accuracy", "novelty"]

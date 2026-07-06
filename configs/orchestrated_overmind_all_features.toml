@@ -1,22 +1,31 @@
-# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
-# ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
-# its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
-# Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the
-# DSL contract); on a cold library routed short-circuits until evolution populates the vertex set.
-# Stage C adds training dynamics of its own; flip `halting`/`edge_bias` off individually to A/B
-# against a plainer routed setup. The routed model is portrait-ed to library/images/overmind.png
-# on every structural growth, with observed routing-traffic pathways drawn between experts. ALL 18
-# rungs are scheduled (no skipping), depth-0 failures leave stepping stones behind
-# ([orchestrator.wall]), and unreferenced tombstones are swept at run end ([library] gc).
+# THE main orchestrated ladder (configs/orchestrated_overmind.toml) with the WHOLE phase-9 /
+# gate-E feature stack switched ON at once. Everything the base run does is unchanged EXCEPT the
+# five new levers below; flip any one back to its base value to A/B it in isolation.
 #
-# Every evolutionary stage below is a registered, swappable operator: change a `kind`, reorder
-# `operators`, retune a weight, or register a new function and name it here. The loop never changes.
+#   1. sin/gaussian activation palette          (already on in the base config)
+#   2. NSGA-II + novelty + connection_cost      Pareto multi-objective (the G1 flip)
+#   3. gradient_scheduled on the direct path     warmup + cosine that defeats the training-time valley
+#   4. cppn generative init                      per-member pair-query generators, structural diversity from gen 0
+#   5. self-adaptive per-genome mutation rates   ES perturb-and-inherit; rates adapt per problem
 #
-#   uv run app
+# CAVEATS worth reading before a long run:
+#   - cppn init trades grow-from-minimal for generative diversity: every fresh module/direct seed
+#     starts with hidden nodes, so easy rungs (1-2) pay a complexity/hidden penalty they did not
+#     before. Its DESIGNED payoff is the rungs 11-14 dense-bipartite init wall, which the default
+#     rungs 1-5 schedule never reaches (set [schedule] rungs = "all" to exercise it). Revert with
+#     [evolution.init] kind = "minimal" if low-rung solve rates drop.
+#   - gradient_scheduled REPLACES gradient_refine on the direct path, so refine_steps>1 genomes lose
+#     per-pass deep supervision there (they still train, just with a final-pass loss). The base
+#     config keeps gradient_refine; this variant bets the valley fix matters more on the two-spirals
+#     class than TRM deep supervision does.
+#   - NSGA-II mildens the hierarchical module pool's selection to a deterministic binary tournament
+#     (the scalar-degradation path), since the loop never enters the Pareto block.
+#
+#   uv run app --config configs/orchestrated_overmind_all_features.toml
 
 [run]
 project = "ardevo"
-experiment = "orchestrated_overmind"
+experiment = "orchestrated_overmind_all_features"
 clearml = true
 machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
                               # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
@@ -136,24 +145,20 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
                               # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
                               # (independent genomes, rng-free training); the dominant run cost.
-    [orchestrator.direct.train]  # gradient_refine: deep-supervised BPTT for refine_steps>1 genomes
-                                 # (the TRM effective-depth lever), a drop-in standard gradient otherwise.
-                                 # The kind ALSO names a population trainer: batched = true trains
-                                 # each generation's batchable plain-core subset as ONE tensor
-                                 # program on the machine's compute device ([run] machine:
-                                 # MonadMetal -> mps, LatticeCUDA -> cuda) while the pool trains the
-                                 # refine/recurrent/product/macro rest and runs all evaluation. Same
-                                 # math (1e-4 batch contract, tests/test_assess_hybrid.py).
-                                 # MEASURED (M4 Max, slim substrate, T5 end-to-end): the 12-worker
-                                 # pool BEATS the MPS hybrid at BOTH image widths (784: 1556 vs
-                                 # 1838 ms/gen; 3072: 4468 vs 6069 ms/gen, 2026-07-05), so batched
-                                 # stays FALSE here. Flip it on LatticeCUDA after `uv run benchmark`
-                                 # T4/T5 show a win THERE, and set min_batch_nodes to the measured
-                                 # break-even so narrow tasks keep the pool. Overridable: device,
-                                 # max_padded_nodes (1024 cpu / 4096 gpu), min_batch_nodes (0).
-    kind = "gradient_refine"
-    batched = false
-    steps = 120
+    [orchestrator.direct.train]  # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
+                                 # cosine decay to 5% of it. Fixed-lr Adam stalls in the oscillatory
+                                 # loss regions of the two-spirals class; the schedule anneals through
+                                 # them (validated: the same seeded topology survives as champion at
+                                 # 0.651 with all sin nodes intact vs dying at 0.604 under fixed lr).
+                                 # NOTE this REPLACES gradient_refine here, so refine_steps>1 genomes
+                                 # lose per-pass deep supervision on the direct path (they still train
+                                 # on a final-pass loss). It is a plain TRAIN op with no batched form,
+                                 # so it always runs on the assess pool; do NOT add a `batched` key
+                                 # (gradient_scheduled does not accept it). Raise `steps` if a hard
+                                 # task still stalls mid-fit; peak `lr` matches the base direct lr so
+                                 # the only change is the warmup+decay envelope.
+    kind = "gradient_scheduled"
+    steps = 160
     lr = 0.03
     writeback = true
     weight_decay = 0.0002
@@ -180,18 +185,24 @@ recurrent = true              # permits recurrent genes (inert under the flat de
 loop = "hierarchical"
 pop_size = 64                 # module population fallback (overridden by [evolution.modules].pop_size)
 elitism = 1
-  [evolution.init]              # "minimal" = the NEAT bipartite seed. "cppn" = the generative seed
-                                # (gate-E fork): per-member random pair-query generators compile into
-                                # sparse, spatially patterned starting wirings (params: hidden = 16,
-                                # density = 0.3, generator_hidden = 3, hidden_activations = [...]);
-                                # the rungs 11-14 init-wall lever (density * pairs edges, not n*m).
-  kind = "minimal"
+  [evolution.init]              # cppn = the generative seed (gate-E fork): per-member random
+                                # pair-query generators f(source_coord, target_coord) ->
+                                # (weight, expression) compile into sparse, spatially patterned
+                                # starting wirings, so the population carries STRUCTURAL DIVERSITY
+                                # from generation zero (minimal seeds every member identically).
+                                # `hidden` is kept small here so the module pool and easy-rung direct
+                                # seeds do not start badly over-complex; the large-`hidden`, sin/
+                                # gaussian-seeded form is the two-spirals lever (see diag_g2). Revert
+                                # to kind = "minimal" for pure grow-from-minimal.
+  kind = "cppn"
   weight_scale = 1.0
+  hidden = 4                  # hidden nodes per generated seed (density * pairs edges, not n*m)
+  density = 0.3               # exact sparsity dial (quantile over generated pair expressions)
+  generator_hidden = 3        # width of each member's tiny pair-query generator MLP
   [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
                               # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
                               # degrades to a fitness tournament on the scalar call sites)
-  kind = "tournament"
-  tournament_size = 3
+  kind = "nsga2"              # Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
@@ -203,6 +214,23 @@ elitism = 1
                               # owns the WEIGHTS: perturb_weights (registered) is omitted because it
                               # fights the optimizer; add_node (canonical NEAT single-edge split) is
                               # registered but slow to become useful next to add_rich_node/add_deep_node.
+                              #
+                              # SELF-ADAPTIVE RATES (lever F): each genome carries its own per-operator
+                              # probabilities as strategy genes; the pipeline perturbs them log-normally
+                              # (ES perturb-and-inherit), applies each operator at its own rate, then
+                              # stamps the perturbed rates onto the child, so the search rate adapts per
+                              # problem. The *_prob values below seed each operator's starting rate.
+                              # This top-level table feeds BOTH the direct per-task population (its
+                              # validated home: a clean per-task fitness gradient) AND the shared
+                              # hierarchical module pool. On the module pool the rate-gene selection
+                              # signal is weak (module fitness is attributed from referencing
+                              # compositions), so rates mostly DRIFT there rather than adapt; credit or
+                              # blame the adaptive lever to the direct path. Move this whole table under
+                              # [orchestrator.direct.mutation] to make lever F direct-path-only.
+  self_adaptive = true
+  self_adaptive_learning_rate = 0.1   # log-normal step size on the rates
+  self_adaptive_min = 0.001           # rate clamp floor
+  self_adaptive_max = 1.0             # rate clamp ceiling
   operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
@@ -232,7 +260,9 @@ elitism = 1
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
                               # steps must tune a freshly-grown candidate enough for its capacity to
                               # show BEFORE it competes (champions are never re-trained); weight_decay
-                              # is what makes fits GENERALIZE (closes the support->query gap)
+                              # is what makes fits GENERALIZE (closes the support->query gap). Left as
+                              # plain gradient: the scheduled trainer's validated home is the direct
+                              # path, and a 40-step schedule buys little.
   kind = "gradient"
   steps = 40
   lr = 0.03
@@ -245,14 +275,13 @@ elitism = 1
   batched_samples = "auto"    # stack the 6 sample fills into one batched forward, but only where it
                               # measured a win (nodes >= 768: 1.04x at 784, 1.14x at 3072; a LOSS
                               # below that, T2 2026-07-04). false = always serial, true = always stacked.
-  # DIVERGENT SELECTION (the G1 arm, with the nsga2 flip): k-NN behavioral novelty over a per-task
-  # archive, computed by the direct path's post-assess hook and read by the "novelty" fitness
-  # component / Pareto objective. Absent table = byte-identical off. archive_cap = 0 is the
-  # archive-free (population-only) ablation. Overridable per path via [orchestrator.direct.novelty].
-  # [evolution.novelty]
-  # k = 15
-  # archive_cap = 256
-  # probe_rows = 64
+  [evolution.novelty]         # DIVERGENT SELECTION: k-NN behavioral novelty over a per-task archive,
+                              # computed by the direct path's post-assess hook and read by the
+                              # "novelty" fitness component / Pareto objective. Direct-path only by
+                              # construction (the module pool never enters the novelty hook).
+  k = 15
+  archive_cap = 256               # 0 = archive-free (population-only) ablation
+  probe_rows = 64
   [evolution.speciation]      # module species are the blueprint targets the compositions reference.
                               # "neat" = compatibility-distance niching + fitness sharing, one champion
                               # per species; the threshold AUTO-ADJUSTS toward target_species each
@@ -315,8 +344,9 @@ w_support_accuracy = 1.0
 w_weight_robustness = 0.5
 w_hidden_penalty = 0.05
 w_complexity_penalty = 0.01
-# PARETO MODE (the G1 arm, ai/two_spirals_modified_plan.md Phase 1): `objectives` names the vector
-# NSGA-II selects on (raw component values; weights above shape only the scalar sum, which keeps
-# driving speciation budgets and champion tracking). Flip [evolution.selection] kind to "nsga2"
-# (drop tournament_size) and enable [evolution.novelty] alongside:
-# objectives = ["support_accuracy", "novelty", "connection_cost"]
+# PARETO MODE (ai/two_spirals_modified_plan.md Phase 1): `objectives` names the vector NSGA-II
+# selects on (raw component values; the weights above shape only the scalar sum, which keeps driving
+# speciation budgets and champion tracking). connection_cost rewards sparser wiring (squared
+# coordinate distance where measurable, edge-count fallback otherwise), a counter-pressure to the
+# denser cppn seeds; novelty rewards behavioral divergence.
+objectives = ["support_accuracy", "novelty", "connection_cost"]

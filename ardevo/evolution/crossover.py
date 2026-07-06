@@ -37,5 +37,7 @@ def neat(parent_a: Genome, parent_b: Genome, *, rng: random.Random) -> Genome:
                 nodes[node_id] = parent_b.nodes[node_id]
     # Macro placements are atomic unit genes: a matching marker in parent_b IS the same immutable
     # gene, so parent_a's list carries everything inheritable; disjoint macros from b drop exactly
-    # like disjoint connections do.
-    return Genome(nodes=nodes, connections=child_connections, macros=list(parent_a.macros))
+    # like disjoint connections do. Self-adaptive rates (lever F) inherit from the fitter base too, so
+    # the adaptive pipeline perturbs an inherited schedule rather than reseeding from the config each
+    # generation; empty when off, keeping the scalar path byte-identical.
+    return Genome(nodes=nodes, connections=child_connections, macros=list(parent_a.macros), operator_rates=dict(parent_a.operator_rates))

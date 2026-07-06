@@ -24,7 +24,7 @@ from ardevo.evaluation import evaluate
 from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
-from ardevo.evolution.mutation import MutationContext, MutationPipeline
+from ardevo.evolution.mutation import AdaptiveMutationPipeline, MutationContext, MutationPipeline
 from ardevo.evolution.novelty import NoveltyConfig, archive_insert, compute_descriptor, novelty_scores, probe_tensor
 from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_key
 from ardevo.evolution.speciation import SpeciesPlan
@@ -124,7 +124,7 @@ class Evolver:
     init_op: Callable[..., Genome]
     selection_op: Callable[..., list[Genome]]
     crossover_op: Callable[..., Genome]
-    mutation: MutationPipeline
+    mutation: MutationPipeline | AdaptiveMutationPipeline
     train_op: Callable[..., tuple[Genome, SubstrateModule]]
     fitness: FitnessAggregator
     speciate: Callable[..., list[SpeciesPlan]]

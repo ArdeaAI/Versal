@@ -87,8 +87,21 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     )
 
     mutation_cfg = evolution.get("mutation", {})
-    mutators = [partial(mutation.MUTATION.get(name), **_bind_prefixed(mutation_cfg, name)) for name in mutation_cfg.get("operators", [])]
-    mutation_pipeline = mutation.MutationPipeline(mutators)
+    operator_names = mutation_cfg.get("operators", [])
+    mutation_pipeline: mutation.MutationPipeline | mutation.AdaptiveMutationPipeline
+    if bool(mutation_cfg.get("self_adaptive", False)):
+        # Lever F: rates become per-genome strategy genes. Each operator's configured `prob` seeds its
+        # starting rate; the log-normal step size and clamp bounds are the only new knobs.
+        specs = [(name, mutation.MUTATION.get(name), _bind_prefixed(mutation_cfg, name)) for name in operator_names]
+        mutation_pipeline = mutation.AdaptiveMutationPipeline(
+            specs,
+            learning_rate=float(mutation_cfg.get("self_adaptive_learning_rate", 0.1)),
+            min_rate=float(mutation_cfg.get("self_adaptive_min", 0.001)),
+            max_rate=float(mutation_cfg.get("self_adaptive_max", 1.0)),
+        )
+    else:
+        mutators = [partial(mutation.MUTATION.get(name), **_bind_prefixed(mutation_cfg, name)) for name in operator_names]
+        mutation_pipeline = mutation.MutationPipeline(mutators)
 
     train_cfg = evolution.get("train", {})
     train_kind = train_cfg.get("kind", "none")

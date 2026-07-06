@@ -73,10 +73,20 @@ class Genome:
     # feedforward pass (the default decode path is byte-identical). Evolved by `tweak_refine_steps`;
     # only meaningful once the genome also carries recurrent edges to thread state between passes.
     refine_steps: int = 1
+    # Self-adaptive mutation rates (lever F): per-operator probabilities carried as strategy genes and
+    # perturbed by `AdaptiveMutationPipeline` (ES perturb-and-inherit). Empty = the fixed-rate default,
+    # so a genome that never met the adaptive pipeline is byte-identical (the key is absent on disk too).
+    operator_rates: dict[str, float] = field(default_factory=dict)
 
     def clone(self) -> "Genome":
         # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
-        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros), refine_steps=self.refine_steps)
+        return Genome(
+            nodes=dict(self.nodes),
+            connections=list(self.connections),
+            macros=list(self.macros),
+            refine_steps=self.refine_steps,
+            operator_rates=dict(self.operator_rates),
+        )
 
     def ids_of(self, kind: NodeKind) -> list[int]:
         return sorted(node.id for node in self.nodes.values() if node.kind is kind)
@@ -339,7 +349,9 @@ def make_acyclic(genome: Genome) -> Genome:
     except ValueError:
         pass  # a cycle exists somewhere: run the ordered repair below
     else:
-        return Genome(nodes=dict(genome.nodes), connections=list(genome.connections), macros=list(genome.macros), refine_steps=genome.refine_steps)
+        return Genome(
+            nodes=dict(genome.nodes), connections=list(genome.connections), macros=list(genome.macros), refine_steps=genome.refine_steps, operator_rates=dict(genome.operator_rates)
+        )
 
     adjacency: dict[int, list[int]] = {}
     for source, target in macro_implied_edges(genome):
@@ -368,12 +380,12 @@ def make_acyclic(genome: Genome) -> Genome:
         else:
             adjacency.setdefault(conn.in_id, []).append(conn.out_id)
             repaired.append(conn)
-    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps)
+    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps, operator_rates=dict(genome.operator_rates))
 
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
-    return {
+    payload: dict[str, Any] = {
         "nodes": [
             {
                 "id": node.id,
@@ -394,6 +406,9 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
         ],
         "refine_steps": genome.refine_steps,
     }
+    if genome.operator_rates:  # absent when off, so fixed-rate genomes serialize byte-identically
+        payload["operator_rates"] = dict(genome.operator_rates)
+    return payload
 
 
 def genome_from_dict(data: dict[str, Any]) -> Genome:
@@ -417,4 +432,5 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         )
         for item in data.get("macros", [])
     ]
-    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)))
+    operator_rates = {str(name): float(rate) for name, rate in data.get("operator_rates", {}).items()}
+    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)), operator_rates=operator_rates)

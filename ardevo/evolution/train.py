@@ -16,6 +16,7 @@ elementwise, so one optimizer over the stack updates each candidate exactly as i
 would. Padded and non-edge entries start at zero with zero gradient and stay zero.
 """
 
+import math
 import random
 import time
 from dataclasses import replace
@@ -74,6 +75,56 @@ def gradient(
         loss = support_loss(module, encoded)
         # Stop on no-grad (frozen params) OR a non-finite loss: Adam does not filter NaN/Inf grads,
         # so stepping on them would silently corrupt every weight in the candidate.
+        if not loss.requires_grad or not torch.isfinite(loss):
+            break
+        loss.backward()
+        optimizer.step()
+    if writeback:
+        genome = _writeback(genome, module)
+    return genome, module
+
+
+def _scheduled_learning_rates(steps: int, lr: float, *, warmup_fraction: float = 0.05, final_lr_fraction: float = 0.05) -> list[float]:
+    """Linear warmup to `lr`, then cosine decay to `lr * final_lr_fraction`."""
+    warmup_steps = max(1, int(steps * warmup_fraction))
+    floor = lr * final_lr_fraction
+    rates: list[float] = []
+    for step in range(steps):
+        if step < warmup_steps:
+            rates.append(lr * (step + 1) / warmup_steps)
+        else:
+            progress = (step - warmup_steps) / max(1, steps - warmup_steps)
+            rates.append(floor + (lr - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return rates
+
+
+@TRAIN.register("gradient_scheduled")
+def gradient_scheduled(
+    genome: Genome,
+    module: SubstrateModule,
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 200,
+    lr: float = 0.01,
+    warmup_fraction: float = 0.05,
+    final_lr_fraction: float = 0.05,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+) -> tuple[Genome, SubstrateModule]:
+    # Warmup + cosine decay: fixed-lr Adam stalls in oscillatory loss regions that a decaying rate
+    # anneals through. Measured on the CPPN-generator landscape (ai/trial/probe_6): the same
+    # topology goes 0.55 (fixed lr) -> 0.92+ (scheduled) query, which made trainability, not
+    # search, gate E's binding constraint. rng-free like every train op (the batching contract).
+    parameters = _trainable_parameters(module)
+    if steps <= 0 or not module.has_edges or not parameters:
+        return genome, module
+    optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
+    for step_lr in _scheduled_learning_rates(steps, lr, warmup_fraction=warmup_fraction, final_lr_fraction=final_lr_fraction):
+        for group in optimizer.param_groups:
+            group["lr"] = step_lr
+        optimizer.zero_grad()
+        loss = support_loss(module, encoded)
         if not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()

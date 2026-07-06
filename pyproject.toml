@@ -22,6 +22,7 @@ render = "ardevo.tools.net_gallery:main"
 benchmark = "ardevo.tools.bench_throughput:main"
 library_gc = "ardevo.tools.library_gc:main"
 motif_census = "ardevo.tools.motif_census:main"
+cppn_spike = "ardevo.tools.cppn_spike:main"
 
 [build-system]
 requires = ["hatchling"]
