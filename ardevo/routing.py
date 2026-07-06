@@ -902,7 +902,7 @@ class RoutedStrategy:
         generations_used: int,
     ) -> Any:
         """A router-space win becomes a real win only if its pathway survives as a composition."""
-        from ardevo.strategy import StrategyResult
+        from ardevo.strategy import StrategyResult, comp_size_metrics
 
         if not self.distill:
             return self._result(task, service, view, metrics, metric, zero_shot=zero_shot, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
@@ -924,7 +924,14 @@ class RoutedStrategy:
                 {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": True}
             )
             service.save()
-            return StrategyResult(strategy=self.name, metric=float(distilled_metric), generations_used=generations_used, champion_comp=assessed, champion_metrics=stamped)
+            return StrategyResult(
+                strategy=self.name,
+                metric=float(distilled_metric),
+                generations_used=generations_used,
+                champion_comp=assessed,
+                champion_metrics=stamped,
+                size_metrics=comp_size_metrics(assessed.comp),
+            )
 
         # Adapter bypass or an unverifiable pathway: what the system can KEEP is the metric that
         # counts, so this reports as a miss and the ladder escalates to the evolutionary strategies.

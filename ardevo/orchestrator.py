@@ -81,6 +81,10 @@ class Attempt:
     # the evaluate op emitted them (hybrid / weight_samples), so standard-eval summaries and old
     # checkpoints stay byte-identical.
     sample_metrics: dict[str, float] = field(default_factory=dict)
+    # Champion/population genome size (the bloat readout): task cost tracks genome size, so growth
+    # must show in the record, not only through `seconds` (the diag_g2 free-growth blowup was
+    # invisible until the wall-clock had already exploded). Empty on cheap library hits.
+    size_metrics: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -102,6 +106,8 @@ class Attempt:
             data["stage_seconds"] = self.stage_seconds
         if self.sample_metrics:
             data["sample_metrics"] = self.sample_metrics
+        if self.size_metrics:
+            data["size_metrics"] = self.size_metrics
         return data
 
     @classmethod
@@ -120,6 +126,7 @@ class Attempt:
             seconds=float(data.get("seconds", 0.0)),
             stage_seconds=dict(data.get("stage_seconds", {})),
             sample_metrics=dict(data.get("sample_metrics", {})),
+            size_metrics=dict(data.get("size_metrics", {})),
         )
 
 
@@ -242,6 +249,12 @@ class Orchestrator:
         self.wall_ledger = bool(wall.get("ledger", False))
         self.wall_min_metric = float(wall.get("min_metric", 0.45))
         self.wall_seed_top_k = int(wall.get("seed_top_k", 1))
+        # PER-ATTEMPT WALL-CLOCK BUDGET ([orchestrator] max_task_seconds): with a free-growth config
+        # nothing bounds per-generation cost, so an attempt can silently eat hours (task 2 of the
+        # 2026-07-05 diag_g2 run: 3532s). Past the deadline the running stage finishes its current
+        # generation, later ladder stages are skipped, and the attempt fails with its best champion
+        # (the wall ledger still shelves it). 0 (the default) is off and byte-identical.
+        self.max_task_seconds = float(table.get("max_task_seconds", 0.0))
         self.loop = loop
         self.library = library
         self.state = state
@@ -275,6 +288,8 @@ class Orchestrator:
             self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0})
         if self.wall_ledger:
             self.counters.update({"wall_stones_admitted": 0, "wall_stones_improved": 0, "wall_seeded_attempts": 0})
+        if self.max_task_seconds > 0:  # registered only when the budget is on, so off-mode summaries stay byte-identical
+            self.counters.update({"time_budget_hits": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
@@ -284,14 +299,16 @@ class Orchestrator:
 
     def solve(self, task: Task, depth: int = 0) -> Solution | None:
         # Per-solve wall-clock forensics, save/restored so recursive sub-solves time themselves
-        # without clobbering the parent's ledger.
-        previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None))
+        # without clobbering the parent's ledger. The deadline rides the same tuple: each depth
+        # gets a fresh budget, but a sub-solve only starts while its parent still has time.
+        previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None), getattr(self, "_solve_deadline", None))
         self._solve_started: float | None = time.perf_counter()
         self._active_stages: dict[str, float] | None = {}
+        self._solve_deadline: float | None = (time.perf_counter() + self.max_task_seconds) if self.max_task_seconds > 0 else None
         try:
             return self._solve_timed(task, depth)
         finally:
-            self._solve_started, self._active_stages = previous_timing
+            self._solve_started, self._active_stages, self._solve_deadline = previous_timing
 
     def _solve_timed(self, task: Task, depth: int = 0) -> Solution | None:
         spec = comp_task_spec(task)
@@ -325,11 +342,13 @@ class Orchestrator:
                     library_key=key,
                     strategy=result.strategy,
                     sample_metrics=_sample_metrics_of(result),
+                    size_metrics=dict(result.size_metrics),
                 )
             )
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
 
-        if depth < self.max_depth:
+        timed_out = self._deadline_exceeded()  # sampled ONCE: the failure forensics below must match the decompose gate
+        if depth < self.max_depth and not timed_out:
             decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
             # Wall time of the whole decompose phase (probe evolves + sub-solves; sub-solve attempts
@@ -340,6 +359,12 @@ class Orchestrator:
                 return solution
 
         self.counters["failures"] += 1
+        if timed_out:
+            # The counter key only exists when max_task_seconds > 0, and timed_out requires it.
+            # Decompose was skipped above, so at depth 0 the forensics slot is free to claim.
+            self.counters["time_budget_hits"] += 1
+            if depth == 0:
+                self._failure_stage = "time_budget"
         stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
         self._record(
             Attempt(
@@ -353,12 +378,32 @@ class Orchestrator:
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
                 sample_metrics=_sample_metrics_of(result),
+                size_metrics=dict(result.size_metrics),
             )
         )
         logger.info("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.accept_metric, result.metric, result.strategy)
         return None
 
     # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
+
+    def _deadline_exceeded(self) -> bool:
+        deadline = getattr(self, "_solve_deadline", None)
+        return deadline is not None and time.perf_counter() > deadline
+
+    def _with_deadline(self, detector: StallDetector) -> Callable[[int, Any], bool]:
+        """Chain the per-solve deadline behind a stall detector. With no deadline the detector is
+        returned AS-IS (identical object flow, the byte-identical off path); with one, the detector
+        still runs FIRST so its flatline state advances exactly as it would unbudgeted."""
+        if getattr(self, "_solve_deadline", None) is None:
+            return detector
+
+        def stop(generation: int, best: Any) -> bool:
+            return detector(generation, best) or self._deadline_exceeded()
+
+        return stop
+
+    def _bounded_stall_detector(self, budget: int) -> Callable[[int, Any], bool]:
+        return self._with_deadline(self._stall_detector(budget))
 
     def _runtime(self) -> StrategyRuntime:
         return StrategyRuntime(
@@ -367,7 +412,7 @@ class Orchestrator:
             state=self.state,
             accept_threshold=self.accept_threshold,
             metric_of=self._metric,
-            stall_factory=self._stall_detector,
+            stall_factory=self._bounded_stall_detector,
             on_generation=self._on_generation,
         )
 
@@ -382,6 +427,10 @@ class Orchestrator:
         results: list[StrategyResult] = []
         remaining = budget
         for position, (name, strategy) in enumerate(self.strategies):
+            # Past the deadline, later ladder stages never start; position 0 always runs so
+            # `max(results)` below is never asked to rank an empty list.
+            if position > 0 and self._deadline_exceeded():
+                break
             if position == len(self.strategies) - 1:
                 allocation = remaining
             else:
@@ -500,6 +549,7 @@ class Orchestrator:
                 strategy=result.strategy,
                 refine_generations=result.generations_used,
                 sample_metrics=_sample_metrics_of(result),
+                size_metrics=dict(result.size_metrics),
             )
         )
         return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric), result.generations_used
@@ -514,8 +564,9 @@ class Orchestrator:
         refine-local one (K is a cap, not a fixed cost: a saturated refinement stalls out early).
         The detector's half-budget floor check can never fire: the seed already scores above floor."""
 
-        def refine_stall_factory(budget: int) -> StallDetector:
-            return StallDetector(stall_generations=self.refine_stall_generations, stall_epsilon=self.stall_epsilon, floor=self.floor, budget=budget, metric_of=self._metric)
+        def refine_stall_factory(budget: int) -> Callable[[int, Any], bool]:
+            detector = StallDetector(stall_generations=self.refine_stall_generations, stall_epsilon=self.stall_epsilon, floor=self.floor, budget=budget, metric_of=self._metric)
+            return self._with_deadline(detector)
 
         return StrategyRuntime(
             loop=self.loop,
@@ -728,6 +779,7 @@ class Orchestrator:
                 decompose_op=chosen_name,
                 strategy=result.strategy,
                 sample_metrics=_sample_metrics_of(result),
+                size_metrics=dict(result.size_metrics),
             )
             self._record(attempt)
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)

@@ -308,6 +308,39 @@ def toggle_connection(genome: Genome, ctx: MutationContext, *, rng: random.Rando
     return child
 
 
+@MUTATION.register("remove_connection")
+def remove_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Delete one connection gene outright, enabled or disabled (toggle_connection owns disable).
+    True deletion is the structural shrink move: it cuts clone/payload cost AND the excess/disjoint
+    gene counts speciation distance sees, so pruned lineages niche apart from their bloated kin.
+    Innovation numbers are memoized per (in, out, recurrent), so a later re-add restores the same
+    number and crossover alignment is unaffected; orphaning a downstream node is decode-safe (a
+    zero-in-degree hidden node computes an all-zero column, exactly as toggle-disable produces today)."""
+    if rng.random() >= prob or not genome.connections:
+        return genome
+    child = genome.clone()
+    del child.connections[rng.randrange(len(child.connections))]
+    return child
+
+
+@MUTATION.register("remove_hidden_node")
+def remove_hidden_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Delete one hidden node plus EVERY incident gene (enabled/disabled, forward/recurrent).
+    The macro filters mirror the add-ops: output stubs carry the inner network's value, and macro
+    input references are position-looked-up at decode, so deleting either corrupts the placement.
+    The full incident-edge sweep is what keeps NEAT crossover's node-pull and the decode position
+    maps consistent: no surviving gene may reference the deleted id."""
+    macro_input_ids = {node_id for macro in genome.macros for node_id in macro.input_node_ids}
+    candidates = [node_id for node_id in genome.hidden_ids if node_id not in genome.macro_output_ids and node_id not in macro_input_ids]
+    if rng.random() >= prob or not candidates:
+        return genome
+    child = genome.clone()
+    node_id = rng.choice(candidates)
+    del child.nodes[node_id]
+    child.connections = [conn for conn in child.connections if conn.in_id != node_id and conn.out_id != node_id]
+    return child
+
+
 _LIBRARY_CACHE: dict[str, object] = {}
 
 

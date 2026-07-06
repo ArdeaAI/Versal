@@ -13,10 +13,11 @@ canonical nodes/edges verbatim, so the paper can reconstruct any motif from the 
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ardevo.library import ModuleLibrary
-from ardevo.motifs import MAX_MOTIF_SIZE, CensusReport, MotifRecord, motif_census, report_to_dict
+from ardevo.motifs import MAX_MOTIF_SIZE, CensusReport, MotifRecord, empty_state_explanation, motif_census, report_to_dict
 from ardevo.utils.logging import Logger
 
 console = Logger.get_console()
@@ -31,12 +32,22 @@ def run_census(
     per_entry_cap: int = 50_000,
     json_out: Path | None = None,
 ) -> CensusReport:
-    """The testable core: mine the library and (optionally) write the JSON report."""
+    """The testable core: mine the library and (optionally) write the JSON report. The returned
+    report is the PURE CensusReport; the volatile provenance (wall-clock, on-disk path) lives only in
+    the file's "meta" object, wrapped here at write time, never in the mining core."""
     library = ModuleLibrary(library_root)
     report = motif_census(library, sizes=sizes, min_support=min_support, include_retired=include_retired, per_entry_cap=per_entry_cap)
     if json_out is not None:
         json_out.parent.mkdir(parents=True, exist_ok=True)
-        json_out.write_text(json.dumps(report_to_dict(report), indent=2))
+        payload = {
+            "meta": {
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "library": str(library_root),
+                "library_resolved": str(library_root.resolve()),
+            },
+            **report_to_dict(report),
+        }
+        json_out.write_text(json.dumps(payload, indent=2))
     return report
 
 
@@ -76,8 +87,33 @@ def main() -> None:
         return
     json_out = Path(args.json_out) if args.json_out else library_root / "motifs.json"
     report = run_census(library_root, sizes=args.sizes, min_support=args.min_support, include_retired=args.include_retired, per_entry_cap=args.per_entry_cap, json_out=json_out)
+    written = json.loads(json_out.read_text())
+    generated_at = written.get("meta", {}).get("generated_at", "")
 
     from rich.table import Table
+
+    scanned = report.entries_scanned
+    total_scanned = scanned["modules"] + scanned["compositions"]
+    excluded = report.index_total - total_scanned  # retired (default-hidden) plus any non-mineable rows
+    all_scanned_keys = report.scanned_keys.get("modules", []) + report.scanned_keys.get("compositions", [])
+    keys_cell = (
+        ", ".join(all_scanned_keys)
+        if 0 < len(all_scanned_keys) <= 8
+        else f"modules {len(report.scanned_keys.get('modules', []))}, compositions {len(report.scanned_keys.get('compositions', []))}"
+    )
+    outputs_cell = f"json {json_out}" + (f", png {library_root / 'images' / 'motifs.png'}" if args.render else "")
+
+    provenance = Table(title=str(library_root.resolve()))
+    provenance.add_column("field")
+    provenance.add_column("value")
+    scanned_cell = f"index {report.index_total} rows; scanned modules {scanned['modules']}, compositions {scanned['compositions']} ({excluded} excluded: retired/non-mineable)"
+    provenance.add_row("generated at", generated_at)
+    provenance.add_row("index vs scanned", scanned_cell)
+    provenance.add_row("scanned keys", keys_cell)
+    provenance.add_row("input fingerprint", report.input_fingerprint)
+    provenance.add_row("params", f"sizes {list(args.sizes)}, min_support {args.min_support}, per_entry_cap {args.per_entry_cap}, include_retired {args.include_retired}")
+    provenance.add_row("outputs", outputs_cell)
+    console.print(provenance)
 
     def motif_table(title: str, records: list[MotifRecord]) -> Table:
         table = Table(title=title)
@@ -89,9 +125,14 @@ def main() -> None:
             )
         return table
 
-    scanned = report.entries_scanned
+    module_note = empty_state_explanation("module", scanned["modules"], args.min_support, report.module_motifs)
+    composition_note = empty_state_explanation("composition", scanned["compositions"], args.min_support, report.composition_motifs)
     console.print(motif_table(f"module motifs ({scanned['modules']} entries, sizes {list(args.sizes)}, min support {args.min_support})", report.module_motifs))
+    if module_note:
+        console.print(f"[yellow]{module_note}[/yellow]")
     console.print(motif_table(f"composition motifs ({scanned['compositions']} entries)", report.composition_motifs))
+    if composition_note:
+        console.print(f"[yellow]{composition_note}[/yellow]")
 
     vocabulary = Table(title="vocabulary: who is built FROM whom")
     for column in ("key", "type", "level", "referenced by", "refs", "use_count", "max_fitness", "flags"):
@@ -110,7 +151,7 @@ def main() -> None:
         from ardevo.rendering import render_motif_atlas
 
         atlas_records = _top_per_class(report.module_motifs, args.top) + _top_per_class(report.composition_motifs, args.top)
-        atlas_path = render_motif_atlas(library_root / "images" / "motifs.png", atlas_records)
+        atlas_path = render_motif_atlas(library_root / "images" / "motifs.png", atlas_records, empty_note=module_note)
         console.print(f"atlas written to {atlas_path}")
 
 

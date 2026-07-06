@@ -81,6 +81,41 @@ def test_run_summary_row_carries_sample_metrics(tmp_path: Path, xor_task: Task) 
     assert "sample_metrics" not in trial.task_records[1]
 
 
+def test_attempt_size_metrics_round_trip_and_absent_when_empty() -> None:
+    sizes = {"champion_nodes": 56.0, "champion_connections": 292.0, "champion_complexity": 344.0, "pop_median_nodes": 200.0}
+    attempt = Attempt(task="two_spirals", depth=0, outcome="failed", metric=0.9, generations=120, size_metrics=dict(sizes))
+    row = attempt.to_dict()
+    assert row["size_metrics"] == sizes
+    assert Attempt.from_dict(row).size_metrics == sizes
+    legacy = {"task": "xor", "depth": 0, "outcome": "evolved", "metric": 1.0, "generations": 2}
+    restored = Attempt.from_dict(legacy)
+    assert restored.size_metrics == {}
+    assert "size_metrics" not in restored.to_dict()  # old checkpoints and empty rows stay byte-identical
+
+
+def test_run_summary_row_carries_size_metrics_and_module_pool(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    entry = task_entry(xor_task)
+    sizes = {"champion_nodes": 56.0, "pop_median_nodes": 200.0}
+    pool_sizes = {"pool_median_nodes": 200.0, "pool_max_nodes": 258.0}
+    trial._record_task(entry, Attempt(task=entry.name, depth=0, outcome="failed", metric=0.9, generations=120, size_metrics=sizes), [], 0, pool_sizes)
+    trial._record_task(entry, Attempt(task=entry.name, depth=0, outcome="failed", metric=0.5, generations=3), [], 0)
+    assert trial.task_records[0]["size_metrics"] == sizes
+    assert trial.task_records[0]["module_pool"] == pool_sizes
+    assert "size_metrics" not in trial.task_records[1] and "module_pool" not in trial.task_records[1]
+
+
+def test_real_solve_stamps_size_metrics_and_pool_sizes(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator.solve(xor_task)
+    sizes = orchestrator.attempts[-1].size_metrics
+    assert sizes and sizes["champion_complexity"] >= 0.0  # the default ladder is composition-shaped
+    assert "champion_modules" in sizes
+    pool_sizes = OrchestratedTrial._module_pool_sizes(orchestrator.state)
+    assert pool_sizes["pool_median_nodes"] > 0.0 and pool_sizes["pool_max_nodes"] >= pool_sizes["pool_median_nodes"]
+
+
 def test_run_summary_records_a_task_that_admits_nothing(tmp_path: Path, xor_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)

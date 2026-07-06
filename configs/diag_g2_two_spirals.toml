@@ -53,6 +53,11 @@ stall_generations = 60        # RAISED from 28: the validated two-spirals solve 
                               # 28-gen flatline window aborts a climb mid-growth before the next jump and
                               # leaves the depth0=240 budget unspent. 60 gives a growth plateau room.
 stall_epsilon = 0.005
+max_task_seconds = 600        # per-attempt wall-clock budget: past it the running stage finishes its
+                              # current generation, later ladder stages are skipped, and the attempt
+                              # fails with its best champion (the wall ledger still shelves it).
+                              # 2x task 1 of the 2026-07-05 run (311s, which produced the stone);
+                              # tasks 2/3 hit 3532s/2052s under free growth. 0 = off, byte-identical.
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
 library_dir = "library"       # persistent across runs: delete it to start the search space cold
@@ -205,6 +210,12 @@ elitism = 1
                               # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
                               # degrades to a fitness tournament on the scalar call sites)
   kind = "nsga2"              # G1+ arm: Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
+  parsimony_epsilon = 0.01    # anti-bloat WITHOUT a size cap: fitness quantizes into 0.01 bands and
+                              # within a band the SMALLER genome wins selection, so extra size only
+                              # survives when it buys a real fitness step. 2x stall_epsilon = ~3
+                              # support rows of accuracy: differences below that are training noise.
+                              # Bites hardest on the module pool (scalar nsga2 degradation); on the
+                              # direct Pareto path it sits behind rank + crowding. 0.0 = off.
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
@@ -225,7 +236,10 @@ elitism = 1
   self_adaptive_learning_rate = 0.1   # log-normal step size on the rates
   self_adaptive_min = 0.001           # rate clamp floor
   self_adaptive_max = 1.0             # rate clamp ceiling
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
+  # remove_connection / remove_hidden_node: the structural SHRINK moves (true gene deletion, not
+  # toggle-disable), so under free growth a lineage can climb back down. Self-adaptive seeds like
+  # every other rate: they rise where pruning pays and sink to the floor where it hurts.
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -251,6 +265,8 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
                               # steps must tune a freshly-grown candidate enough for its capacity to
                               # show BEFORE it competes (champions are never re-trained); weight_decay

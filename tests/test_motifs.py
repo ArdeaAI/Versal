@@ -302,11 +302,25 @@ def test_run_census_cli_core_writes_json(tmp_path: Path) -> None:
     json_out = tmp_path / "motifs.json"
     report = run_census(tmp_path / "lib", sizes=(3, 4), json_out=json_out)
     data = json.loads(json_out.read_text())
-    assert set(data) == {"params", "entries_scanned", "truncated_entries", "module_motifs", "composition_motifs", "vocabulary"}
+    report_keys = {
+        "params",
+        "entries_scanned",
+        "scanned_keys",
+        "input_fingerprint",
+        "index_total",
+        "truncated_entries",
+        "module_motifs",
+        "composition_motifs",
+        "vocabulary",
+        "explanations",
+    }
+    assert set(report_to_dict(report)) == report_keys  # the pure core: no "meta"
+    assert set(data) == report_keys | {"meta"}  # the written file adds the volatile stamp
+    assert set(data["meta"]) == {"generated_at", "library", "library_resolved"}
     assert len(data["module_motifs"]) == len(report.module_motifs) > 0
     assert data["entries_scanned"] == {"modules": 2, "compositions": 0}
     for row in data["module_motifs"]:
-        assert set(row) == {"fingerprint", "size", "class", "support", "occurrences", "exemplars", "nodes", "edges", "description"}
+        assert set(row) == {"fingerprint", "size", "diversity_class", "support", "occurrences", "exemplars", "nodes", "edges", "description"}
 
 
 def test_render_motif_atlas_smoke(tmp_path: Path) -> None:
@@ -324,3 +338,64 @@ def test_render_motif_atlas_smoke(tmp_path: Path) -> None:
     assert atlas.exists() and atlas.stat().st_size > 0
     placeholder = render_motif_atlas(tmp_path / "empty.png", [])
     assert placeholder.exists() and placeholder.stat().st_size > 0
+
+
+def test_render_motif_atlas_empty_note_smoke(tmp_path: Path) -> None:
+    from ardevo.rendering import render_motif_atlas
+
+    noted = render_motif_atlas(tmp_path / "empty_note.png", [], empty_note="1 module entries scanned; rerun with --min-support 1 for intra-entry structure.")
+    assert noted.exists() and noted.stat().st_size > 0
+
+
+# --- provenance stamp + small-library trust ---------------------------------------------------------
+
+
+def test_run_census_meta_pure_core_and_fingerprint(tmp_path: Path) -> None:
+    from datetime import datetime
+
+    from ardevo.tools.motif_census import run_census
+
+    library = ModuleLibrary(tmp_path / "lib")
+    for index in range(2):
+        library.add(entry_type=MODULE, payload=_gadget_payload(id_offset=index * 10, weight=1.0 + index), io=_IO, provenance={"accepted_metric": 1.0})
+
+    first_out, second_out = tmp_path / "first.json", tmp_path / "second.json"
+    run_census(tmp_path / "lib", sizes=(3, 4), json_out=first_out)
+    run_census(tmp_path / "lib", sizes=(3, 4), json_out=second_out)
+    first, second = json.loads(first_out.read_text()), json.loads(second_out.read_text())
+    meta_first = first.pop("meta")
+    second.pop("meta")
+    assert first == second  # the pure core is byte-identical across runs; only meta varies
+    datetime.fromisoformat(meta_first["generated_at"])  # parses as an ISO timestamp
+    fingerprint_before = first["input_fingerprint"]
+    assert second["input_fingerprint"] == fingerprint_before
+
+    library.add(entry_type=MODULE, payload=_gadget_payload(id_offset=20, weight=9.0), io=_IO, provenance={"accepted_metric": 1.0})
+    third_out = tmp_path / "third.json"
+    run_census(tmp_path / "lib", sizes=(3, 4), json_out=third_out)
+    third = json.loads(third_out.read_text())
+    assert third["input_fingerprint"] != fingerprint_before  # a new entry moves the content fingerprint
+
+
+def test_small_library_explains_empty_table(tmp_path: Path) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    key = library.add(entry_type=MODULE, payload=_gadget_payload(id_offset=0, weight=1.0), io=_IO, provenance={"accepted_metric": 1.0})
+    report = motif_census(library, sizes=(3, 4), min_support=2)
+    assert report.module_motifs == []
+    assert report.scanned_keys["modules"] == [key]
+    assert report.index_total == 1
+    note = report_to_dict(report)["explanations"]["module_motifs"]
+    assert note is not None
+    assert "1 module" in note and "--min-support 1" in note
+
+
+def test_min_support_one_yields_intra_entry_motif(tmp_path: Path) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    library.add(entry_type=MODULE, payload=_gadget_payload(id_offset=0, weight=1.0), io=_IO, provenance={"accepted_metric": 1.0})
+    expected = motif_fingerprint(canonical_form(_GADGET_LABELS, _GADGET_EDGES))
+    report = motif_census(library, sizes=(4,), min_support=1)
+    by_fingerprint = {record.fingerprint: record for record in report.module_motifs}
+    assert expected in by_fingerprint
+    assert by_fingerprint[expected].support == 1  # intra-entry structure, not cross-entry recurrence
+    rows = {row["fingerprint"]: row for row in report_to_dict(report)["module_motifs"]}
+    assert rows[expected]["diversity_class"] == "gated"

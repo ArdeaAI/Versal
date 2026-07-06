@@ -141,10 +141,11 @@ class OrchestratedTrial(Proctor):
                 stages = dict(getattr(attempt, "stage_seconds", None) or {})
                 stage_note = f" [{', '.join(f'{k} {v:.0f}s' for k, v in stages.items())}]" if stages else ""
                 console.print(f"  -> {label} (library size {len(self.library)}, {task_seconds:.0f}s{stage_note})")
-                self._log_task(orchestrator, state, task_cursor, task_seconds)
+                module_pool_sizes = self._module_pool_sizes(state)
+                self._log_task(orchestrator, state, task_cursor, task_seconds, module_pool_sizes)
                 # Durable record EVERY task, regardless of admission: a run is now measurable and
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
-                self._record_task(entry, attempt, new_library_keys, len(self.library))
+                self._record_task(entry, attempt, new_library_keys, len(self.library), module_pool_sizes)
                 self._write_run_summary(orchestrator, state, task_cursor, status="running")
                 if task_cursor % self.checkpoint_every == 0:
                     self._persist_resume_state(orchestrator, state, task_cursor)
@@ -226,7 +227,22 @@ class OrchestratedTrial(Proctor):
         except (ValueError, OSError):
             return []
 
-    def _record_task(self, entry: TaskEntry, attempt: Any, new_library_keys: list[str], library_size: int) -> None:
+    @staticmethod
+    def _module_pool_sizes(state: HierarchicalState) -> dict[str, float]:
+        """Median/max genome size across the persistent module pool: the cross-task bloat
+        reservoir (it rides checkpoints, so unchecked growth compounds over every later task)."""
+        if not state.modules:
+            return {}
+        node_counts = sorted(len(member.genome.nodes) for member in state.modules)
+        connection_counts = sorted(len(member.genome.enabled_connections()) for member in state.modules)
+        return {
+            "pool_median_nodes": float(node_counts[len(node_counts) // 2]),
+            "pool_max_nodes": float(node_counts[-1]),
+            "pool_median_connections": float(connection_counts[len(connection_counts) // 2]),
+            "pool_max_connections": float(connection_counts[-1]),
+        }
+
+    def _record_task(self, entry: TaskEntry, attempt: Any, new_library_keys: list[str], library_size: int, module_pool_sizes: dict[str, float] | None = None) -> None:
         record = {
             "rung": entry.rung,
             "task": entry.name,
@@ -248,6 +264,10 @@ class OrchestratedTrial(Proctor):
                 record["stage_seconds"] = dict(attempt.stage_seconds)
         if attempt is not None and getattr(attempt, "sample_metrics", None):  # hybrid-eval G0 diagnostic; absent under standard eval
             record["sample_metrics"] = dict(attempt.sample_metrics)
+        if attempt is not None and getattr(attempt, "size_metrics", None):  # champion/population genome size: the bloat readout
+            record["size_metrics"] = dict(attempt.size_metrics)
+        if module_pool_sizes:
+            record["module_pool"] = dict(module_pool_sizes)
         self.task_records.append(record)
 
     def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:
@@ -290,7 +310,9 @@ class OrchestratedTrial(Proctor):
             ),
         )
 
-    def _log_task(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, task_seconds: float = 0.0) -> None:
+    def _log_task(
+        self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, task_seconds: float = 0.0, module_pool_sizes: dict[str, float] | None = None
+    ) -> None:
         for series, value in orchestrator.counters.items():
             self.log_scalar("Orchestrator", series, value, task_cursor)
         self.log_scalar("Orchestrator", "library_size", len(self.library), task_cursor)
@@ -300,6 +322,12 @@ class OrchestratedTrial(Proctor):
         if state.modules:
             self.log_scalar("Modules", "mean_fitness", sum(m.fitness for m in state.modules) / len(state.modules), task_cursor)
         self.log_scalar("Modules", "species", len(state.species_champions), task_cursor)
+        # Genome-size series: the bloat curves that made the diag_g2 wall-clock explosion diagnosable.
+        for series, value in (module_pool_sizes or {}).items():
+            self.log_scalar("Modules", series, value, task_cursor)
+        attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
+        for series, value in (getattr(attempt, "size_metrics", None) or {}).items():
+            self.log_scalar("Size", series, value, task_cursor)
         # Wall-clock + memory per task: a wedged stage or a leaking process must be visible in
         # the run record, not only via sampling a live process.
         if task_seconds:

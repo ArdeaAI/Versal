@@ -100,6 +100,11 @@ def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Pa
     assert first is not None
     attempt = orchestrator.attempts[-1]
     assert attempt.outcome == "evolved" and attempt.strategy == "direct"
+    # The size readout rides every direct result: champion scalars plus final-population stats.
+    sizes = attempt.size_metrics
+    assert sizes["champion_nodes"] > 0.0 and sizes["champion_connections"] > 0.0
+    assert sizes["pop_max_nodes"] >= sizes["pop_median_nodes"] > 0.0
+    assert sizes["pop_max_connections"] >= sizes["pop_median_connections"]
     assert first.key is not None
     entry = orchestrator.library.load(first.key)
     assert entry.entry_type == MODULE

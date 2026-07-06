@@ -62,6 +62,35 @@ class StrategyResult:
     # training. The refine comparator uses it as the incumbent baseline, so a candidate must beat
     # the incumbent given the same training, not just beat its untrained quick-eval score.
     seed_metric: float | None = None
+    # Champion/population size stats: the always-on bloat readout. Task cost tracks genome size,
+    # so growth must be visible in run_summary rows, not only through `seconds` (the diag_g2
+    # free-growth arm hit hour-scale tasks with zero size signal in any record).
+    size_metrics: dict[str, float] = field(default_factory=dict)
+
+
+def _module_size_metrics(champion: Genome, population: list[Assessed]) -> dict[str, float]:
+    """Champion plus final-population genome size. The population medians are what show a
+    free-growth run inflating task over task; the champion scalars are what admission shelves."""
+    metrics = {
+        "champion_nodes": float(len(champion.nodes)),
+        "champion_connections": float(len(champion.enabled_connections())),
+        "champion_complexity": float(champion.complexity()),
+    }
+    if population:
+        node_counts = sorted(len(member.genome.nodes) for member in population)
+        connection_counts = sorted(len(member.genome.enabled_connections()) for member in population)
+        metrics["pop_median_nodes"] = float(node_counts[len(node_counts) // 2])
+        metrics["pop_max_nodes"] = float(node_counts[-1])
+        metrics["pop_median_connections"] = float(connection_counts[len(connection_counts) // 2])
+        metrics["pop_max_connections"] = float(connection_counts[-1])
+    return metrics
+
+
+def comp_size_metrics(comp: Any) -> dict[str, float]:
+    """Composition-shaped champions: module count plus glue complexity (inner genome cost is
+    priced at the module layer, not here). Public because the routed strategy stamps the same
+    keys on a distilled win."""
+    return {"champion_modules": float(len(comp.module_ids)), "champion_complexity": float(comp.complexity())}
 
 
 @EVOLVE_STRATEGY.register("composition")
@@ -97,6 +126,7 @@ class CompositionStrategy:
             generations_used=progress["generations"],
             champion_comp=verified,
             champion_metrics=dict(verified.metrics),
+            size_metrics=comp_size_metrics(verified.comp),
         )
 
     def _verify(self, best: AssessedComposition, spec: CompTaskSpec, runtime: StrategyRuntime) -> AssessedComposition:
@@ -243,6 +273,7 @@ class DirectStrategy:
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
             seed_metric=seed_metric,
+            size_metrics=_module_size_metrics(verified.genome, state.population),
         )
 
 

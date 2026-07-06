@@ -18,6 +18,7 @@ functions (and forced onto the headless Agg backend) per project convention.
 """
 
 import math
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -767,9 +768,11 @@ def build_motif_spec(node_labels: tuple[NodeLabel, ...], edges: tuple[tuple[int,
     return spec
 
 
-def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: int = 6) -> Path:
+def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: int = 6, empty_note: str | None = None) -> Path:
     """A contact sheet of recurring motifs (per-cell axes, like the library gallery: the single-spec
-    figure floor makes merged grids awkward). One bad motif must never kill the sheet."""
+    figure floor makes merged grids awkward). One bad motif must never kill the sheet. `empty_note`
+    prints beneath the empty-state headline so a reader knows WHY the atlas is bare (small library,
+    min_support too high), rather than assuming the search found nothing."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -779,7 +782,10 @@ def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: in
         figure, axis = plt.subplots(figsize=(6, 4))
         figure.patch.set_facecolor(THEME["background"])
         axis.set_facecolor(THEME["background"])
-        axis.text(0.5, 0.5, "no recurring motifs yet", ha="center", va="center", color=THEME["label"])
+        axis.text(0.5, 0.6, "no recurring motifs yet", ha="center", va="center", color=THEME["label"])
+        if empty_note:
+            wrapped_note = "\n".join(textwrap.wrap(empty_note, width=64))
+            axis.text(0.5, 0.32, wrapped_note, ha="center", va="center", color=THEME["label"], fontsize=7)
         axis.axis("off")
     else:
         columns = max(1, min(columns, len(motifs)))

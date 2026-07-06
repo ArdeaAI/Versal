@@ -46,7 +46,7 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = [1, 2, 3, 4, 5, 6]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
 tasks_per_rung = 100
 shuffle = true
@@ -58,6 +58,11 @@ accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
 stall_generations = 28
 stall_epsilon = 0.005
+max_task_seconds = 600        # per-attempt wall-clock budget: past it the running stage finishes its
+                              # current generation, later ladder stages are skipped, and the attempt
+                              # fails with its best champion (the wall ledger still shelves it).
+                              # The guard against free-growth blowups (the 2026-07-05 diag_g2 run hit
+                              # 3532s on one task). 0 = off, byte-identical.
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
 library_dir = "library"       # persistent across runs: delete it to start the search space cold
@@ -203,6 +208,11 @@ elitism = 1
                               # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
                               # degrades to a fitness tournament on the scalar call sites)
   kind = "nsga2"              # Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
+  parsimony_epsilon = 0.01    # anti-bloat WITHOUT a size cap: fitness quantizes into 0.01 bands and
+                              # within a band the SMALLER genome wins selection, so extra size only
+                              # survives when it buys a real fitness step. On the direct Pareto path
+                              # it sits behind rank + crowding; on the module pool's scalar call it
+                              # ranks by band with complexity as the in-band decider. 0.0 = off.
   [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
   kind = "neat"
   rate = 0.2
@@ -231,7 +241,10 @@ elitism = 1
   self_adaptive_learning_rate = 0.1   # log-normal step size on the rates
   self_adaptive_min = 0.001           # rate clamp floor
   self_adaptive_max = 1.0             # rate clamp ceiling
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif"]
+  # remove_connection / remove_hidden_node: the structural SHRINK moves (true gene deletion, not
+  # toggle-disable), so a lineage can climb back down in size. Self-adaptive seeds like every
+  # other rate: they rise where pruning pays and sink to the floor where it hurts.
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node"]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -257,6 +270,8 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
                               # steps must tune a freshly-grown candidate enough for its capacity to
                               # show BEFORE it competes (champions are never re-trained); weight_decay

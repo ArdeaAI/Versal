@@ -225,6 +225,13 @@ class CensusReport:
     truncated_entries: dict[str, list[int]]  # entry key -> sizes that hit the cap
     entries_scanned: dict[str, int]
     params: dict[str, Any] = field(default_factory=dict)
+    # Provenance the mining core CAN derive purely from library content (no clock, no path): the exact
+    # keys scanned, a content fingerprint over them (entry keys are already payload hashes), and the
+    # index size the scan drew from. The volatile stamps (wall-clock, on-disk path) live only in the
+    # file's "meta" object, added at write time, so this report stays a pure function of its inputs.
+    scanned_keys: dict[str, list[str]] = field(default_factory=dict)
+    input_fingerprint: str = ""
+    index_total: int = 0  # total index rows (retired included), so a viewer sees what the scan skipped
 
 
 def diversity_class(graph: MotifGraph) -> str:
@@ -378,28 +385,37 @@ def motif_census(
 ) -> CensusReport:
     """Mine every entry once and count each canonical motif's support across DISTINCT entries.
     `sizes` governs module graphs; composition graphs are tiny (their nodes are opaque refs) and
-    always mine the small fixed range, where a 2-node level-to-level link is already informative."""
+    always mine the small fixed range, where a 2-node level-to-level link is already informative.
+
+    A support=1 row (only reachable with `min_support=1`) is intra-entry structure: a motif appearing
+    inside a single entry, not a cross-entry recurrence. That is the honest small-library reading."""
     entries = _load_entries(library, include_retired=include_retired)
     canonical_cache: dict[tuple[tuple[NodeLabel, ...], tuple[tuple[int, int, int], ...]], MotifGraph] = {}
     module_found: dict[str, dict[str, tuple[MotifGraph, int]]] = {}
     comp_found: dict[str, dict[str, tuple[MotifGraph, int]]] = {}
     truncated_entries: dict[str, list[int]] = {}
     scanned = {"modules": 0, "compositions": 0}
+    scanned_keys: dict[str, list[str]] = {"modules": [], "compositions": []}
     for entry in entries:
         if entry.entry_type == MODULE:
             labels, edges = module_motif_graph(entry.payload)
             found, truncated_sizes = _mine_entry(labels, edges, sizes, per_entry_cap, canonical_cache)
             module_found[entry.key] = found
             scanned["modules"] += 1
+            scanned_keys["modules"].append(entry.key)
         elif entry.entry_type == COMPOSITION:
             labels, edges = composition_motif_graph(entry.payload)
             found, truncated_sizes = _mine_entry(labels, edges, DEFAULT_COMPOSITION_SIZES, per_entry_cap, canonical_cache)
             comp_found[entry.key] = found
             scanned["compositions"] += 1
+            scanned_keys["compositions"].append(entry.key)
         else:
             continue
         if truncated_sizes:
             truncated_entries[entry.key] = truncated_sizes
+    scanned_keys = {kind: sorted(keys) for kind, keys in scanned_keys.items()}
+    all_scanned_keys = sorted(scanned_keys["modules"] + scanned_keys["compositions"])
+    input_fingerprint = hashlib.sha1("\n".join(all_scanned_keys).encode()).hexdigest()[:16]
     return CensusReport(
         module_motifs=_assemble_records(module_found, min_support),
         composition_motifs=_assemble_records(comp_found, min_support),
@@ -407,19 +423,38 @@ def motif_census(
         truncated_entries=truncated_entries,
         entries_scanned=scanned,
         params={"sizes": list(sizes), "min_support": min_support, "per_entry_cap": per_entry_cap, "include_retired": include_retired},
+        scanned_keys=scanned_keys,
+        input_fingerprint=input_fingerprint,
+        index_total=len(library),
     )
+
+
+def empty_state_explanation(kind: str, scanned: int, min_support: int, records: list[MotifRecord]) -> str | None:
+    """Why a motif table is empty, in one sentence, so the reader never mistakes "small library" for
+    "no structure". Returns None when the table has rows. Two distinct causes get distinct messages:
+    too few entries to ever satisfy min_support (the small-library case, with the intra-entry escape
+    hatch spelled out), versus enough entries but no shared recurrence."""
+    if records:
+        return None
+    if scanned < min_support:
+        return (
+            f"{scanned} {kind} entries scanned; min_support={min_support} requires motifs recurring across >= {min_support} distinct entries, "
+            f"so this table is empty by construction. Rerun with --min-support 1 for intra-entry structure, or --library <archive dir> for a multi-entry library."
+        )
+    return f"no motif recurred across >= {min_support} of the {scanned} scanned entries."
 
 
 def report_to_dict(report: CensusReport) -> dict[str, Any]:
     """The JSON-report shape: canonical nodes/edges ride along verbatim so a motif can be
-    reconstructed (and re-rendered) from the file alone."""
+    reconstructed (and re-rendered) from the file alone. This stays a PURE function of the report;
+    volatile stamps (wall-clock, path) are added by the writer as a separate "meta" object."""
 
     def record_rows(records: list[MotifRecord]) -> list[dict[str, Any]]:
         return [
             {
                 "fingerprint": record.fingerprint,
                 "size": record.size,
-                "class": record.diversity_class,
+                "diversity_class": record.diversity_class,
                 "support": record.support,
                 "occurrences": record.occurrences,
                 "exemplars": list(record.exemplars),
@@ -430,11 +465,19 @@ def report_to_dict(report: CensusReport) -> dict[str, Any]:
             for record in records
         ]
 
+    min_support = int(report.params.get("min_support", 0))
     return {
         "params": report.params,
         "entries_scanned": report.entries_scanned,
+        "scanned_keys": report.scanned_keys,
+        "input_fingerprint": report.input_fingerprint,
+        "index_total": report.index_total,
         "truncated_entries": report.truncated_entries,
         "module_motifs": record_rows(report.module_motifs),
         "composition_motifs": record_rows(report.composition_motifs),
         "vocabulary": report.vocabulary,
+        "explanations": {
+            "module_motifs": empty_state_explanation("module", report.entries_scanned.get("modules", 0), min_support, report.module_motifs),
+            "composition_motifs": empty_state_explanation("composition", report.entries_scanned.get("compositions", 0), min_support, report.composition_motifs),
+        },
     }
