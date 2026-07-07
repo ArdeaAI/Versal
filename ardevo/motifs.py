@@ -38,6 +38,7 @@ NodeLabel = tuple[str, str, str, str]  # (kind, activation_or_ref_class, aggrega
 FORWARD_EDGE = 1
 RECURRENT_EDGE = 2
 MACRO_EDGE = 4
+TIED_EDGE = 8  # the edge belongs to a hard weight-sharing group (ConnectionGene.tie_group)
 
 DEFAULT_MODULE_SIZES = (3, 4)
 DEFAULT_COMPOSITION_SIZES = (2, 3, 4)
@@ -64,7 +65,10 @@ def module_motif_graph(payload: dict[str, Any]) -> tuple[dict[int, NodeLabel], d
         source, target = int(conn["in"]), int(conn["out"])
         if source not in labels or target not in labels:
             continue
-        edges[(source, target)] = edges.get((source, target), 0) | (RECURRENT_EDGE if conn.get("recurrent", False) else FORWARD_EDGE)
+        mask = RECURRENT_EDGE if conn.get("recurrent", False) else FORWARD_EDGE
+        if conn.get("tie") is not None:  # absent on every untied payload: old reports byte-identical
+            mask |= TIED_EDGE
+        edges[(source, target)] = edges.get((source, target), 0) | mask
     for macro in payload.get("macros", []):
         for source in macro.get("inputs", []):
             for target in macro.get("outputs", []):
@@ -244,6 +248,8 @@ def diversity_class(graph: MotifGraph) -> str:
         flags.append("gated")
     if any(label[3] == "stub" for label in graph.node_labels) or any(mask & MACRO_EDGE for _source, _target, mask in graph.edges):
         flags.append("macro")
+    if any(mask & TIED_EDGE for _source, _target, mask in graph.edges):
+        flags.append("tied")  # a weight-sharing group ran through this motif: the conv-emergence tell
     if flags:
         return "+".join(flags)
     if len(set(graph.node_labels)) >= 2:

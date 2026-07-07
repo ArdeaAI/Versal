@@ -46,12 +46,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ArdEVO: the orchestrated overmind evolver on the Icarus ladder.")
     parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/orchestrated_overmind.toml).")
     parser.add_argument("--resume", type=str, default=None, help="Resume a run from its directory (e.g. results/<ts>_orchestrated).")
+    parser.add_argument("--seed", type=int, default=None, help="Override [run] seed (the multi-seed matrix driver's seam; the config file stays frozen).")
+    parser.add_argument("--library-dir", type=str, default=None, help="Override [orchestrator] library_dir (cold/warm arms without editing the config).")
     args = parser.parse_args()
 
     config = Config(conf_path=args.config)
     require_orchestrator(config.current)
     if args.resume:
         config.current["resume"] = args.resume
+    if args.seed is not None:
+        config.current["seed"] = args.seed
+    if args.library_dir is not None:
+        config.current["orchestrator"]["library_dir"] = args.library_dir
     configure_precision(config.current)
     configure_assess_pool(config.current)
     logger = Logger.get_logger()

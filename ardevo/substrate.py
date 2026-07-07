@@ -144,16 +144,45 @@ class GraphNet(SubstrateModule):
         # weight_decay drift these never-read weights as a side effect; freezing them matches
         # their documented inert semantics. Mutators never create them; only legacy genomes can.)
         self._inert_edges: list[tuple[int, int, bool, float]] = []
+        # HARD WEIGHT SHARING: tied edges (ConnectionGene.tie_group) draw their value from ONE
+        # shared parameter per group instead of a weight-matrix cell; forward overlays them onto
+        # the masked matrix with index_put, so the gradient of a group's parameter accumulates
+        # across every member edge (the convolution mechanic). The matrix cell stays 0 with mask
+        # True: it is overwritten before any level reads it, receives zero gradient, and keeps
+        # has_edges truthful. Untied genomes allocate nothing and skip the overlay entirely.
+        tie_of_edge = {(conn.in_id, conn.out_id): conn.tie_group for conn in genome.forward_connections() if conn.tie_group is not None}
+        group_slot: dict[int, int] = {}
+        group_values: list[float] = []
+        tie_rows: list[int] = []
+        tie_cols: list[int] = []
+        tie_slots: list[int] = []
+        self._tied_edge_exports: list[tuple[int, int, int]] = []  # (in_id, out_id, slot)
         for in_id, out_id, source, target, weight in forward_edges:
             col = self._col_of.get(target)
             if col is None:
                 self._inert_edges.append((in_id, out_id, False, weight))
+                continue
+            group = tie_of_edge.get((in_id, out_id))
+            if group is not None:
+                if group not in group_slot:
+                    group_slot[group] = len(group_values)
+                    group_values.append(weight)  # first member (gene order) seeds the shared value
+                slot = group_slot[group]
+                mask[source, col] = True
+                tie_rows.append(source)
+                tie_cols.append(col)
+                tie_slots.append(slot)
+                self._tied_edge_exports.append((in_id, out_id, slot))
                 continue
             weight_matrix[source, col] = weight
             mask[source, col] = True
             self._edge_positions.append((in_id, out_id, source, col))
 
         self.weights = nn.Parameter(weight_matrix)
+        self.tie_values = nn.Parameter(torch.tensor(group_values)) if group_values else None
+        self._tie_rows: torch.Tensor = torch.tensor(tie_rows, dtype=torch.long)
+        self._tie_cols: torch.Tensor = torch.tensor(tie_cols, dtype=torch.long)
+        self._tie_slots: torch.Tensor = torch.tensor(tie_slots, dtype=torch.long)
         # Plain typed attributes (not buffers): the module is never moved off CPU here, and buffers
         # confuse the type checker about these tensors.
         self.mask: torch.Tensor = mask
@@ -233,6 +262,14 @@ class GraphNet(SubstrateModule):
                 input_positions = torch.tensor([position[node_id] for node_id in macro.input_node_ids], dtype=torch.long)
                 self._macro_entries[level].append((local_indices, input_positions, inner))
 
+    def _masked_weights(self) -> torch.Tensor:
+        masked = self.weights * self.mask
+        if self.tie_values is not None:
+            # Overlay the shared parameters onto their member positions; index_select's backward
+            # scatter-adds, so each group's gradient sums over every stamped copy.
+            masked = masked.index_put((self._tie_rows, self._tie_cols), self.tie_values.index_select(0, self._tie_slots))
+        return masked
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch = x.shape[0]
         values = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
@@ -241,7 +278,7 @@ class GraphNet(SubstrateModule):
         if self.bias_pos.numel():
             values = values.index_copy(1, self.bias_pos, torch.ones(batch, self.bias_pos.numel(), dtype=x.dtype, device=x.device))
 
-        masked = self.weights * self.mask
+        masked = self._masked_weights()
         for (level_positions, level_cols, activation_groups), products, macros in zip(self._levels, self._product_entries, self._macro_entries):
             pre_activation = values @ masked[:, level_cols]
             for local_index, node_col, source_positions in products:
@@ -264,16 +301,20 @@ class GraphNet(SubstrateModule):
     def export_weights(self) -> dict[tuple[int, int, bool], float]:
         """Current edge weights keyed by (in_id, out_id, recurrent), for Lamarckian writeback.
         Inert edges (no compact column) report their genome weights so `_writeback` keys stay
-        complete; `RecurrentGraphNet` appends its recurrent-inert entries to the same list."""
+        complete; `RecurrentGraphNet` appends its recurrent-inert entries to the same list.
+        Tied edges all report their group's shared value, so writeback keeps members in sync."""
         detached = self.weights.detach()
         exported = {(in_id, out_id, False): float(detached[source, col]) for in_id, out_id, source, col in self._edge_positions}
         exported.update({(in_id, out_id, recurrent): weight for in_id, out_id, recurrent, weight in self._inert_edges})
+        if self.tie_values is not None:
+            tied = self.tie_values.detach()
+            exported.update({(in_id, out_id, False): float(tied[slot]) for in_id, out_id, slot in self._tied_edge_exports})
         return exported
 
     def core(self) -> tuple["GraphNet | None", "torch.Tensor | None"]:
-        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time; product and
-        # macro entries change the math; all fall back to the sequential path).
-        if type(self) is GraphNet and not any(self._product_entries) and not any(self._macro_entries):
+        # Only the EXACT GraphNet form is batchable (RecurrentGraphNet steps over time; product,
+        # macro, and tied-weight entries change the math; all fall back to the sequential path).
+        if type(self) is GraphNet and not any(self._product_entries) and not any(self._macro_entries) and self.tie_values is None:
             return self, None
         return None, None
 
@@ -340,7 +381,7 @@ class RecurrentGraphNet(GraphNet):
         if x.dim() != 3:
             raise ValueError(f"RecurrentGraphNet expects [batch, time, features], got shape {tuple(x.shape)}")
         batch, steps, _features = x.shape
-        masked = self.weights * self.mask
+        masked = self._masked_weights()  # tied forward edges share parameters here too
         recurrent_masked = self.recurrent_weights * self.recurrent_mask
         previous = torch.zeros(batch, self.n, dtype=x.dtype, device=x.device)
         outputs: list[torch.Tensor] = []

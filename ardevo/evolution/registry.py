@@ -186,4 +186,6 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         activations=activations,
         default_activation=default_activation,
         novelty=novelty_config,
+        halving_stages=[float(fraction) for fraction in evolution.get("halving_stages", [])],
+        halving_keep=float(evolution.get("halving_keep", 0.5)),
     )

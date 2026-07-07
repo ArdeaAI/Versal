@@ -221,6 +221,13 @@ class Orchestrator:
         # the whole budget on unsolvable parts (the two_spirals-class 0-for-N decompose failures).
         self.decompose_solvability_floor = float(table.get("decompose_solvability_floor", 0.0))
         self.decompose_probe_generations = int(table.get("decompose_probe_generations", 6))
+        # DECOMPOSE-FIRST ([orchestrator] decompose_first_above): a task whose dense-init gene
+        # estimate ((n_in + 1) x n_out) exceeds this runs the decompose registry BEFORE the evolve
+        # ladder, because decompose is otherwise the LAST stage and an init-wall task (rungs 11-14,
+        # 15, 18) would wedge in direct evolution before ever reaching it. On decompose failure the
+        # ordinary ladder still runs, so this knob must ship WITH a scale-safe init (factored or
+        # sparse) in the same config. 0 (the default) is off and byte-identical.
+        self.decompose_first_above = int(table.get("decompose_first_above", 0))
         budgets = table.get("budgets", {})
         self.budgets = {int(name.removeprefix("depth")): int(value) for name, value in budgets.items()} or {0: 120, 1: 60, 2: 30}
         self.decomposers = build_decomposers(table)
@@ -290,6 +297,8 @@ class Orchestrator:
             self.counters.update({"wall_stones_admitted": 0, "wall_stones_improved": 0, "wall_seeded_attempts": 0})
         if self.max_task_seconds > 0:  # registered only when the budget is on, so off-mode summaries stay byte-identical
             self.counters.update({"time_budget_hits": 0})
+        if self.decompose_first_above > 0:  # registered only when the policy is on
+            self.counters.update({"decompose_first": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
@@ -325,6 +334,19 @@ class Orchestrator:
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
+        decomposed_first = False
+        if self._wants_decompose_first(task, spec) and depth < self.max_depth and not self._deadline_exceeded():
+            decomposed_first = True
+            self.counters["decompose_first"] += 1
+            decompose_started = time.perf_counter()
+            solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=0.0)
+            if self._active_stages is not None:
+                self._active_stages["decompose_first"] = round(time.perf_counter() - decompose_started, 3)
+            if solution is not None:
+                return solution
+            # Fall through to the ordinary ladder: a scale-safe init (factored/sparse) rides the
+            # same config, so the flat attempt below stays affordable even at init-wall widths.
+
         stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
         if stone_modules or stone_comps:
             self.counters["wall_seeded_attempts"] += 1
@@ -348,7 +370,7 @@ class Orchestrator:
             return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric)
 
         timed_out = self._deadline_exceeded()  # sampled ONCE: the failure forensics below must match the decompose gate
-        if depth < self.max_depth and not timed_out:
+        if depth < self.max_depth and not timed_out and not decomposed_first:  # decompose-first already spent its shot
             decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
             # Wall time of the whole decompose phase (probe evolves + sub-solves; sub-solve attempts
@@ -389,6 +411,13 @@ class Orchestrator:
     def _deadline_exceeded(self) -> bool:
         deadline = getattr(self, "_solve_deadline", None)
         return deadline is not None and time.perf_counter() > deadline
+
+    def _wants_decompose_first(self, task: Task, spec: CompTaskSpec) -> bool:
+        """True when the task's dense-init gene estimate marks it too wide to evolve flat first."""
+        if self.decompose_first_above <= 0:
+            return False
+        io = self._io_of(task, spec)
+        return (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"]) > self.decompose_first_above
 
     def _with_deadline(self, detector: StallDetector) -> Callable[[int, Any], bool]:
         """Chain the per-solve deadline behind a stall detector. With no deadline the detector is

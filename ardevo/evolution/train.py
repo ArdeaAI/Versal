@@ -63,6 +63,7 @@ def gradient(
     lr: float = 0.01,
     writeback: bool = True,
     weight_decay: float = 0.0,
+    score_candidates: bool = False,
 ) -> tuple[Genome, SubstrateModule]:
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
@@ -81,6 +82,10 @@ def gradient(
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
+    if score_candidates:  # NeST/GradMax growth hints from the trained weights (one extra backward)
+        from ardevo.evolution.growth import attach_growth_hints
+
+        genome = attach_growth_hints(genome, module, encoded, cloned=writeback)
     return genome, module
 
 
@@ -111,6 +116,7 @@ def gradient_scheduled(
     final_lr_fraction: float = 0.05,
     writeback: bool = True,
     weight_decay: float = 0.0,
+    score_candidates: bool = False,
 ) -> tuple[Genome, SubstrateModule]:
     # Warmup + cosine decay: fixed-lr Adam stalls in oscillatory loss regions that a decaying rate
     # anneals through. Measured on the CPPN-generator landscape (ai/trial/probe_6): the same
@@ -131,6 +137,10 @@ def gradient_scheduled(
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
+    if score_candidates:
+        from ardevo.evolution.growth import attach_growth_hints
+
+        genome = attach_growth_hints(genome, module, encoded, cloned=writeback)
     return genome, module
 
 
@@ -145,12 +155,19 @@ def gradient_refine(
     lr: float = 0.01,
     writeback: bool = True,
     weight_decay: float = 0.0,
+    score_candidates: bool = False,
+    contractivity_weight: float = 0.0,
 ) -> tuple[Genome, SubstrateModule]:
     """Deep-supervised gradient training for the refine substrate (TRM): backprop a loss summed over
     every refinement pass, through the full recursion. Falls back to plain `gradient` for modules
-    that do not refine (steps==1 genomes decode to a GraphNet), so it is a safe drop-in trainer."""
+    that do not refine (steps==1 genomes decode to a GraphNet), so it is a safe drop-in trainer.
+
+    `contractivity_weight` > 0 adds a Lipschitz-style penalty on the recurrent weight block
+    (relu(frobenius - 1), the cheap upper bound on the spectral norm), keeping the iterated update
+    map contractive: the DT-L finding that makes deep unrolls train stably and gives fixed-point
+    convergence a meaning. 0.0 (the default) is off, byte-identical."""
     if not hasattr(module, "refine_trace"):
-        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates)
     parameters = _trainable_parameters(module)
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
@@ -158,6 +175,14 @@ def gradient_refine(
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss_deep(module, encoded)
+        if contractivity_weight > 0.0 and hasattr(module, "recurrent_weights"):
+            from typing import cast
+
+            from ardevo.substrate import RecurrentGraphNet
+
+            recurrent_net = cast(RecurrentGraphNet, module)
+            recurrent_masked = recurrent_net.recurrent_weights * recurrent_net.recurrent_mask
+            loss = loss + contractivity_weight * torch.relu(recurrent_masked.norm() - 1.0)
         if not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
@@ -219,6 +244,7 @@ def gradient_batched(
     min_batch_nodes: int = 0,
     adam_fused: bool = False,
     torch_compile: bool = False,
+    score_candidates: bool = False,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
     params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
@@ -238,6 +264,7 @@ def gradient_batched(
         min_batch_nodes=min_batch_nodes,
         adam_fused=adam_fused,
         torch_compile=torch_compile,
+        score_candidates=score_candidates,
         serial_op=gradient,
     )
 
@@ -258,6 +285,7 @@ def gradient_refine_population(
     min_batch_nodes: int = 0,
     adam_fused: bool = False,
     torch_compile: bool = False,
+    score_candidates: bool = False,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Population form of `gradient_refine`. Correct by exclusion: `core()` keeps every refine/
     recurrent/product/macro module OUT of the batch (they train through sequential
@@ -279,6 +307,7 @@ def gradient_refine_population(
         min_batch_nodes=min_batch_nodes,
         adam_fused=adam_fused,
         torch_compile=torch_compile,
+        score_candidates=score_candidates,
         serial_op=gradient_refine,
     )
 
@@ -299,6 +328,7 @@ def _gradient_batched_impl(
     min_batch_nodes: int = 0,
     adam_fused: bool = False,
     torch_compile: bool = False,
+    score_candidates: bool = False,
 ) -> list[tuple[Genome, SubstrateModule]]:
     from ardevo.substrate_batched import BatchedGraphNet
 
@@ -308,7 +338,11 @@ def _gradient_batched_impl(
 
     results: list[tuple[Genome, SubstrateModule] | None] = [None] * len(modules)
     for index in serial_indices:
-        results[index] = serial_op(genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+        # score_candidates threads to the serial subset only; batch-trained candidates skip growth
+        # hints (the tensor program has no per-candidate replay), which is honest and documented.
+        results[index] = serial_op(
+            genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates
+        )
 
     n_max = 0.0
     pad_efficiency = 0.0

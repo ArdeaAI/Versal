@@ -7,6 +7,7 @@ ClearML), while preserving the nested `evolution`/`substrate`/`fitness` tables v
 the evolver factory can resolve operators from them.
 """
 
+import hashlib
 import json
 import tomllib
 from pathlib import Path
@@ -39,9 +40,14 @@ class Config:
     def _load_config(cls, conf_path: Path) -> dict[str, Any]:
         if not conf_path.exists():
             raise FileNotFoundError(f"Configuration file '{conf_path}' not found.")
-        with open(conf_path, "rb") as handle:
-            raw = tomllib.load(handle)
-        return cls._normalize_config(raw)
+        raw_bytes = conf_path.read_bytes()
+        raw = tomllib.loads(raw_bytes.decode("utf-8"))
+        normalized = cls._normalize_config(raw)
+        # Run provenance: which exact config bytes produced a run. Rides into run_summary.json so a
+        # results directory is self-identifying instead of being matched to a config by schedule shape.
+        normalized["config_path"] = str(conf_path)
+        normalized["config_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+        return normalized
 
     @classmethod
     def _normalize_config(cls, raw: dict[str, Any]) -> dict[str, Any]:

@@ -137,6 +137,8 @@ class OrchestratedTrial(Proctor):
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
                 attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
                 outcome = attempt.outcome if attempt is not None else "unknown"
+                if hasattr(self.scheduler, "observe"):  # feedback-driven schedulers (regret); others untouched
+                    self.scheduler.observe(entry.rung, attempt.metric if attempt is not None else 0.0, solution is not None)
                 label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
                 stages = dict(getattr(attempt, "stage_seconds", None) or {})
                 stage_note = f" [{', '.join(f'{k} {v:.0f}s' for k, v in stages.items())}]" if stages else ""
@@ -278,6 +280,10 @@ class OrchestratedTrial(Proctor):
         summary = {
             "run_dir": str(self.run_dir),
             "status": status,
+            "config_path": self.config.get("config_path", ""),
+            "config_sha256": self.config.get("config_sha256", ""),
+            "seed": int(self.config.get("seed", 0)),
+            "library_dir": str(self.library.root),
             "rungs": self.rungs,
             "tasks_attempted": task_cursor,
             "tasks_to_run": self.tasks_to_run,

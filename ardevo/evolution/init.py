@@ -67,6 +67,104 @@ def minimal(
     return Genome(nodes=nodes, connections=connections)
 
 
+@INIT.register("factored")
+def factored(
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    rng: random.Random,
+    default_activation: str = "tanh",
+    weight_scale: float = 1.0,
+    rank: int = 8,
+    threshold: int = 4096,
+) -> Genome:
+    """Low-rank seed for wide I/O: inputs + bias densely wired to `rank` identity latent nodes,
+    latents densely to outputs (plus bias -> output offsets). The rank-r factorization U x V is
+    represented with ORDINARY genes (the latents are plain HIDDEN sum/identity nodes), so decode,
+    training, crossover, pruning, and complexity() all see it natively: (n_in + 1) x n_out genes
+    become (n_in + 1) x r + r x n_out + n_out (rung 11: 10.8M -> ~433k at r = 4). This is the
+    composition layer's glue_rank auto-factorize pattern ported down to flat genomes. At or below
+    `threshold` dense genes this IS `minimal` (same rng draws, byte-identical), so one configured
+    init serves xor and spherical in the same ladder. Fan-in-scaled weights (Xavier-style) keep a
+    100k-wide sum from saturating the latents at birth; innovations are pair-derived so identical
+    edges align for NEAT crossover across independently seeded members."""
+    if (n_inputs + 1) * n_outputs <= threshold:
+        return minimal(n_inputs, n_outputs, rng=rng, default_activation=default_activation, weight_scale=weight_scale)
+
+    nodes: dict[int, NodeGene] = {}
+    input_ids = list(range(n_inputs))
+    for node_id in input_ids:
+        nodes[node_id] = NodeGene(node_id, NodeKind.INPUT, "identity")
+    bias_id = n_inputs
+    nodes[bias_id] = NodeGene(bias_id, NodeKind.BIAS, "identity")
+    output_ids = list(range(n_inputs + 1, n_inputs + 1 + n_outputs))
+    for node_id in output_ids:
+        nodes[node_id] = NodeGene(node_id, NodeKind.OUTPUT, "identity")
+    latent_ids = list(range(n_inputs + 1 + n_outputs, n_inputs + 1 + n_outputs + rank))
+    for node_id, coordinate in zip(latent_ids, _index_continuum(rank)):
+        nodes[node_id] = NodeGene(node_id, NodeKind.HIDDEN, "identity", coordinate=(coordinate,))
+
+    total = n_inputs + 1 + n_outputs + rank
+    u_scale = weight_scale / math.sqrt(n_inputs + 1)
+    v_scale = weight_scale / math.sqrt(rank)
+    connections: list[ConnectionGene] = []
+    for source in [*input_ids, bias_id]:
+        for latent in latent_ids:
+            connections.append(ConnectionGene(source, latent, rng.gauss(0.0, u_scale), True, source * total + latent))
+    for latent in latent_ids:
+        for target in output_ids:
+            connections.append(ConnectionGene(latent, target, rng.gauss(0.0, v_scale), True, latent * total + target))
+    for target in output_ids:
+        connections.append(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target))
+    return Genome(nodes=nodes, connections=connections)
+
+
+@INIT.register("sparse")
+def sparse(
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    rng: random.Random,
+    default_activation: str = "tanh",
+    weight_scale: float = 1.0,
+    density: float = 0.01,
+    threshold: int = 4096,
+) -> Genome:
+    """SET-style seed (Mocanu et al. 2018): an Erdos-Renyi sparse input -> output wiring instead of
+    the dense bipartite, so a rung-11-class task starts at `density x n_in x n_out` genes and
+    `prune_and_regrow` plus the gradient discover which direct paths matter. Keeps direct
+    input -> output edges (the prior `factored` trades away), so it suits grid -> grid tasks where
+    output j mostly depends on inputs near j. bias -> output floor edges are always present (no
+    dead outputs at any density). At or below `threshold` dense genes this IS `minimal` (same rng
+    draws, byte-identical). Each member samples its own edge subset; pair-derived innovations keep
+    identical edges aligned for NEAT crossover."""
+    if (n_inputs + 1) * n_outputs <= threshold:
+        return minimal(n_inputs, n_outputs, rng=rng, default_activation=default_activation, weight_scale=weight_scale)
+
+    nodes: dict[int, NodeGene] = {}
+    input_ids = list(range(n_inputs))
+    for node_id in input_ids:
+        nodes[node_id] = NodeGene(node_id, NodeKind.INPUT, "identity")
+    bias_id = n_inputs
+    nodes[bias_id] = NodeGene(bias_id, NodeKind.BIAS, "identity")
+    output_ids = list(range(n_inputs + 1, n_inputs + 1 + n_outputs))
+    for node_id in output_ids:
+        nodes[node_id] = NodeGene(node_id, NodeKind.OUTPUT, "identity")
+
+    total = n_inputs + 1 + n_outputs
+    pairs = n_inputs * n_outputs
+    edge_count = min(pairs, max(n_outputs, round(pairs * density)))
+    edge_scale = weight_scale / math.sqrt(max(1.0, edge_count / n_outputs))  # expected fan-in per output
+    connections: list[ConnectionGene] = []
+    for flat in sorted(rng.sample(range(pairs), edge_count)):
+        source = input_ids[flat // n_outputs]
+        target = output_ids[flat % n_outputs]
+        connections.append(ConnectionGene(source, target, rng.gauss(0.0, edge_scale), True, source * total + target))
+    for target in output_ids:
+        connections.append(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target))
+    return Genome(nodes=nodes, connections=connections)
+
+
 def _index_continuum(count: int) -> list[float]:
     if count <= 1:
         return [0.0] * count

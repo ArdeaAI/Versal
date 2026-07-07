@@ -1,0 +1,232 @@
+# WALL LADDER PROBE (plan Phase 1 gate): the first-ever attempts on the init-wall rungs
+# (11 spherical 108k -> 100, 12 cosmic 65k -> 65k, 13 darcy 17k -> 17k, 14 psicov 116k -> 205k,
+# 15 fsd50k 5.6k -> 200, 18 arc 900 -> 9000), made survivable by four levers landing together:
+#   - init = "factored" (rank-4 identity-bottleneck seed; 10.8M dense genes -> ~433k at rung 11)
+#   - decompose_first_above (oversize tasks decompose BEFORE the evolve ladder)
+#   - [orchestrator.direct] max_flat_outputs (the flat [n, h] substrate declines wide-OUTPUT tasks
+#     instead of allocating GBs; composition's rank-factored glue owns those)
+#   - max_task_seconds + prune ops + parsimony (phase-10 cost rails)
+# GATE: every scheduled rung reaches T1 (attempt completes with forensics, sane RSS); T2 where
+# trainable inside the budget. NOT a solve campaign; max_depth stays 1 because each sub-solve gets
+# a fresh wall-clock budget (recursion multiplies worst-case task time).
+#
+#   uv run run_matrix --config configs/wall_ladder.toml --seeds 0 --cold --tag wall
+#
+# Derived from configs/recon_ladder.toml; deltas marked WALL.
+
+[run]
+project = "ardevo"
+experiment = "wall_ladder"           # WALL
+clearml = true
+machine = "MonadMetal"
+seed = 0
+log_level = "INFO"
+output_uri = false
+repo = "https://github.com/ArdeaAI/ardevo.git"
+render_async = true
+tf32 = false
+  [run.duration]
+  generations = 1000
+
+[dataset]
+source = "Ardea/Icarus-dataset"
+n_samples = 128                       # WALL: probe-sized; a 400-sample rung-11 support tensor is 138MB
+support_fraction = 0.8
+
+[schedule]
+kind = "interleave_rungs"
+rungs = [11, 12, 13, 14, 15, 18]      # WALL: exactly the init-wall class
+require_all_rungs = true
+tasks_per_rung = 1
+shuffle = true
+
+[orchestrator]
+tasks = 6                             # WALL: one probe per rung
+accept_metric = "query_accuracy"
+accept_threshold = 0.95
+floor = 0.0                           # WALL: no early-stall floor; the probe wants full forensics
+stall_generations = 28
+stall_epsilon = 0.005
+max_depth = 1                         # WALL: each sub-solve refreshes the wall clock; keep the tree small
+quick_eval_top_k = 5
+library_dir = "library_wall"          # WALL: isolated probe library
+max_task_seconds = 180                # WALL
+decompose_first_above = 2000000       # WALL: rungs 11-14 decompose before any flat attempt
+evolve = ["routed", "direct", "composition"]
+decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
+output_slices_n_groups = 2
+input_subsets_n_subsets = 2
+time_windows_n_windows = 2
+spatial_patches_n_patches = 2
+decompose_solvability_floor = 0.0     # WALL: no probe gate; we want to SEE what each stage does
+decompose_probe_generations = 4
+  [orchestrator.budgets]
+  depth0 = 40                         # WALL: probe budgets
+  depth1 = 20
+  depth2 = 10
+  [orchestrator.evolve_budget]
+  routed = 0.1
+  direct = 0.5
+  composition = 0.4
+  [orchestrator.routed]
+  d_model = 64
+  top_k = 2
+  max_steps = 4
+  train_steps = 100
+  lr = 0.003
+  weight_decay = 0.0001
+  adapter_rank = 4
+  load_balance_weight = 0.01
+  zero_shot_accept = true
+  generation_cost = 10
+  distill = true
+  distill_usage_floor = 0.1
+  distill_max_nodes = 6
+  replay_tasks = 8
+  replay_every = 4
+  include_compositions = true
+  exclude_temporal = true
+  persist = true
+  persist_strict = false
+  halting = true
+  ponder_epsilon = 0.01
+  ponder_cost = 0.001
+  edge_bias = true
+  [orchestrator.refine]
+  budget_k = 0                        # WALL: live mode; the probe never refines hits
+  [orchestrator.wall]
+  ledger = true
+  min_metric = 0.45
+  seed_top_k = 1
+  [orchestrator.direct]
+  pop_size = 16                       # WALL: wide genomes; a 64-strong population is probe overkill
+  elitism = 2
+  assess_workers = 12
+  max_flat_outputs = 4096             # WALL: the [n, h] dense-column guard; wide outputs escalate
+    [orchestrator.direct.train]
+    kind = "gradient_refine"
+    batched = false
+    steps = 40                        # WALL: probe-length training
+    lr = 0.03
+    writeback = true
+    weight_decay = 0.0002
+
+[library]
+admission = "archive"
+gc = true
+min_metric = 0.9
+min_robustness = 0.0
+per_niche_cap = 2
+max_per_signature = 12
+
+[substrate]
+available_activations = ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"]
+default_activation = "tanh"
+recurrent = true
+
+[evolution]
+loop = "hierarchical"
+pop_size = 32                         # WALL: smaller module pool for the probe
+elitism = 1
+  [evolution.init]
+  kind = "factored"                   # WALL: the init-wall lever; minimal below threshold, rank-4 above
+  weight_scale = 1.0
+  rank = 4
+  threshold = 4096
+  [evolution.selection]
+  kind = "tournament"
+  tournament_size = 3
+  parsimony_epsilon = 0.01
+  [evolution.crossover]
+  kind = "neat"
+  rate = 0.2
+  [evolution.mutation]                # WALL: recon set + prune pair + SET rewiring
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node", "prune_and_regrow"]
+  add_rich_node_prob = 0.12
+  add_rich_node_fan_in = 4
+  add_deep_node_prob = 0.12
+  add_deep_node_fan_in = 4
+  add_deep_node_fan_out = 2
+  add_connection_prob = 0.12
+  toggle_connection_prob = 0.05
+  mutate_activation_prob = 0.06
+  mutate_aggregation_prob = 0.05
+  mutate_aggregation_max_fan_in = 4
+  add_recurrent_connection_prob = 0.04
+  add_library_module_prob = 0.05
+  add_macro_node_prob = 0.05
+  add_macro_node_max_outputs = 16
+  tweak_refine_steps_prob = 0.06
+  tweak_refine_steps_max_steps = 6
+  add_local_node_prob = 0.1
+  add_local_node_fan_in = 4
+  add_local_connection_prob = 0.1
+  add_local_connection_radius = 1.5
+  add_shared_motif_prob = 0.05
+  add_shared_motif_copies = 2
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
+  prune_and_regrow_prob = 0.1         # WALL: SET rewiring keeps sparse-seeded density constant
+  prune_and_regrow_fraction = 0.05
+  [evolution.train]
+  kind = "gradient"
+  steps = 20                          # WALL: probe-length composition training
+  lr = 0.03
+  writeback = true
+  weight_decay = 0.0002
+  [evolution.evaluate]
+  kind = "hybrid"
+  samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+  batched_samples = "auto"
+  [evolution.speciation]
+  kind = "neat"
+  threshold = 1.5
+  target_species = 6
+  threshold_adjust = 0.3
+  min_threshold = 0.3
+  c_excess = 1.0
+  c_disjoint = 1.0
+  c_weight = 0.5
+
+  [evolution.composition]
+  pop_size = 24                       # WALL: probe-sized comp population
+  elitism = 2
+  max_inline_depth = 4
+  glue_rank = 8
+  glue_rank_threshold = 4096
+  catalog_width_tolerance = -1
+    [evolution.composition.selection]
+    kind = "tournament"
+    tournament_size = 2
+    [evolution.composition.crossover]
+    kind = "comp_neat"
+    rate = 0.3
+    [evolution.composition.mutation]
+    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
+    add_module_node_prob = 0.3
+    switch_ref_prob = 0.12
+    add_comp_edge_prob = 0.15
+    toggle_comp_edge_prob = 0.05
+    perturb_glue_prob = 0.6
+    perturb_glue_sigma = 0.3
+
+  [evolution.modules]
+  pop_size = 32
+  elitism = 1
+  in_ports = 4
+  out_ports = 2
+  advance_every = 3
+  writeback = "champion"
+  attribution = "max"
+  decay = 0.95
+  offspring_discount = 0.9
+  seed_fraction = 0.25
+  absorb_top_k = 2
+
+[fitness]
+components = ["bounded_negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
+w_bounded_negative_support_loss = 2.0
+w_support_accuracy = 1.0
+w_weight_robustness = 0.5
+w_hidden_penalty = 0.05
+w_complexity_penalty = 0.01

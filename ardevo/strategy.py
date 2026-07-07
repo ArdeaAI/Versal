@@ -158,11 +158,11 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
     overlay["library_dir"] = config.get("orchestrator", {}).get("library_dir", "library")
     # Single-task structure growth usually wants a stronger inner trainer (and sometimes a
     # different mutation recipe) than the composition loop's glue fitting; both are overridable.
-    for overridable in ("mutation", "train", "evaluate", "novelty"):
+    for overridable in ("mutation", "train", "evaluate", "novelty", "halving_stages", "halving_keep"):
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
-    return DirectStrategy(evolver=build_evolver(overlay))
+    return DirectStrategy(evolver=build_evolver(overlay), max_flat_outputs=int(table.get("max_flat_outputs", 0)))
 
 
 @dataclass
@@ -173,6 +173,12 @@ class DirectStrategy:
 
     evolver: Evolver
     name: str = "direct"
+    # Decline tasks whose flattened OUTPUT width exceeds this ([orchestrator.direct]
+    # max_flat_outputs; 0 = off). The flat substrate's [n, h] weight matrix is DENSE and h spans
+    # every output node, so a wide-output task (rungs 12-14, 18 class) would allocate GBs per
+    # genome before its first forward. Declining lets the ladder escalate to composition (whose
+    # glue is already rank-factored above glue_rank_threshold) and to the decomposers.
+    max_flat_outputs: int = 0
 
     def _adapter(self, task: Task) -> TaskAdapter | TemporalTaskAdapter:
         support_input, _support_output = support_loader(task)
@@ -183,7 +189,7 @@ class DirectStrategy:
             width *= int(dim)
         encoder = Level0Encoder(max_flat_dim=width)
         encoded = encode_task(task, encoder)
-        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded))
+        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), grid_shape=self._grid_shape(task))
 
     @staticmethod
     def _grid_shape(task: Task) -> tuple[int, ...] | None:
@@ -201,6 +207,13 @@ class DirectStrategy:
         seed_comps: list | None = None,
         seed_entries: list[LibraryEntry] | None = None,
     ) -> StrategyResult:
+        if self.max_flat_outputs > 0:
+            _support_input, support_output = support_loader(task)
+            flat_outputs = 1
+            for dim in support_output.data.shape[1:]:
+                flat_outputs *= int(dim)
+            if flat_outputs > self.max_flat_outputs:
+                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
         adapter = self._adapter(task)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node

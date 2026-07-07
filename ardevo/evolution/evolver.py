@@ -9,6 +9,7 @@ stages in order: select -> crossover -> mutate -> train -> evaluate -> fitness -
 task adapter between generations, carry the population forward, and checkpoint/resume the run.
 """
 
+import math
 import random
 from dataclasses import dataclass, field
 from functools import partial
@@ -56,6 +57,10 @@ class TaskAdapter:
     encoder: Level0Encoder
     n_inputs: int
     n_outputs: int
+    # The raw spatial shape of the input Field when it IS a grid (set by the direct strategy from
+    # the same probe that stamps geometry coordinates); None elsewhere. Descriptor axes carry no
+    # per-axis lengths, so grid-aware evaluate ops (augmented_vote) read the shape from here.
+    grid_shape: tuple[int, ...] | None = None
 
     def decode(self, genome: Genome) -> GraphNet:
         # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
@@ -147,6 +152,15 @@ class Evolver:
     assess_stats: dict[str, float] = field(default_factory=dict)
     # Behavioral-novelty config ([evolution.novelty]); None = the hook is a no-op, byte-identical.
     novelty: NoveltyConfig | None = None
+    # SUCCESSIVE HALVING ([orchestrator.direct] halving_stages / halving_keep): cumulative step
+    # fractions, e.g. [0.25, 1.0] = train everyone a quarter of the budget, keep the best
+    # `halving_keep` by support loss for the rest. Losers keep their partial-training assessment
+    # (honestly weaker, which IS the culling signal), so long per-candidate budgets (the 2-4k-step
+    # flip-to-GO regime) stop paying full price on obvious losers. Stages compose with the assess
+    # pool through the writeback/re-decode invariant; Adam state restarts at each stage boundary.
+    # Empty (the default) = off, byte-identical.
+    halving_stages: list[float] = field(default_factory=list)
+    halving_keep: float = 0.5
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
@@ -175,6 +189,8 @@ class Evolver:
         trainer is configured. Order-preserving, and rng-equivalent to the sequential path because
         train ops never draw from the shared rng (the contract documented in train.py)."""
         if self.train_population_op is None:
+            if self.halving_stages and len(genomes) > 1:
+                return self._assess_staged(genomes, adapter, state)
             if self.assess_workers > 1 and len(genomes) > 1:
                 return self._assess_pooled(genomes, adapter)
             return [self.assess(genome, adapter, state) for genome in genomes]
@@ -266,6 +282,52 @@ class Evolver:
                 module = None if metrics.get("decode_failed") else self._decode(genome, adapter)
                 results[index] = Assessed(genome, metrics, fitness, module)
         return [item for item in results if item is not None]
+
+    def _assess_staged(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
+        """Successive-halving assessment: stage the per-candidate training budget across the
+        population, culling the weakest-fitting half (by support loss) at each boundary. Stage k
+        CONTINUES training from stage k-1's written-back weights (the same re-decode invariant the
+        pool relies on), so survivors receive the full budget in total. rng-free like every train
+        path (the staged op inherits the train contract)."""
+        keywords = dict(getattr(self.train_op, "keywords", {}))
+        total_steps = int(keywords.get("steps", 20))
+        fractions = sorted({min(1.0, max(0.0, float(fraction))) for fraction in self.halving_stages} | {1.0})
+        boundaries = [max(1, round(total_steps * fraction)) for fraction in fractions]
+        deltas: list[int] = []
+        previous = 0
+        for boundary in boundaries:
+            if boundary > previous:
+                deltas.append(boundary - previous)
+                previous = boundary
+
+        pool = self._ensure_pool() if self.assess_workers > 1 else None
+        pooled_adapter = self._pooled_adapter(adapter) if pool is not None else adapter
+        results: list[tuple[Genome, dict[str, float], float] | None] = [None] * len(genomes)
+        alive = list(range(len(genomes)))
+        current = list(genomes)
+        for stage_index, delta in enumerate(deltas):
+            staged_op = partial(self.train_op, steps=delta)  # call-time kwargs override partial keywords
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            if pool is not None:
+                chunksize = max(1, len(alive) // (self.assess_workers * 4))
+                triples = pool.map(worker, [current[index] for index in alive], chunksize=chunksize)
+            else:
+                triples = [worker(current[index]) for index in alive]
+            for index, triple in zip(alive, triples):
+                current[index] = triple[0]
+                results[index] = triple
+            if stage_index < len(deltas) - 1:
+                def support_loss_of(index: int) -> float:
+                    triple = results[index]
+                    return float(triple[1].get("support_loss", float("inf"))) if triple is not None else float("inf")
+
+                ranked = sorted(alive, key=lambda index: (support_loss_of(index), index))
+                keep = max(1, math.ceil(len(alive) * max(0.0, min(1.0, self.halving_keep))))
+                alive = ranked[:keep]
+        return [
+            Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter))
+            for genome, metrics, fitness in (triple for triple in results if triple is not None)
+        ]
 
     def _assess_pooled(self, genomes: list[Genome], adapter: Adapter) -> list[Assessed]:
         """Assess independent genomes across a persistent process pool (true multi-core). Workers

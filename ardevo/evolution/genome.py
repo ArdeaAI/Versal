@@ -43,6 +43,14 @@ class ConnectionGene:
     # Recurrent edges are TIME-DELAYED: they read the previous step's value, so they are exempt from
     # the acyclicity rules (the forward graph stays a DAG) and are inert under the plain GraphNet.
     recurrent: bool = False
+    # HARD WEIGHT SHARING (the WeightGroup lever): edges carrying the same tie_group share ONE
+    # trainable parameter at decode (gradient accumulates across every stamped copy), which is how
+    # convolution-like structure becomes trainable at wide widths without being hand-inserted:
+    # add_shared_motif(tied=true) assigns groups at stamp time, untie_motif_weights dissolves them.
+    # Group ids come from InnovationTracker.new_marker (run-unique, crossover-stable). None (the
+    # default) is the ordinary independent weight: untied genomes are byte-identical everywhere,
+    # on disk and in the substrate. Forward edges only; recurrent genes ignore the field.
+    tie_group: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,11 @@ class Genome:
     # perturbed by `AdaptiveMutationPipeline` (ES perturb-and-inherit). Empty = the fixed-rate default,
     # so a genome that never met the adaptive pipeline is byte-identical (the key is absent on disk too).
     operator_rates: dict[str, float] = field(default_factory=dict)
+    # Gradient-proposed growth signals (NeST/GradMax scores from ardevo/evolution/growth.py), read
+    # by the hinted mutation operators. IN-MEMORY ONLY: never serialized (genome_to_dict ignores it),
+    # so library payloads, fingerprints, and checkpoints are byte-identical whether scoring ran or
+    # not. Regenerated every trained generation; crossover children start without hints.
+    growth_hints: dict[str, dict[int, float]] | None = None
 
     def clone(self) -> "Genome":
         # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
@@ -86,6 +99,7 @@ class Genome:
             macros=list(self.macros),
             refine_steps=self.refine_steps,
             operator_rates=dict(self.operator_rates),
+            growth_hints=self.growth_hints,
         )
 
     def ids_of(self, kind: NodeKind) -> list[int]:
@@ -398,6 +412,7 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
         ],
         "connections": [
             {"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation, "recurrent": conn.recurrent}
+            | ({"tie": conn.tie_group} if conn.tie_group is not None else {})  # absent when untied: old payloads stay byte-identical
             for conn in genome.connections
         ],
         "macros": [
@@ -419,7 +434,15 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         coordinate = tuple(node["coordinate"]) if node.get("coordinate") is not None else None
         nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate, node.get("aggregation", "sum"))
     connections = [
-        ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"]), bool(conn.get("recurrent", False)))
+        ConnectionGene(
+            int(conn["in"]),
+            int(conn["out"]),
+            float(conn["weight"]),
+            bool(conn["enabled"]),
+            int(conn["innovation"]),
+            bool(conn.get("recurrent", False)),
+            int(conn["tie"]) if conn.get("tie") is not None else None,
+        )
         for conn in data["connections"]
     ]
     macros = [
