@@ -1,9 +1,16 @@
 # paper_todo.md: from draft to publishable
 
-Companion to `ai/paper.md` (draft of 2026-07-06). The draft is honest about its evidence, which means
-the gap to publishable is enumerable. This file is that enumeration: a checklist with the plan baked
-in. Items marked **P0** block any submission; **P1** block a strong submission; **P2** are
-polish/stretch. No em dashes anywhere in the paper; keep it that way.
+Companion to `paper/paper.md` (draft of 2026-07-06, polish pass completed later the same day). The
+draft is honest about its evidence, which means the gap to publishable is enumerable. This file is
+that enumeration: a checklist with the plan baked in. Items marked **P0** block any submission;
+**P1** block a strong submission; **P2** are polish/stretch. No em dashes anywhere in the paper;
+keep it that way.
+
+**2026-07-06 status: everything below that does not require a long run is done** (figures, citation
+verification, related-work sweep, numbers/claims/terminology audits, dataset documentation,
+reproducibility + compute appendices, LaTeX conversion, artifact freeze, runner + provenance).
+`ai/instructions_for_publish.md` holds the exact commands and integration protocol for every
+remaining run-gated item; work from that file.
 
 The one structural advantage we have: every mechanism is a config flip that is byte-identical when
 off, so almost every ablation below is a one-line config change plus a run. The bottleneck is
@@ -31,8 +38,10 @@ distributions.
 - [ ] **Independent-attempt arm.** The gate runs are 20 accumulated assaults (wall ledger on). Add a
       control with `[orchestrator.wall] ledger = false` so attempts are independent samples; report
       both. This also doubles as the wall-ledger ablation.
-- [ ] **Decide and document the metric protocol**: accept bar, what "solved" means, how interrupted
-      runs are treated (the draft reports snapshots; a reviewer will ask).
+- [x] **Decide and document the metric protocol**: DONE in the draft as it stands: the accept bar
+      (0.95 query accuracy, support fallback) and "solved" (outcomes library_hit/refined/evolved)
+      are stated in S4.1/S7.1, interrupted runs are reported with their status and never silently
+      mixed with completed ones (S7.3, Appendix C). Revisit only if a reviewer pushes.
 
 ## 2. Ablation matrix (P0 for the ones supporting central claims)
 
@@ -94,57 +103,53 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
       synthetic decomposable task family to Icarus and show the full recurse-admit-reassemble path
       end to end in a real run. Without this, soften S4.5 or mark it explicitly as untested-in-anger
       (it currently is marked; a demo is better).
-- [ ] **Rungs 6-10 campaign** (P1): rung 6 now has 66 cold attempts on record (0 solves, best
-      0.900, in the completed run); extend to rungs 7-10 with geometry operators +
-      max_task_seconds on, report solve/fail honestly. The paper's image-wall narrative needs at
-      least one full documented attempt at scale beyond rung 6. Rung 6's 0.900-vs-0.95 gap is
-      close enough that budget/steps tuning may flip it: cheap, high-value probe.
+- [ ] **Rungs 6-10 campaign** (P1): IN FLIGHT: the recon_ladder seed-0 arm (rungs 1-10, 16, 17
+      under max_task_seconds) is running as of 2026-07-06 evening
+      (`results/20260706_090102_orchestrated`, 11/24 tasks). Scorecard it on completion and add
+      seeds; rung 6's 0.900-vs-0.95 gap remains the cheap, high-value tuning probe. Instructions
+      item I.
 - [ ] **Rungs 11-14 unblock or descope** (P1): one of (a) cppn init at scale (its designed payoff;
       measure genes-at-init vs minimal), (b) output-side factorization design pass, (c) explicit
       descope in the paper. Currently the draft says "blocked outright", which is honest but invites
       "why not the init you built for exactly this".
-- [ ] **Motif census at scale** (P2): run on a 100+ entry library; the draft admits the current
-      census reads as plumbing statistics.
+- [ ] **Motif census at scale** (P2): the 35-entry flagship census is DONE and in the paper (358
+      motifs, gated structure recovered); the 100+ entry census waits on a bigger library.
 - [ ] **Library scale stress** (P2): synthetic 1k-entry library; measure index rewrite, query, GC;
       the draft cites watchpoints, back them with numbers or fix before review.
 
 ## 5. Figures and tables (P0; the draft has zero figures)
 
-- [ ] Fig 1: system diagram of the solve ladder (lookup -> refine -> routed/direct/composition ->
-      decompose -> admit, with the library at center). The walkthrough's mermaid chart is the seed.
-- [ ] Fig 2: marginal-cost-per-task curves by rung over task index (log seconds), cold vs warm.
-      Data already in run_summary.json rows.
-- [ ] Fig 3: two_spirals trajectory plot: per-attempt metric for G0/G1/warm/probe arms (seed sweep
-      bands once available), 0.95 bar drawn.
-- [ ] Fig 4: structure-vs-weights scatter: trained metric vs max_sample_accuracy per champion across
-      all runs; the representation-wall figure. Data in sample_metrics of every attempt row.
-- [ ] Fig 5: library render: the overmind portrait plus 2-3 evolved nets (library/images/ has these)
-      including the level-3 chain and the warm-G1 seven-macro artifact.
-- [ ] Fig 6 (P1): motif atlas excerpt (uv run motif_census --render).
+- [x] Fig 1: system diagram of the solve ladder. DONE 2026-07-06 (`paper/figures/fig1_ladder.pdf`,
+      generated by `paper/figures/make_figures.py`).
+- [x] Fig 2: marginal-cost-per-task curves by rung (log seconds). DONE (fig2_cost, from the frozen
+      flagship run; cold only, warm overlay after the cold/warm A/B lands).
+- [x] Fig 3: two_spirals trajectory plot, all four arms + 0.95 bar. DONE (fig3_spirals; seed bands
+      once the sweep lands).
+- [x] Fig 4: structure-vs-weights scatter with wall thresholds. DONE (fig4_wall, 222 champions).
+- [x] Fig 5: library renders: overmind portrait, seven-macro artifact, level-3 chain, probe
+      champion. DONE (fig5a-d).
+- [x] Fig 6 (P1): motif atlas. DONE (fig6_motifs, census regenerated against the frozen flagship
+      library).
 - [ ] Table: per-rung results with CIs (after item 1); ablation table (after item 2); baseline table
-      (after item 3).
+      (after item 3). Run-gated; see `ai/instructions_for_publish.md` items A-G.
 
 ## 6. Writing mechanics (P0 unless noted)
 
-- [ ] **Citation verification pass.** All references were web-verified against arXiv/DOI during
-      drafting EXCEPT four added from author knowledge: Deb et al. 2002 (NSGA-II), Kingma & Ba 2015
-      (Adam), Wernicke 2006 (ESU), Milo et al. 2002 (network motifs). Verify those four; spot-check
-      arXiv ids of the rest; add page numbers where venues want them.
-- [ ] **Related-work gap sweep**: Voyager and Meyerson & Miikkulainen soft ordering are now cited
-      (added in review). Still to sweep: lifelong/continual NAS (growth-based continual NAS
-      specifically), "Lamarckian NAS", learned DSL/library systems newer than DreamCoder, any
-      2025-2026 persistent-library neuroevolution work. One focused literature session; a reviewer
-      in ENAS will look for these by name.
-- [ ] **Terminology audit**: "overmind" appears only in repo internals; the paper says "routed
-      substrate" throughout. Keep. Decide the public system name (ArdEVO) and benchmark name
-      (Icarus) and check hyphenation/capitalization consistency. Check "ENAS" is not overloaded with
-      Pham et al.'s ENAS (rename ours to "evolutionary NAS" in prose where ambiguous).
-- [ ] **Numbers audit**: every quantitative claim in S7/S8 traced back to a run file or bench
-      docstring (the draft was written from the repo's artifacts; re-verify after the reruns replace
-      snapshot numbers, especially the flagship run's 32-task snapshot which will be superseded by
-      its completion).
-- [ ] **LaTeX conversion** (venue style; NeurIPS or ICML template), figure pipeline, bib file
-      generated from the references section.
+- [x] **Citation verification pass.** DONE 2026-07-06: all 62 references verified against the
+      arXiv export API and Crossref DOIs, including the four author-knowledge refs; zero errors.
+      Page numbers where venues want them: at camera-ready.
+- [x] **Related-work gap sweep**: DONE 2026-07-06: 11 verified references added (Elsken 2019a
+      Lamarckian NAS, Learn to Grow, DEN, Veniat, Mendez & Eaton, LILO, ReGAL, ADAS, PropNEAT,
+      OMNI-EPIC). Negative finding stated in S2.4: no published persistent-library neuroevolution
+      system found.
+- [x] **Terminology audit**: DONE 2026-07-06: zero "overmind" in the paper, no ENAS collision, no
+      em dashes, naming consistent (ArdEVO / Icarus).
+- [x] **Numbers audit**: DONE 2026-07-06: 85 claims in S7/S8 traced to frozen artifacts; 6
+      mismatches fixed (tombstone accounting, 112-task failure breakdown, sin-node claim,
+      diagnostic denominator, test count 513, test lines 8.7k). Re-run after each new campaign
+      (protocol in `ai/instructions_for_publish.md` section 3).
+- [x] **LaTeX conversion**: DONE 2026-07-06 (`paper/latex/`, venue-neutral article + generated
+      references.bib; swap in the venue class at decision time).
 - [ ] **Venue decision**: options with different framings:
       (a) NeurIPS/ICML main: needs items 1-3 complete plus at least one resolved headline (probe GO,
       or routed-at-scale);
@@ -153,61 +158,67 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
       (c) GECCO/ALIFE: system + case-study framing fits as-is after items 1-2;
       (d) arXiv preprint now, venue later.
       Recommendation: (d) immediately after items 1-2 land, then (a) or (b) by results.
-- [ ] **Icarus dataset documentation** (P0 if venue (b)): per-rung task counts for rungs 6-18
-      verified live (`uv run rung_doctor --rungs 1-18` prints them; the draft's rung table has
-      blanks), generation process description from the Icarus-Dataset repo, licensing, datasheet,
-      hosting statement. Also fix the known vendored default bug (underscore repo name) upstream and
-      note the [-1,1] continuous-encoding suggestion from gate E.
-- [ ] **Reproducibility appendix**: exact config files per experiment (frozen copies committed),
-      seeds, hardware, library state provenance (cold/warm), code release plan + license decision
-      (repo LICENSE.md is currently Ardea internal-use; publishing requires resolving this),
-      dataset HF link.
-- [ ] **Broader impact / compute statement** (venue-dependent, P1): open-ended search safety
-      paragraph, total compute used (reconstructable from run summaries' seconds fields).
-- [ ] **Acknowledgments/authorship**: confirm the AI-assistance disclosure wording and author list.
+- [x] **Icarus dataset documentation** (P0 if venue (b)): MOSTLY DONE 2026-07-06: per-rung task
+      counts and I/O widths verified live for all 18 rungs (paper S3.2 table complete; corrected
+      rung 11 to 10,800 x 100), new S3.4 covers generation, hosting, licensing, the underscore
+      default bug, and the [-1,1] encoding note. REMAINING (user): the HF dataset card/datasheet
+      itself and the upstream fixes (instructions section 4.4).
+- [x] **Reproducibility appendix**: DONE 2026-07-06 (Appendix C: per-experiment config/seed/library
+      table, hardware/software, provenance stamp note, license status stated openly). REMAINING
+      (user): the license decision itself and the artifact deposit home (ai/* is gitignored).
+- [x] **Broader impact / compute statement**: DONE 2026-07-06 (Appendix D: recorded ~6.3 h task
+      wall clock for the reported experiments, single machine, no accelerators; safety paragraph).
+- [ ] **Acknowledgments/authorship**: confirm the AI-assistance disclosure wording and author list
+      (user decision; current wording stands in the draft).
 
 ## 7. Infrastructure to make 1-4 cheap (P0, do first)
 
-- [ ] **Multi-seed multi-config runner**: a small driver that takes (config, seed list, cold/warm),
-      runs sequentially or via ClearML lattice queues, and aggregates run_summary.json rows into a
-      results parquet/CSV. Most of results.py exists; this is glue plus an aggregation script.
-- [ ] **Plotting notebook/script** for Figs 2-4 straight from aggregated rows.
+- [x] **Multi-seed multi-config runner**: DONE (`uv run run_matrix`: config x seeds x cold/warm
+      arms as crash-isolated subprocesses, CSV aggregation, per-rung tier scorecard).
+- [x] **Plotting script** for Figs 1-4: DONE (`paper/figures/make_figures.py`, deterministic,
+      documented in `paper/figures/README.md`; extend for CI bands when sweeps land).
 - [ ] **Remote execution hygiene**: push before enqueue (agent clones the repo; untracked files
       never arrive), configs committed per experiment tag. LatticeCUDA also resolves the batched
       trainer crossover claim (bench T4/T5 on cuda) which S8 currently leaves as "expected".
-- [ ] **Run-provenance stamp**: write the config (or its hash) INTO run_summary.json. The results
-      dossier had to identify runs' configs by schedule shape; that is one line to fix and a
-      reviewer-facing reproducibility hole.
-- [ ] **Freeze artifacts per experiment.** Drafting incident worth institutionalizing: the library
-      and results moved/regrew UNDER the draft (a run completed mid-write; `library/motifs.json`
-      was quoted from a different library state and had to be corrected in review). Every number in
-      the paper must point at an immutable archived copy (`ai/archive/<tag>/`), and the motif
-      census must be regenerated against, and labeled with, each frozen library snapshot.
+      Run-gated; instructions item J.
+- [x] **Run-provenance stamp**: DONE (`config_path` + `config_sha256` in every new
+      run_summary.json; the flagship run predates it, documented in Appendix C).
+- [x] **Freeze artifacts per experiment.** DONE for everything the paper cites:
+      `ai/archive/20260706_flagship/` (run summary, post-GC library, census regenerated against
+      exactly that library, rung-doctor transcript, config copy, SHA256SUMS) plus the existing
+      g0/g1/g2 archives. The protocol is institutionalized in `ai/instructions_for_publish.md`
+      section 3; repeat it for every future campaign.
 
 ## 8. Claims audit before submission (P0, final pass)
 
-Walk the paper and re-justify or soften each of these against the then-current evidence:
+First pass DONE 2026-07-06 against current evidence; re-run the walk against final numbers at
+submission (protocol in `ai/instructions_for_publish.md` section 3).
 
-- [ ] "routed can carry load" (currently one archived run at an older config).
-- [ ] "266 of 267 solved" and every completed-run number (re-derive from the frozen artifact at
-      submission; the S7.2 table currently reads `results/20260706_024726_orchestrated` directly).
-- [ ] The cross-generation two_spirals table (replace with the frozen-config seed-sweep version;
-      keep the historical table only as an appendix narrative if at all). The single above-chance
-      diagnostic reading (0.688 in the stone-seeded snapshot) needs replication before it is more
-      than a hint.
-- [ ] "decompose never fired in production" (either demo or keep the honest statement).
-- [ ] "no evolutionary-computation dependency", "roughly 13k lines", test count 461 (re-count at
-      submission; 461 verified via pytest --collect-only on 2026-07-06).
-- [ ] Every superlative ("first", "only") if any survive editing; the draft avoids them, keep it so.
+- [x] "routed can carry load": SHARPENED. The 92-task run's 30 wins were pre-distillation
+      semantics, admitted nothing, and 19 were xor tasks lookup would clear; S7.2 and S9 now say
+      so. The run-scale resolution stays run-gated (instructions item H).
+- [x] "266 of 267 solved" and every completed-run number: re-derived from the frozen artifact
+      (`ai/archive/20260706_flagship/`); the S7.2 table now cites the freeze, not live results/.
+- [ ] The cross-generation two_spirals table: replace with the frozen-config seed-sweep version
+      when instructions item A lands; the 0.688 diagnostic reading still needs replication.
+- [x] "decompose never fired in production": kept honest, scoped to the current system (the
+      64-decomposition incident predates the solvability gate).
+- [x] "no evolutionary-computation dependency" (holds: deps are clearml/datasets/matplotlib/
+      psutil/rich/torch), "roughly 13k lines" (13,683), test count updated to 513 (collected
+      2026-07-06). Re-count at final freeze.
+- [x] Superlatives: swept; the two found ("highest single-attempt metric", "first attempts ever")
+      are now qualified.
 
 ---
 
-## Suggested order of attack
+## Suggested order of attack (updated 2026-07-06)
 
-1. Item 7 (runner + provenance stamp), because everything else multiplies through it.
-2. Item 1 (seed sweeps + finished flagship + cold/warm A/B) and item 3's no-memory control, in one
-   batch on lattice.
-3. Item 2's P0 rows, same batch mechanism.
-4. Item 4's probe (flip-to-GO), since its outcome may change the paper's headline.
-5. Items 5-6 (figures, LaTeX, docs) while runs execute.
-6. Item 8 last, against final numbers.
+Items 5-8 and all of item 7 except remote hygiene are done; what remains is run-gated. Work from
+`ai/instructions_for_publish.md`:
+
+1. Instructions items A-D (gate sweep, headline seeds, cold/warm A/B, independent-attempt control).
+2. Item E (the G3 flip-to-GO probe), since its outcome may change the paper's headline.
+3. Items F-G (ablation P0 rows, baselines), same batch mechanism.
+4. Items H-K as budget allows.
+5. Re-run the item-8 claims walk against final numbers, update figures/tables per the integration
+   protocol, then venue + license decisions and submission.
