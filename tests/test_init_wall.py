@@ -153,6 +153,32 @@ def test_direct_strategy_guard_defaults_off(decomposable_task: Task) -> None:
     config["orchestrator"] = {"direct": {}}
     strategy = EVOLVE_STRATEGY.get("direct")(config)
     assert strategy.max_flat_outputs == 0
+    assert strategy.max_init_genes == 0
+
+
+def test_direct_strategy_declines_oversize_init_genes(decomposable_task: Task) -> None:
+    # The 2026-07-06 recon wedge: a 409,600 x 8 task built a 3.3M-gene population whose init plus
+    # first generation ran for hours BEFORE any deadline check exists. The guard must refuse the
+    # attempt from the dense-init arithmetic alone, before the adapter or population is built.
+    from ardevo.dataset.icarus import support_loader
+    from ardevo.strategy import EVOLVE_STRATEGY
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    support_input, support_output = support_loader(decomposable_task)
+    flat_in = 1
+    for dim in support_input.data.shape[1:]:
+        flat_in *= int(dim)
+    flat_out = 1
+    for dim in support_output.data.shape[1:]:
+        flat_out *= int(dim)
+
+    config = _loop_config()
+    config["orchestrator"] = {"direct": {"max_init_genes": 1}}
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    result = strategy(decomposable_task, None, None, budget=3)  # declined before spec/runtime are touched
+    assert result.metric == 0.0 and result.generations_used == 0
+    assert result.champion_genome is None and result.champion_comp is None
+    assert result.champion_metrics["declined_init_genes"] == float((flat_in + 1) * flat_out)
 
 
 # --- decompose-first --------------------------------------------------------------------------------

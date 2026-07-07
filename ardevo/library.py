@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
-from ardevo.evaluation import output_features
+from ardevo.evaluation import fit_query_target, output_features
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, genome_from_dict
 from ardevo.evolution.registry import Registry
 from ardevo.utils.logging import Logger
@@ -136,7 +136,7 @@ def task_io(task: Task) -> dict[str, Any]:
     input_width = 1
     for dim in support_input.data.shape[1:]:
         input_width *= int(dim)
-    encoded = encode_task(task, Level0Encoder(input_width))
+    encoded = fit_query_target(encode_task(task, Level0Encoder(input_width)))
     return {
         "inputs": [
             {

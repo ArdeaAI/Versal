@@ -98,11 +98,11 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
       solve/zero-shot rates, and run the `expert_ablation = "zero"` diagnostic (already in
       tests/test_routing.py) at run scale to prove frozen experts contribute signal beyond adapters.
       The draft flags routed as "unresolved bet"; this is the resolving experiment.
-- [ ] **A production decomposition** (P1): the mechanism has never fired outside tests. Either
-      surface a rung where it fires naturally (interrupt budgets on rungs 6-10 may do it) or add a
-      synthetic decomposable task family to Icarus and show the full recurse-admit-reassemble path
-      end to end in a real run. Without this, soften S4.5 or mark it explicitly as untested-in-anger
-      (it currently is marked; a demo is better).
+- [x] **A production decomposition** (P1): DONE 2026-07-07: the mechanism fired and SOLVED in the
+      full-ladder coverage run (cosmic 65,536 x 65,536 decomposed, parts solved and admitted, the
+      reassembled parent verified at 0.986, outcome `decomposed`; deepsea decomposed through its
+      output slices in the same run). S4.5/S10 updated; artifacts frozen at
+      `ai/archive/20260707_smoke18/`.
 - [ ] **Rungs 6-10 campaign** (P1): IN FLIGHT: the recon_ladder seed-0 arm (rungs 1-10, 16, 17
       under max_task_seconds) is running as of 2026-07-06 evening
       (`results/20260706_090102_orchestrated`, 11/24 tasks). Scorecard it on completion and add

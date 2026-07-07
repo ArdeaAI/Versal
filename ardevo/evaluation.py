@@ -44,7 +44,39 @@ _CONTINUOUS_TOLERANCE = 0.1
 
 def encode(task: Task, encoder: Level0Encoder) -> EncodedTask:
     """Encode a whole task into cached, model-ready tensors (support + query)."""
-    return encode_task(task, encoder)
+    return fit_query_target(encode_task(task, encoder))
+
+
+def fit_query_target(encoded: EncodedTask) -> EncodedTask:
+    """Fit the encoded query target (and its mask) to the support target's position count.
+
+    Tasks with per-example natural sizes (the psicov class: per-protein LxL distance maps) encode
+    support and query targets at different widths, but every model head in the system is sized by
+    the SUPPORT target, so an unfitted query target crashes the first evaluation (2026-07-06 smoke
+    run, rung 14: mse over 245,025 predictions vs a 167,281 target). Padding enters under a True
+    mask, so padded positions carry zero loss and zero accuracy weight; a wider query target is
+    cropped, scoring the overlap. Same-width tasks return the same object, byte-identical. The
+    encoder cannot own this fit because icarus.py is vendored, so it lives at the consumer layer."""
+    if encoded.query_target is None:
+        return encoded
+    target, mask, descriptor = encoded.query_target
+    width = encoded.support_target[0].shape[1]
+    if target.shape[1] == width:
+        return encoded
+    if mask is None:
+        mask = torch.zeros(target.shape, dtype=torch.bool)
+    if target.shape[1] > width:
+        target, mask = target[:, :width], mask[:, :width]
+    else:
+        pad = width - target.shape[1]
+        target = torch.cat([target, torch.zeros(target.shape[0], pad, dtype=target.dtype)], dim=1)
+        mask = torch.cat([mask, torch.ones(target.shape[0], pad, dtype=torch.bool)], dim=1)
+    return EncodedTask(
+        support_input=encoded.support_input,
+        support_target=encoded.support_target,
+        query_input=encoded.query_input,
+        query_target=(target, mask, descriptor),
+    )
 
 
 def input_width(encoded: EncodedTask) -> int:

@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.decompose import Subtask, build_decomposers
+from ardevo.evaluation import fit_query_target
 from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, comp_from_dict, comp_to_dict
 from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
@@ -47,7 +48,7 @@ def comp_task_spec(task: Task) -> CompTaskSpec:
     signature = io["inputs"][0]["signature"]
     encoder = Level0Encoder(max_flat_dim=width)
     return CompTaskSpec(
-        encoded=encode_task(task, encoder),
+        encoded=fit_query_target(encode_task(task, encoder)),
         encoder=encoder,
         n_inputs=width,
         input_specs=[(signature, width)],

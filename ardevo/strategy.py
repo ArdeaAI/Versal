@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
-from ardevo.evaluation import input_width, output_features
+from ardevo.evaluation import fit_query_target, input_width, output_features
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
@@ -162,7 +162,7 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
-    return DirectStrategy(evolver=build_evolver(overlay), max_flat_outputs=int(table.get("max_flat_outputs", 0)))
+    return DirectStrategy(evolver=build_evolver(overlay), max_flat_outputs=int(table.get("max_flat_outputs", 0)), max_init_genes=int(table.get("max_init_genes", 0)))
 
 
 @dataclass
@@ -179,6 +179,13 @@ class DirectStrategy:
     # genome before its first forward. Declining lets the ladder escalate to composition (whose
     # glue is already rank-factored above glue_rank_threshold) and to the decomposers.
     max_flat_outputs: int = 0
+    # Decline tasks whose dense-init gene count (flat_inputs + 1) * flat_outputs exceeds this
+    # ([orchestrator.direct] max_init_genes; 0 = off): the input-side twin of max_flat_outputs.
+    # The per-task deadline only fires between ladder positions and between generations, so an
+    # oversize minimal init plus its first generation (Python object churn, ~0.8 GB genome pickles
+    # to the assess pool) runs for HOURS before any check exists; a 409,600 x 8 task wedged two
+    # runs on 2026-07-06 exactly this way. The attempt must be refused from arithmetic alone.
+    max_init_genes: int = 0
 
     def _adapter(self, task: Task) -> TaskAdapter | TemporalTaskAdapter:
         support_input, _support_output = support_loader(task)
@@ -188,7 +195,7 @@ class DirectStrategy:
         for dim in support_input.data.shape[1:]:
             width *= int(dim)
         encoder = Level0Encoder(max_flat_dim=width)
-        encoded = encode_task(task, encoder)
+        encoded = fit_query_target(encode_task(task, encoder))
         return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), grid_shape=self._grid_shape(task))
 
     @staticmethod
@@ -207,13 +214,19 @@ class DirectStrategy:
         seed_comps: list | None = None,
         seed_entries: list[LibraryEntry] | None = None,
     ) -> StrategyResult:
-        if self.max_flat_outputs > 0:
-            _support_input, support_output = support_loader(task)
+        if self.max_flat_outputs > 0 or self.max_init_genes > 0:
+            support_input, support_output = support_loader(task)
             flat_outputs = 1
             for dim in support_output.data.shape[1:]:
                 flat_outputs *= int(dim)
-            if flat_outputs > self.max_flat_outputs:
+            if 0 < self.max_flat_outputs < flat_outputs:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
+            flat_inputs = 1
+            for dim in support_input.data.shape[1:]:
+                flat_inputs *= int(dim)
+            init_genes = (flat_inputs + 1) * flat_outputs
+            if 0 < self.max_init_genes < init_genes:
+                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
         adapter = self._adapter(task)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
