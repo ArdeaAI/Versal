@@ -106,9 +106,31 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     train_cfg = evolution.get("train", {})
     train_kind = train_cfg.get("kind", "none")
     train_population_op = None
-    sequential_params = {k: v for k, v in train_cfg.items() if k in ("steps", "lr", "writeback", "weight_decay")}
-    if train_kind in train.TRAIN_POPULATION.names() and bool(train_cfg.get("batched", True)):
-        from ardevo.utils.device import resolve_compute_device
+    sequential_keys = {"steps", "lr", "writeback", "weight_decay", "score_candidates"}
+    if train_kind == "gradient_scheduled":
+        sequential_keys.update(("warmup_fraction", "final_lr_fraction"))
+    sequential_params = {k: v for k, v in train_cfg.items() if k in sequential_keys}
+    population_supported = train_kind in train.TRAIN_POPULATION.names()
+    # `gradient_scheduled` predates its population implementation, so an existing config without
+    # `batched` must remain on the process-pool path. Older population-native kinds retain their
+    # historical default of batching when the key is absent.
+    default_batched = population_supported and train_kind != "gradient_scheduled"
+    configured_batched = bool(train_cfg["batched"]) if "batched" in train_cfg else None
+    selected_mode = "serial"
+    if population_supported:
+        from ardevo.utils.device import POPULATION_MODES, SERIAL_MODE, population_mode, resolve_compute_device, resolve_execution_mode
+
+        default_device = resolve_compute_device(config, explicit=train_cfg.get("device"))
+        default_mode = population_mode(default_device) if default_batched else SERIAL_MODE
+        selected_mode = resolve_execution_mode(
+            train_cfg.get("compute_policy_path"),
+            default_mode=default_mode,
+            supported_modes=(SERIAL_MODE, *POPULATION_MODES),
+        )
+    use_population = configured_batched if configured_batched is not None else selected_mode != "serial"
+
+    if population_supported and use_population:
+        from ardevo.utils.device import POPULATION_MODES, device_for_population_mode, resolve_compute_device
 
         # Population trainers batch a whole generation; single-candidate calls (resume re-scoring,
         # task switches) and the batch program's serial fallback still need a sequential op. Bind
@@ -117,15 +139,15 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         # from the run config unless the table pins one, so a LatticeCUDA run lands population
         # training on cuda with zero config edits; the padding budget widens on GPU (CIFAR-scale
         # n fits comfortably once the batch stacks compact [P, n, h] columns).
-        population_params = {k: v for k, v in train_cfg.items() if k not in ("kind", "batched")}
+        population_params = {k: v for k, v in train_cfg.items() if k not in ("kind", "batched", "compute_policy_path")}
         if "device" not in population_params:
-            population_params["device"] = str(resolve_compute_device(config))
+            population_params["device"] = str(device_for_population_mode(selected_mode) if selected_mode in POPULATION_MODES else resolve_compute_device(config))
         if "max_padded_nodes" not in population_params:
             population_params["max_padded_nodes"] = 1024 if population_params["device"] == "cpu" else 4096
         train_population_op = partial(train.TRAIN_POPULATION.get(train_kind), **population_params)
         sequential_kind = train_kind if train_kind in train.TRAIN.names() else "gradient"
         train_op = partial(train.TRAIN.get(sequential_kind), **sequential_params)
-    elif train_kind in train.TRAIN_POPULATION.names():
+    elif population_supported:
         # `batched = false`: the kill-switch back to the pool-only path. Population-only kinds
         # degrade to their sequential form (`gradient` when no same-name TRAIN op exists).
         sequential_kind = train_kind if train_kind in train.TRAIN.names() else "gradient"
@@ -180,6 +202,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         mutation=mutation_pipeline,
         train_op=train_op,
         train_population_op=train_population_op,
+        execution_mode=selected_mode if use_population else "serial",
         fitness=aggregator,
         evaluate_op=evaluate_op,
         speciate=speciate,

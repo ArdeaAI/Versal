@@ -110,6 +110,24 @@ def test_build_decomposers_unknown_name_raises() -> None:
         build_decomposers({"decompose": ["nonexistent_op"]})
 
 
+def test_output_slices_adapts_group_count_to_model_head_budget() -> None:
+    grid = torch.zeros(5, 2, dtype=torch.long)
+    field = Field(grid, (Axis.HEIGHT, Axis.WIDTH), ValueType.CATEGORICAL, 2, None, None)
+    task = Task(TaskMeta(0, TaskKind.MAP, "grid", fixed_split=True), [(field, field)], [(field, field)])
+    # One first-axis unit costs 2 positions * 2 logits = 4 features, so an 8-feature cap requires
+    # two units per group even when the configured minimum asks for only one group.
+    subtasks = output_slices(task, rng=random.Random(0), n_groups=1, max_output_features=8)
+    assert len(subtasks) == 3
+    assert all(subtask.task.support[0][1].data.shape[0] <= 2 for subtask in subtasks)
+
+
+def test_output_slices_declines_heterogeneous_support_canvases() -> None:
+    small = Field(torch.zeros(2, 2, dtype=torch.long), (Axis.HEIGHT, Axis.WIDTH), ValueType.CATEGORICAL, 2, None, None)
+    large = Field(torch.zeros(4, 2, dtype=torch.long), (Axis.HEIGHT, Axis.WIDTH), ValueType.CATEGORICAL, 2, None, None)
+    task = Task(TaskMeta(18, TaskKind.MAP, "heterogeneous", fixed_split=True), [(small, small), (large, large)], [(small, small)])
+    assert output_slices(task, rng=random.Random(0), n_groups=2) == []
+
+
 def test_output_slices_carries_masks() -> None:
     input_field = Field(torch.tensor([1.0, 0.0, 1.0, 0.0]), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
     output_mask = torch.tensor([False, True, False, True])

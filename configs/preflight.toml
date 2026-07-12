@@ -1,7 +1,20 @@
-# THE canonical orchestrated ladder (and `uv run app` default), based on
-# configs/orchestrated_overmind.toml with the WHOLE phase-9 /
-# gate-E feature stack switched ON at once, MERGED (2026-07-12) with the wall-survival levers
-# proven by configs/smoke_all_rungs.toml, for full-ladder overnight campaigns.
+# PREFLIGHT CANARY: the canonical all-features methodology at half the task count.
+#
+# Operational deltas from configs/orchestrated_overmind_all_features.toml are intentionally limited
+# to the experiment name, 10 tasks per rung (180 total), and an isolated persistent library. All
+# populations, trainers, budgets, strategy shares, mutation operators, evaluation rules, hardware
+# calibration, rendering, checkpointing, and ClearML telemetry remain production-identical.
+#
+# The 600-second per-task cap alone permits 30 hours across 180 top-level attempts; decomposition
+# can extend that bound. A rolling checkpoint lands after every task, so stop and resume rather than
+# weakening a stage if the canary exceeds the available window.
+#
+#   uv run app --config configs/preflight.toml
+#   uv run app --resume results/<ts>_orchestrated
+#
+# This config is based on configs/orchestrated_overmind.toml with the WHOLE phase-9 / gate-E feature
+# stack switched ON at once, MERGED (2026-07-12) with the wall-survival levers proven by
+# configs/smoke_all_rungs.toml.
 #
 # The gate-E search stack (unchanged):
 #   1. sin/gaussian activation palette          (already on in the base config)
@@ -42,12 +55,9 @@
 #     (measured on rung 18, ai/arc_report.md); the merge relies on decompose-first + the decline
 #     guards to route those rungs away from flat evolution instead.
 #
-#   uv run app
-#   uv run app --resume results/<ts>_orchestrated     # continue after a Ctrl-C
-
 [run]
 project = "ardevo"
-experiment = "orchestrated_overmind_all_features"
+experiment = "orchestrated_overmind_preflight"
 clearml = true
 machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
                               # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
@@ -77,13 +87,12 @@ support_fraction = 0.8
 kind = "interleave_rungs"
 rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 20            # MERGE: 20 x 18 rungs = 360 pool tasks; at the 600 s cap plus
-                              # decompose recursion an overnight covers a few full interleave
-                              # cycles, and the run resumes from its checkpoint for the rest
+tasks_per_rung = 10           # PREFLIGHT: 10 x 18 rungs = 180 interleaved task encounters
+                              # while retaining enough revisits for lookup/refine/router/grammar paths
 shuffle = true
 
 [orchestrator]
-tasks = 360                   # how many scheduled tasks this run attempts (= the whole pool)
+tasks = 180                   # PREFLIGHT: exhaust the 10-task-per-rung interleaved pool once
 search_metric = "support_accuracy"         # dense progress signal for ranking, stalls, and wall stones
 accept_metric = "support_task_appropriate" # exact whole-grid support solve on ARC; dense support accuracy elsewhere
 report_metric = "query_task_appropriate"   # held-out exact grid on ARC; query accuracy elsewhere
@@ -100,13 +109,13 @@ max_task_seconds = 600        # per-attempt wall-clock budget: past it the runni
                               # 3532s on one task). 0 = off, byte-identical.
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
-library_dir = "library"       # persistent across runs: delete it to start the search space cold
+library_dir = "library/preflight" # isolated persistent canary memory; never mutates the canonical library
 decompose_first_above = 2000000   # MERGE: a task whose dense-init gene estimate exceeds this runs
                               # DECOMPOSE before any flat attempt (rungs 11-14, 17, 18), the route
                               # that produced smoke's first production decomposition (cosmic 0.986)
 evolve = ["routed", "grammar", "direct", "composition"]   # routed goes FIRST: a zero-shot clear costs 0 generations
-                                     # and a miss charges only generation_cost before direct takes over
-                                     # (config order, first success wins, unspent budget rolls on).
+                                                          # and a miss charges only generation_cost before direct takes over
+                                                          # (config order, first success wins, unspent budget rolls on).
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 output_slices_max_output_features = 1024 # adapt the group count so every categorical sub-head stays bounded
@@ -204,18 +213,18 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
                               # (the recon-wedge net: rung 17 wedged two runs inside init where no
                               # deadline check exists; a task that slips decompose-first stops here)
   structured_grid = true      # shared spatial canvas + learned support-only shape rule + exact/baseline metrics
-    [orchestrator.direct.train]  # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
-                                 # cosine decay to 5% of it. Fixed-lr Adam stalls in the oscillatory
-                                 # loss regions of the two-spirals class; the schedule anneals through
-                                 # them (validated: the same seeded topology survives as champion at
-                                 # 0.651 with all sin nodes intact vs dying at 0.604 under fixed lr).
-                                 # NOTE this REPLACES gradient_refine here, so refine_steps>1 genomes
-                                 # lose per-pass deep supervision on the direct path (they still train
-                                 # on a final-pass loss). Scheduled population batching is selected
-                                 # only by an explicit hardware-matched calibration profile; absent or
-                                 # stale profiles preserve the process-pool path. Raise `steps` if a hard
-                                 # task still stalls mid-fit; peak `lr` matches the base direct lr so
-                                 # the only change is the warmup+decay envelope.
+    [orchestrator.direct.train] # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
+                                # cosine decay to 5% of it. Fixed-lr Adam stalls in the oscillatory
+                                # loss regions of the two-spirals class; the schedule anneals through
+                                # them (validated: the same seeded topology survives as champion at
+                                # 0.651 with all sin nodes intact vs dying at 0.604 under fixed lr).
+                                # NOTE this REPLACES gradient_refine here, so refine_steps>1 genomes
+                                # lose per-pass deep supervision on the direct path (they still train
+                                # on a final-pass loss). Scheduled population batching is selected
+                                # only by an explicit hardware-matched calibration profile; absent or
+                                # stale profiles preserve the process-pool path. Raise `steps` if a hard
+                                # task still stalls mid-fit; peak `lr` matches the base direct lr so
+                                # the only change is the warmup+decay envelope.
     kind = "gradient_scheduled"
     steps = 160
     lr = 0.03

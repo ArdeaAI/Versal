@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable, cast
 
-from ardevo.dataset.icarus import EncodedTask, Level0Encoder
+from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.composition import (
     AssemblyContext,
@@ -91,7 +91,7 @@ class AssessedComposition:
 class CompTaskSpec:
     """Everything the loop needs to evolve compositions against one task."""
 
-    encoded: EncodedTask
+    encoded: Any
     encoder: Level0Encoder
     n_inputs: int
     input_specs: list[tuple[str, int]]  # (bank signature, width) per INPUT node

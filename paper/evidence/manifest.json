@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "manuscript": {
+    "path": "paper/preprint.md",
+    "sha256": "2bed9dba8f61e4ec7cfd3d21d61855f10473cfd23ebee21c8023e625de9f0866",
+    "role": "manuscript"
+  },
+  "claims": [
+    {
+      "id": "headline-compounding-run",
+      "section": "Abstract; Section 7.2",
+      "summary": "The cold 400-task run's outcomes, timing, solved families, refinement count, and library growth.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/index.json",
+          "sha256": "b63e85150402d1e0b02d1015916fc82939ab0d13d14201827200ce81a60f6ea6",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/config_orchestrated_overmind.toml",
+          "sha256": "26f652e0f48c943781f948b69bcf22acbb87403f0289816014c88451613cce44",
+          "role": "config"
+        }
+      ]
+    },
+    {
+      "id": "two-spirals-gate-study",
+      "section": "Abstract; Section 7.3",
+      "summary": "The G0, G1 cold, G1 warm, and interrupted probe trajectories used in the representation-wall study.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260705_g0/results/20260705_175445_orchestrated/run_summary.json",
+          "sha256": "8215877fdf2bdb77d90d48eeac0b2f6122957d841fb306526cfeb19d70f1645f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_183030_orchestrated/run_summary.json",
+          "sha256": "29d2b7fbe48abd4917db50639969f8530df475a46134381a2c78d5141b505a7f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_185704_orchestrated/run_summary.json",
+          "sha256": "d05baf8fae003d1ab8cc487765c8db7cdee28c349f714dda67d98b8cba6005e3",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260705_234350_orchestrated/run_summary.json",
+          "sha256": "0047b21afbabd8e12ffeacb94aaf2b0917774d105f69c1d2dce6c9116e695cd1",
+          "role": "summary"
+        }
+      ]
+    },
+    {
+      "id": "stone-seeded-snapshot",
+      "section": "Section 7.2; Section 7.4",
+      "summary": "The stone-seeded sibling run and its retained library structure.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260705_g2/results/20260706_015530_orchestrated/run_summary.json",
+          "sha256": "b86ff20510ee1a559c1e662be153019d72d30fcb8788cfba3b041201e46d6fd4",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/library/index.json",
+          "sha256": "47743624e84ecfa2dc2adf0f076c4271d08fccfaca9cebcd04e2fab180f4c020",
+          "role": "library"
+        }
+      ]
+    },
+    {
+      "id": "flagship-motif-census",
+      "section": "Section 7.4",
+      "summary": "The motif counts and diversity classes reported for the frozen flagship library.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/library/motifs.json",
+          "sha256": "f02626e6ebdf7067109696bad47bf531a494843942d0d251a41d427cdae1e934",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/index.json",
+          "sha256": "b63e85150402d1e0b02d1015916fc82939ab0d13d14201827200ce81a60f6ea6",
+          "role": "library"
+        }
+      ]
+    },
+    {
+      "id": "full-ladder-coverage",
+      "section": "Section 10",
+      "summary": "The one-task-per-rung coverage run, including bounded wall-rung outcomes and the smoke scorecard.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260707_smoke18/results/run_summary.json",
+          "sha256": "49016a2ad95f47c04c4a91612f158c261b7857ef639d14401b7d2a42ddd59b18",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260707_smoke18/scorecard.txt",
+          "sha256": "71bff5db5af16cec0802432affb009772e6c6a557f0b7cb839d0689719b3b659",
+          "role": "transcript"
+        },
+        {
+          "path": "ai/archive/20260707_smoke18/config_smoke_all_rungs.toml",
+          "sha256": "8c6b8680b5c40a9c86ccb62615a872bc45da52c390e507da6385ba1093bc0358",
+          "role": "config"
+        }
+      ]
+    },
+    {
+      "id": "compute-accounting",
+      "section": "Appendix D",
+      "summary": "Per-task wall-clock rows underlying the reported aggregate experimental compute.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g0/results/20260705_175445_orchestrated/run_summary.json",
+          "sha256": "8215877fdf2bdb77d90d48eeac0b2f6122957d841fb306526cfeb19d70f1645f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_183030_orchestrated/run_summary.json",
+          "sha256": "29d2b7fbe48abd4917db50639969f8530df475a46134381a2c78d5141b505a7f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_185704_orchestrated/run_summary.json",
+          "sha256": "d05baf8fae003d1ab8cc487765c8db7cdee28c349f714dda67d98b8cba6005e3",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260705_234350_orchestrated/run_summary.json",
+          "sha256": "0047b21afbabd8e12ffeacb94aaf2b0917774d105f69c1d2dce6c9116e695cd1",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260706_015530_orchestrated/run_summary.json",
+          "sha256": "b86ff20510ee1a559c1e662be153019d72d30fcb8788cfba3b041201e46d6fd4",
+          "role": "summary"
+        }
+      ]
+    }
+  ],
+  "figures": [
+    {
+      "id": "figure-1-solve-ladder",
+      "section": "Section 4",
+      "summary": "Programmatic diagram of the orchestrated solve ladder and persistent library.",
+      "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "role": "script"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig1_ladder.pdf",
+          "sha256": "d3b0695257241c66f781d02364393e6e87a339e1799ca377b931c42a6432cbdc",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig1_ladder.png",
+          "sha256": "771a21c3cb174d686318823e2320efbcb12b0d89375c7d4572461256034a1e87",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-2-marginal-cost",
+      "section": "Section 7.2",
+      "summary": "Marginal cost per task encounter derived from the frozen flagship run.",
+      "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "role": "script"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig2_cost.pdf",
+          "sha256": "2fad37d111d3ace29ee833eccdd3e28e3194b9fc9d8634242a7f670ac7ecb9f2",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig2_cost.png",
+          "sha256": "17a3d61926b843da16234c9d54faf92a0958c5291c3c12fb8ab800489121699f",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-3-two-spirals",
+      "section": "Section 7.3",
+      "summary": "Per-attempt two-spirals trajectories for the four reported gate arms.",
+      "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "role": "script"
+        },
+        {
+          "path": "ai/archive/20260705_g0/results/20260705_175445_orchestrated/run_summary.json",
+          "sha256": "8215877fdf2bdb77d90d48eeac0b2f6122957d841fb306526cfeb19d70f1645f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_183030_orchestrated/run_summary.json",
+          "sha256": "29d2b7fbe48abd4917db50639969f8530df475a46134381a2c78d5141b505a7f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_185704_orchestrated/run_summary.json",
+          "sha256": "d05baf8fae003d1ab8cc487765c8db7cdee28c349f714dda67d98b8cba6005e3",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260705_234350_orchestrated/run_summary.json",
+          "sha256": "0047b21afbabd8e12ffeacb94aaf2b0917774d105f69c1d2dce6c9116e695cd1",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig3_spirals.pdf",
+          "sha256": "6b29f383c68ed433d7b6e934213ba67d638e35d145fab9e7b9309f806adae28f",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig3_spirals.png",
+          "sha256": "14311a9e3a6d8bb375f3a3583e4d0f9f08deffe7f42b228343d45358400166ba",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-4-structure-vs-weights",
+      "section": "Section 7.3",
+      "summary": "Hybrid-evaluator champions plotted by structure-only and trained metrics.",
+      "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "role": "script"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g0/results/20260705_175445_orchestrated/run_summary.json",
+          "sha256": "8215877fdf2bdb77d90d48eeac0b2f6122957d841fb306526cfeb19d70f1645f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_183030_orchestrated/run_summary.json",
+          "sha256": "29d2b7fbe48abd4917db50639969f8530df475a46134381a2c78d5141b505a7f",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_185704_orchestrated/run_summary.json",
+          "sha256": "d05baf8fae003d1ab8cc487765c8db7cdee28c349f714dda67d98b8cba6005e3",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260705_234350_orchestrated/run_summary.json",
+          "sha256": "0047b21afbabd8e12ffeacb94aaf2b0917774d105f69c1d2dce6c9116e695cd1",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260706_015530_orchestrated/run_summary.json",
+          "sha256": "b86ff20510ee1a559c1e662be153019d72d30fcb8788cfba3b041201e46d6fd4",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260706_024019_orchestrated/run_summary.json",
+          "sha256": "5cc1d4e570a8992d93fbb4a623cb539b93f841a1440dab3d339093f64ff0beb9",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig4_wall.pdf",
+          "sha256": "4a955e1013d41180aab17bb0dcbbc933481d236894161f4dab2320ed88f97460",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig4_wall.png",
+          "sha256": "fa3c635d7b829eb57c82c65a7b2878e8a942f0e269577b0735d7bcd642c56bae",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-5-library-artifacts",
+      "section": "Section 7.4",
+      "summary": "Verbatim frozen renders for the router, macro artifact, macro chain, and probe champion.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/library/images/overmind.png",
+          "sha256": "236e01b655f103f377f985720fe3d4e47d805fcb09cfe6d5a04cf8afbd343679",
+          "role": "render"
+        },
+        {
+          "path": "ai/archive/20260705_g1/results/20260705_185704_orchestrated/task_0009/net.png",
+          "sha256": "21606e4e0efa6fa74e3d4bea62775e164c839218857f83b936e317b1ef0b8205",
+          "role": "render"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260706_015530_orchestrated/task_0027/net.png",
+          "sha256": "99245d576c928f1400b1c5791e40ce29980ec7f27d31ef726cf870a434bbddd7",
+          "role": "render"
+        },
+        {
+          "path": "ai/archive/20260705_g2/results/20260705_234350_orchestrated/task_0001/net.png",
+          "sha256": "e73b96bb2b98801a7fd33b9fd44fa22a8738976c7fdc927561f69014e991e2c8",
+          "role": "render"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig5a_overmind.png",
+          "sha256": "236e01b655f103f377f985720fe3d4e47d805fcb09cfe6d5a04cf8afbd343679",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig5b_seven_macro_artifact.png",
+          "sha256": "21606e4e0efa6fa74e3d4bea62775e164c839218857f83b936e317b1ef0b8205",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig5c_level3_chain.png",
+          "sha256": "99245d576c928f1400b1c5791e40ce29980ec7f27d31ef726cf870a434bbddd7",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig5d_probe_champion.png",
+          "sha256": "e73b96bb2b98801a7fd33b9fd44fa22a8738976c7fdc927561f69014e991e2c8",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-6-motif-atlas",
+      "section": "Section 7.4",
+      "summary": "Verbatim motif atlas produced from the frozen flagship library census.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/library/motifs.json",
+          "sha256": "f02626e6ebdf7067109696bad47bf531a494843942d0d251a41d427cdae1e934",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/images/motifs.png",
+          "sha256": "8ef8c7d1b44b93c773a72ca09d3ba8b2abfe881e00bef8a55e574b73b48f45bf",
+          "role": "render"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig6_motifs.png",
+          "sha256": "8ef8c7d1b44b93c773a72ca09d3ba8b2abfe881e00bef8a55e574b73b48f45bf",
+          "role": "output"
+        }
+      ]
+    }
+  ]
+}

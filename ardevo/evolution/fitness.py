@@ -51,6 +51,25 @@ def support_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
     return float(metrics.get("support_accuracy", 0.0))
 
 
+@FITNESS.register("support_task_exact")
+def support_task_exact(genome: Genome, metrics: dict[str, float]) -> float:
+    """Whole-task exactness where a structured evaluator provides it, dense accuracy otherwise."""
+
+    return float(metrics.get("support_task_exact", metrics.get("support_accuracy", 0.0)))
+
+
+@FITNESS.register("query_task_exact")
+def query_task_exact(genome: Genome, metrics: dict[str, float]) -> float:
+    return float(metrics.get("query_task_exact", metrics.get("query_accuracy", 0.0)))
+
+
+@FITNESS.register("support_gain_over_baseline")
+def support_gain_over_baseline(genome: Genome, metrics: dict[str, float]) -> float:
+    """Reward signal above constant/copy baselines; ordinary tasks retain their dense signal."""
+
+    return float(metrics.get("support_gain_over_baseline", metrics.get("support_accuracy", 0.0)))
+
+
 @FITNESS.register("negative_support_loss")
 def negative_support_loss(genome: Genome, metrics: dict[str, float]) -> float:
     return -float(metrics.get("support_loss", 0.0))

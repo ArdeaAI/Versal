@@ -9,7 +9,7 @@ from ardevo.evolution.genome import InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import build_loop
 from ardevo.library import MODULE, task_io
-from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, StrategyResult, StrategyRuntime
+from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
 from tests.test_orchestrator import _orchestrator
@@ -197,6 +197,48 @@ def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Pa
     strategy = dict(orchestrator.strategies)["direct"]
     result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
     assert result.seed_metric is None
+
+
+def test_grammar_strategy_seeds_compatible_program_into_direct(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from ardevo import grammar as grammar_module
+    from ardevo.library import ModuleLibrary
+
+    loop = build_loop(_loop_config())
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    state = loop.fresh_state(random.Random(0))
+    runtime = _runtime_for(loop, state, threshold=0.9)
+    captured: list = []
+
+    def direct(task, spec, runtime, *, budget, seed_genomes=None, **_kwargs):
+        captured.extend(seed_genomes or [])
+        return StrategyResult("direct", 1.0, 1, champion_genome=solving_genome, champion_metrics={"support_accuracy": 1.0})
+
+    strategy = GrammarStrategy(direct=direct)
+    strategy._grammar = SimpleNamespace(productions=[object()])
+    strategy._library_keys = tuple(runtime.library.keys())
+    monkeypatch.setattr(strategy, "_programs", lambda _runtime: [object()])
+    monkeypatch.setattr(grammar_module, "compile_program", lambda *_args, **_kwargs: solving_genome)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=4)
+
+    assert result.strategy == "grammar" and result.generations_used == 1
+    assert captured == [solving_genome]
+
+
+def test_grammar_strategy_is_zero_cost_before_independent_motifs_exist(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.library import ModuleLibrary
+
+    loop = build_loop(_loop_config())
+    loop.attach_library(ModuleLibrary(tmp_path / "empty"))
+    state = loop.fresh_state(random.Random(0))
+    strategy = GrammarStrategy(direct=lambda *_args, **_kwargs: StrategyResult("direct", 0.0, 0))
+
+    result = strategy(xor_task, _spec(xor_task), _runtime_for(loop, state, threshold=0.9), budget=4)
+
+    assert result.generations_used == 0 and result.metric == 0.0
+    assert result.champion_metrics["grammar_productions"] == 0.0
 
 
 def test_lookup_quick_evaluates_temporal_modules(tmp_path: Path, temporal_task: Task) -> None:

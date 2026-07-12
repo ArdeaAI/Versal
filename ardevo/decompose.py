@@ -19,7 +19,7 @@ import random
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ardevo.dataset.icarus import Axis, Field, FieldDescriptor, Task, TaskMeta
+from ardevo.dataset.icarus import Axis, Field, FieldDescriptor, Task, TaskMeta, ValueType
 from ardevo.evolution.registry import Registry, _bind_prefixed
 
 
@@ -53,10 +53,14 @@ DECOMPOSE: Registry[DecomposeOp] = Registry("decompose")
 
 
 def _chunk_bounds(size: int, n_chunks: int) -> list[tuple[int, int]]:
-    """Contiguous [start, end) chunks, as even as possible; the last chunk absorbs the remainder."""
-    base = size // n_chunks
-    bounds = [(group * base, (group + 1) * base) for group in range(n_chunks - 1)]
-    bounds.append(((n_chunks - 1) * base, size))
+    """Contiguous [start, end) chunks whose sizes differ by at most one."""
+    base, remainder = divmod(size, n_chunks)
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for group in range(n_chunks):
+        end = start + base + int(group < remainder)
+        bounds.append((start, end))
+        start = end
     return bounds
 
 
@@ -88,7 +92,7 @@ def _child_meta(parent: TaskMeta, suffix: str) -> TaskMeta:
 
 
 @DECOMPOSE.register("output_slices")
-def output_slices(task: Task, *, rng: random.Random, n_groups: int = 2) -> list[Subtask]:
+def output_slices(task: Task, *, rng: random.Random, n_groups: int = 2, max_output_features: int = 0) -> list[Subtask]:
     """Slice the OUTPUT of every pair along its first axis into n_groups contiguous chunks.
 
     Inputs pass through whole: each subtask sees the full problem but answers only one chunk
@@ -101,9 +105,20 @@ def output_slices(task: Task, *, rng: random.Random, n_groups: int = 2) -> list[
     _, first_output = task.support[0]
     if first_output.data.ndim == 0:
         return []
+    # One fixed composition head cannot place slices from heterogeneous support canvases without
+    # per-example glue. Decline instead of silently dropping rows from larger ARC grids.
+    if any(tuple(output.data.shape) != tuple(first_output.data.shape) for _input, output in task.support[1:]):
+        return []
     first_axis_size = first_output.data.shape[0]
     if first_axis_size < n_groups:
         return []
+    if max_output_features > 0:
+        trailing = math.prod(first_output.data.shape[1:])
+        class_factor = int(first_output.n_classes or 1) if first_output.value_type in (ValueType.CATEGORICAL, ValueType.ORDINAL) else 1
+        features_per_axis_unit = trailing * class_factor
+        max_units = max(1, max_output_features // max(features_per_axis_unit, 1))
+        n_groups = max(n_groups, math.ceil(first_axis_size / max_units))
+    n_groups = min(n_groups, first_axis_size)
     # Port offsets live in the parent's FLAT output positions (row-major flatten of the whole
     # field), so a chunk of the first axis spans trailing-many flat positions per step.
     trailing = math.prod(first_output.data.shape[1:])

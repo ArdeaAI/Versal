@@ -2,6 +2,7 @@
 diagnosable, and the rolling checkpoint restores the exact latest state. The fix for runs that
 used to leave empty directories whenever nothing new was shelved."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -199,6 +200,46 @@ def test_load_prior_records_tolerates_missing_summary(tmp_path: Path) -> None:
     assert trial._load_prior_records() == []
 
 
+def test_fresh_per_task_freezes_the_starting_library_once(tmp_path: Path) -> None:
+    from ardevo.library import ModuleLibrary
+
+    trial = object.__new__(OrchestratedTrial)
+    trial.fresh_per_task = True
+    trial.run_dir = tmp_path / "run"
+    trial.run_dir.mkdir()
+    trial.library = ModuleLibrary(tmp_path / "library")
+    trial.frozen_library_dir = None
+    trial.library.root.mkdir(parents=True, exist_ok=True)
+    (trial.library.root / "before.txt").write_text("before")
+
+    trial._prepare_frozen_library()
+    assert trial.frozen_library_dir == trial.run_dir / "frozen_library"
+    frozen_library_dir = trial.frozen_library_dir
+    assert frozen_library_dir is not None
+    assert (frozen_library_dir / "before.txt").read_text() == "before"
+
+    (trial.library.root / "after.txt").write_text("after")
+    trial._prepare_frozen_library()
+    assert not (frozen_library_dir / "after.txt").exists()
+
+
+def test_new_run_snapshots_exact_config_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "source.toml"
+    source.write_bytes(b"[run]\nseed = 7\n")
+    trial = object.__new__(OrchestratedTrial)
+    trial.run_dir = tmp_path / "run"
+    trial.run_dir.mkdir()
+    trial.config = {"config_path": str(source), "config_sha256": "stale", "seed": 9, "orchestrator": {"library_dir": "override"}}
+    trial._snapshot_config()
+    assert (trial.run_dir / "config.toml").read_bytes() == source.read_bytes()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert (trial.run_dir / "config.toml.sha256").read_text() == f"{source_hash}  config.toml\n"
+    effective = json.loads((trial.run_dir / "config.effective.json").read_text())
+    assert effective["seed"] == 9 and effective["orchestrator"]["library_dir"] == "override"
+    effective_hash = hashlib.sha256((trial.run_dir / "config.effective.json").read_bytes()).hexdigest()
+    assert (trial.run_dir / "config.effective.json.sha256").read_text() == f"{effective_hash}  config.effective.json\n"
+
+
 def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
     """A rung that fails to LOAD aborts the run when require_all_rungs is set; the default stays
     tolerant (the pre-existing skip-and-report behavior)."""
@@ -221,6 +262,25 @@ def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, mo
     config["schedule"]["require_all_rungs"] = False
     trial = OrchestratedTrial(config)  # tolerant default: skips are reported, not fatal
     assert [skipped.rung for skipped in trial.skipped_rungs] == [7]
+
+
+def test_schedule_task_name_filters_are_deterministic(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from ardevo.evolution import multitask
+    from ardevo.trials import orchestrated_trial
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    train = replace(xor_task, meta=replace(xor_task.meta, name="arc.train.one"))
+    evaluation = replace(xor_task, meta=replace(xor_task.meta, name="arc.eval.one"))
+    report = multitask.PoolReport(entries=[task_entry(train), task_entry(evaluation)], skipped=[])
+    monkeypatch.setattr(orchestrated_trial, "build_pool_report", lambda **_kwargs: report)
+    config = _loop_config()
+    config.update({"dataset": "synthetic", "n_samples": 4, "seed": 0})
+    config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "lib")}
+    config["schedule"] = {"kind": "interleave_rungs", "rungs": [18], "task_include": ["arc.*"], "task_exclude": ["*.train.*"]}
+    trial = OrchestratedTrial(config)
+    assert [entry.name for entry in trial.pool] == ["arc.eval.one"]
 
 
 def test_library_gc_cli_dry_run_and_checkpoint_protection(tmp_path: Path, monkeypatch) -> None:

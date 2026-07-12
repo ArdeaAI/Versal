@@ -1,7 +1,7 @@
 """Evolve strategies: HOW the orchestrator's evolve step searches, selectable from config.
 
 The ladder's step 2 used to be hardcoded to the hierarchical composition loop. It is now a
-config-ordered list of registered strategies (`[orchestrator] evolve = ["composition", "direct"]`)
+config-ordered list of registered strategies (`[orchestrator] evolve = ["routed", "grammar", "direct", "composition"]`)
 sharing one depth budget: execution is config order, first strategy to clear the accept threshold
 wins, and a stalled strategy's unspent generations roll into the next allocation.
 
@@ -16,11 +16,13 @@ is what finally makes recurrent genes execute in the orchestrated path. Its cham
 as task-shaped MODULE entries the composition strategy can immediately reference.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any, Callable
 
-from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
-from ardevo.evaluation import fit_query_target, input_width, output_features
+from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output_features, support_loader
+from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
+from ardevo.evolution.composition import CompositionGenome
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
@@ -45,6 +47,10 @@ class StrategyRuntime:
     metric_of: Callable[[Any], float]  # reads .metrics; works for Assessed and AssessedComposition
     stall_factory: Callable[[int], Callable[[int, Any], bool]]
     on_generation: Callable[[str, int, Any, float], None] | None = None  # (strategy, gen, best, mean)
+    accepts: Callable[[Any], bool] | None = None
+
+    def accepted(self, item: Any) -> bool:
+        return self.accepts(item) if self.accepts is not None else self.metric_of(item) >= self.accept_threshold
 
 
 @dataclass
@@ -55,6 +61,9 @@ class StrategyResult:
     champion_comp: AssessedComposition | None = None  # composition-shaped winner (verified fresh)
     champion_genome: Genome | None = None  # module-shaped winner (trained weights written back)
     champion_metrics: dict[str, float] = field(default_factory=dict)
+    # Held-out metrics are kept on a separate rail. They are reporting only and must never affect
+    # admission, refinement, robustness ranking, or the next task's search state.
+    report_metrics: dict[str, float] = field(default_factory=dict)
     # A routed winner is a RECORD (ardevo.routing.RoutedSolution), not an admissible payload: the
     # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
     champion_routed: Any | None = None
@@ -91,6 +100,42 @@ def comp_size_metrics(comp: Any) -> dict[str, float]:
     priced at the module layer, not here). Public because the routed strategy stamps the same
     keys on a distilled win."""
     return {"champion_modules": float(len(comp.module_ids)), "champion_complexity": float(comp.complexity())}
+
+
+def _restamp_genome(source: Genome, tracker: InnovationTracker) -> Genome:
+    """Move a grammar seed into the receiving run's innovation namespace."""
+
+    id_map = {node_id: tracker.new_node_id() for node_id in sorted(source.nodes)}
+    nodes = {id_map[node_id]: replace(node, id=id_map[node_id]) for node_id, node in source.nodes.items()}
+    groups = {group for conn in source.connections if (group := conn.tie_group) is not None}
+    tie_groups = {group: tracker.new_marker() for group in sorted(groups)}
+    connections = [
+        replace(
+            conn,
+            in_id=id_map[conn.in_id],
+            out_id=id_map[conn.out_id],
+            innovation=tracker.innovation(id_map[conn.in_id], id_map[conn.out_id], conn.recurrent),
+            tie_group=tie_groups[conn.tie_group] if conn.tie_group is not None else None,
+        )
+        for conn in source.connections
+    ]
+    macros = [
+        replace(
+            macro,
+            input_node_ids=tuple(id_map[node_id] for node_id in macro.input_node_ids),
+            output_node_ids=tuple(id_map[node_id] for node_id in macro.output_node_ids),
+            innovation=tracker.new_marker(),
+        )
+        for macro in source.macros
+    ]
+    return Genome(nodes, connections, macros, source.refine_steps, dict(source.operator_rates))
+
+
+def _restamp_composition(source: CompositionGenome, tracker: InnovationTracker) -> CompositionGenome:
+    id_map = {node_id: tracker.new_node_id() for node_id in sorted(source.nodes)}
+    nodes = {id_map[node_id]: replace(node, id=id_map[node_id]) for node_id, node in source.nodes.items()}
+    edges = [replace(edge, in_id=id_map[edge.in_id], out_id=id_map[edge.out_id], innovation=tracker.innovation(id_map[edge.in_id], id_map[edge.out_id])) for edge in source.edges]
+    return CompositionGenome(nodes=nodes, edges=edges)
 
 
 @EVOLVE_STRATEGY.register("composition")
@@ -138,9 +183,9 @@ class CompositionStrategy:
         if best.net is None:
             return best  # floored (or white-box-stubbed): nothing fresher exists to assemble
         fresh = runtime.loop.assess_composition(best.comp, spec, runtime.state, train=False)
-        if runtime.metric_of(fresh) >= runtime.accept_threshold:
+        if runtime.accepted(fresh):
             return fresh
-        if runtime.metric_of(best) >= runtime.accept_threshold:
+        if runtime.accepted(best):
             logger.info("champion verification dropped below threshold (stale %.3f -> fresh %.3f); one re-fit", runtime.metric_of(best), runtime.metric_of(fresh))
             refit = runtime.loop.assess_composition(best.comp, spec, runtime.state, train=True)
             return refit if runtime.metric_of(refit) >= runtime.metric_of(fresh) else fresh
@@ -162,7 +207,13 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
-    return DirectStrategy(evolver=build_evolver(overlay), max_flat_outputs=int(table.get("max_flat_outputs", 0)), max_init_genes=int(table.get("max_init_genes", 0)))
+    return DirectStrategy(
+        evolver=build_evolver(overlay),
+        max_flat_outputs=int(table.get("max_flat_outputs", 0)),
+        max_init_genes=int(table.get("max_init_genes", 0)),
+        structured_grid=bool(table.get("structured_grid", False)),
+        blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)),
+    )
 
 
 @dataclass
@@ -186,16 +237,35 @@ class DirectStrategy:
     # to the assess pool) runs for HOURS before any check exists; a 409,600 x 8 task wedged two
     # runs on 2026-07-06 exactly this way. The attempt must be refused from arithmetic alone.
     max_init_genes: int = 0
+    # Structured grids retain dense cell loss for training while reporting predicted output shape,
+    # exact-example accuracy, and trivial baselines. Off keeps the historical flat adapter.
+    structured_grid: bool = False
+    # In blind mode every candidate sees a query-less EncodedTask. The selected payload is evaluated
+    # once on the full task below, after evolution has ended.
+    blind_query: bool = False
 
-    def _adapter(self, task: Task) -> TaskAdapter | TemporalTaskAdapter:
+    def _adapter(self, task: Task, *, include_query: bool = True) -> TaskAdapter | TemporalTaskAdapter:
         support_input, _support_output = support_loader(task)
         if has_time_axis(support_input.descriptor):
-            return temporal_adapter(task)  # recurrence goes LIVE: decode_recurrent + BPTT
+            adapter = temporal_adapter(task)  # recurrence goes LIVE: decode_recurrent + BPTT
+            if not include_query:
+                adapter.encoded = without_query(adapter.encoded)
+            return adapter
         width = 1
         for dim in support_input.data.shape[1:]:
             width *= int(dim)
         encoder = Level0Encoder(max_flat_dim=width)
-        encoded = fit_query_target(encode_task(task, encoder))
+        encoded = None
+        if self.structured_grid:
+            from ardevo.structured import encode_structured_grid
+
+            encoded = encode_structured_grid(task, encoder, include_query=include_query)
+        if encoded is None:
+            encoded = fit_query_target(encode_task(task, encoder))
+            if not include_query:
+                encoded = without_query(encoded)
+        elif not include_query:
+            encoded = encoded.without_query()
         return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), grid_shape=self._grid_shape(task))
 
     @staticmethod
@@ -213,12 +283,14 @@ class DirectStrategy:
         budget: int,
         seed_comps: list | None = None,
         seed_entries: list[LibraryEntry] | None = None,
+        seed_genomes: list[Genome] | None = None,
     ) -> StrategyResult:
         if self.max_flat_outputs > 0 or self.max_init_genes > 0:
             support_input, support_output = support_loader(task)
-            flat_outputs = 1
+            flat_positions = 1
             for dim in support_output.data.shape[1:]:
-                flat_outputs *= int(dim)
+                flat_positions *= int(dim)
+            flat_outputs = model_output_features(support_output.descriptor, flat_positions)
             if 0 < self.max_flat_outputs < flat_outputs:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
             flat_inputs = 1
@@ -227,7 +299,7 @@ class DirectStrategy:
             init_genes = (flat_inputs + 1) * flat_outputs
             if 0 < self.max_init_genes < init_genes:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
-        adapter = self._adapter(task)
+        adapter = self._adapter(task, include_query=not self.blind_query)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
         # can graft a macro ref that decode cannot satisfy -> a hard KeyError mid-search.
@@ -245,6 +317,7 @@ class DirectStrategy:
             # Refine-on-hit warm start: grafted entries take the front of the population and are
             # trained/assessed like every other member. Grid stamping keeps geometry mutators live.
             grafted = [graft(entry, tracker) for entry in (seed_entries or [])]
+            grafted.extend(_restamp_genome(genome, tracker) for genome in (seed_genomes or []))
             if grid is not None:
                 from ardevo.evolution.init import stamp_input_coordinates
 
@@ -253,7 +326,7 @@ class DirectStrategy:
 
         try:
             # Shared rng: keeps the whole solve deterministic per seed and checkpoint-coherent.
-            state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
+            state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries or seed_genomes else None)
         finally:
             self.evolver.init_op = original_init
         # Refine fairness: the grafted seeds' TRAINED standing is the incumbent baseline. Lineage is
@@ -285,22 +358,157 @@ class DirectStrategy:
                 runtime.on_generation(self.name, generation, generation_best, mean_fitness)
             runtime.state.generation += 1  # the global clock spans strategies for monotonic logging
             generations = generation + 1
-            if runtime.metric_of(best) >= runtime.accept_threshold or stop(generation, best):
+            if runtime.accepted(best) or stop(generation, best):
                 break
             self.evolver.advance(state, adapter)
 
         # Verification: the genome PAYLOAD (not the live module object) must reproduce the metric,
         # because the payload is what admission persists and lookups re-decode.
         verified = self.evolver.evaluate_only(best.genome, adapter)
+        reported = self.evolver.evaluate_only(verified.genome, self._adapter(task, include_query=True)) if self.blind_query else None
+        search_metric = runtime.metric_of(verified)
         return StrategyResult(
             strategy=self.name,
-            metric=runtime.metric_of(verified),
+            # Acceptance remains support-only in blind mode. Query metrics on ``verified`` are a
+            # one-shot report attached to the champion and cannot steer search or early stopping.
+            metric=search_metric if self.blind_query else runtime.metric_of(verified),
             generations_used=generations,
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
+            report_metrics=dict(reported.metrics) if reported is not None else {},
             seed_metric=seed_metric,
             size_metrics=_module_size_metrics(verified.genome, state.population),
         )
+
+
+@EVOLVE_STRATEGY.register("grammar")
+def _build_grammar(config: dict[str, Any]) -> "GrammarStrategy":
+    table = config.get("orchestrator", {}).get("grammar", {}) or {}
+    return GrammarStrategy(
+        direct=_build_direct(config),
+        max_productions=max(1, int(table.get("max_productions", 12))),
+        candidates_per_production=max(1, int(table.get("candidates_per_production", 3))),
+        mutation_steps=max(0, int(table.get("mutation_steps", 2))),
+        module_sizes=tuple(int(size) for size in table.get("module_sizes", [3, 4])),
+        composition_sizes=tuple(int(size) for size in table.get("composition_sizes", [2, 3, 4])),
+        min_lineage_support=max(2, int(table.get("min_lineage_support", 2))),
+        per_entry_cap=max(1, int(table.get("per_entry_cap", 5000))),
+    )
+
+
+@dataclass
+class GrammarStrategy:
+    """Search programs assembled only from motifs independently rediscovered by evolution."""
+
+    direct: Callable[..., StrategyResult]
+    max_productions: int = 12
+    candidates_per_production: int = 3
+    mutation_steps: int = 2
+    module_sizes: tuple[int, ...] = (3, 4)
+    composition_sizes: tuple[int, ...] = (2, 3, 4)
+    min_lineage_support: int = 2
+    per_entry_cap: int = 5000
+    name: str = "grammar"
+    _library_keys: tuple[str, ...] = field(default=(), init=False, repr=False)
+    _grammar: Any = field(default=None, init=False, repr=False)
+
+    def _programs(self, runtime: StrategyRuntime) -> list[Any]:
+        from ardevo.grammar import crossover_program, mutate_program, rebuild_grammar, seed_program
+
+        keys = tuple(runtime.library.keys())
+        if self._grammar is None or keys != self._library_keys:
+            self._grammar = rebuild_grammar(
+                runtime.library,
+                module_sizes=self.module_sizes,
+                composition_sizes=self.composition_sizes,
+                min_lineage_support=self.min_lineage_support,
+                per_entry_cap=self.per_entry_cap,
+            )
+            self._library_keys = keys
+        productions = sorted(self._grammar.productions, key=lambda item: (-item.mdl_gain, -item.support, item.key))[: self.max_productions]
+        programs: list[Any] = []
+        seen: set[str] = set()
+        for production in productions:
+            seed = seed_program(production)
+            candidates = [seed]
+            for _ in range(self.candidates_per_production - 1):
+                candidate = seed
+                for _step in range(self.mutation_steps):
+                    candidate = mutate_program(candidate, self._grammar, rng=runtime.state.rng)
+                candidates.append(candidate)
+            for candidate in candidates:
+                key = repr(candidate.to_dict())
+                if key not in seen:
+                    seen.add(key)
+                    programs.append(candidate)
+        # Aligned crossover is useful only once mutation has produced multi-production parents.
+        parents = list(programs)
+        for left, right in zip(parents[::2], parents[1::2]):
+            child = crossover_program(left, right, self._grammar, rng=runtime.state.rng)
+            key = repr(child.to_dict())
+            if key not in seen:
+                seen.add(key)
+                programs.append(child)
+        return programs
+
+    @staticmethod
+    def _composition_compatible(comp: CompositionGenome, spec: CompTaskSpec) -> bool:
+        if len(comp.output_ids) != 1 or comp.nodes[comp.output_ids[0]].in_width != spec.output_width:
+            return False
+        for node_id in comp.input_ids:
+            node = comp.nodes[node_id]
+            columns = spec.bank_columns.get(node.ref)
+            if columns is None or len(columns) != node.out_width:
+                return False
+        return True
+
+    def __call__(
+        self,
+        task: Task,
+        spec: CompTaskSpec,
+        runtime: StrategyRuntime,
+        *,
+        budget: int,
+        seed_comps: list | None = None,
+    ) -> StrategyResult:
+        from ardevo.grammar import GrammarError, compile_program
+
+        module_seeds: list[Genome] = []
+        comp_seeds: list[CompositionGenome] = []
+        for program in self._programs(runtime):
+            try:
+                compiled = compile_program(program, self._grammar, library=runtime.library, rng=runtime.state.rng)
+            except (GrammarError, KeyError, ValueError):
+                continue
+            if isinstance(compiled, Genome) and len(compiled.input_ids) == spec.n_inputs and len(compiled.output_ids) == spec.output_width:
+                module_seeds.append(compiled)
+            elif isinstance(compiled, CompositionGenome) and self._composition_compatible(compiled, spec):
+                comp_seeds.append(_restamp_composition(compiled, runtime.state.comp_innovations))
+        if not module_seeds and not comp_seeds:
+            return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"grammar_productions": float(len(self._grammar.productions))})
+
+        results: list[StrategyResult] = []
+        used = 0
+        if module_seeds:
+            allocation = budget if not comp_seeds else max(1, budget // 2)
+            result = self.direct(task, spec, runtime, budget=allocation, seed_genomes=module_seeds)
+            used += result.generations_used
+            results.append(result)
+            if runtime.accepted(SimpleNamespace(metrics=result.champion_metrics)):
+                result.strategy = self.name
+                result.generations_used = used
+                return result
+        remaining = max(0, budget - used)
+        if comp_seeds and remaining > 0:
+            result = CompositionStrategy()(task, spec, runtime, budget=remaining, seed_comps=[*(seed_comps or []), *comp_seeds])
+            used += result.generations_used
+            results.append(result)
+        winner = max(results, key=lambda item: item.metric)
+        winner.strategy = self.name
+        winner.generations_used = used
+        winner.champion_metrics["grammar_productions"] = float(len(self._grammar.productions))
+        winner.champion_metrics["grammar_programs"] = float(len(module_seeds) + len(comp_seeds))
+        return winner
 
 
 @EVOLVE_STRATEGY.register("routed")

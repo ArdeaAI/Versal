@@ -1,4 +1,5 @@
-# THE run config (and the default when `uv run app` gets no --config): the full orchestrated
+# Historical/reference orchestrated config retained for paper reproduction and ablations. The
+# default is configs/orchestrated_overmind_all_features.toml. This config runs the full orchestrated
 # ladder + learn-mode refinement of library hits + the routed substrate as the FIRST strategy WITH
 # its Stage-C options (ACT halting and the factorized edge_bias pathway prior) enabled.
 # Routed wins DISTILL into verified compositions that are admitted as new routable vertices (the

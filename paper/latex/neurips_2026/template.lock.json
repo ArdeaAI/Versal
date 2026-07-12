@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "source_url": "https://media.neurips.cc/Conferences/NeurIPS2026/Formatting_Instructions_For_NeurIPS_2026.zip",
+  "archive_sha256": "82473931e3ef710fcd3f4a8cd4119b9de32e56825f90f9e5a6d55f2d01b817d9",
+  "artifacts": [
+    {
+      "member": "neurips_2026.sty",
+      "path": "neurips_2026.sty",
+      "sha256": "c3fc2894e83d2517ca18b66741d6c595986d97957dc08ec08bb2125a7ec4555a",
+      "editable": false
+    },
+    {
+      "member": "checklist.tex",
+      "path": "checklist.tex",
+      "sha256": "780ba13c480f652dcc42e69ed61a752ce0ea270f15d332d4a45b059dabad84f6",
+      "editable": true
+    }
+  ]
+}

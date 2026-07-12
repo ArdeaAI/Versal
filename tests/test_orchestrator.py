@@ -4,13 +4,14 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
 
 from ardevo import checkpoint
 from ardevo.dataset.icarus import Task
-from ardevo.evolution.composition import AssemblyContext, assemble, comp_from_dict, minimal_composition
+from ardevo.evolution.composition import AssemblyContext, ComposedNet, assemble, comp_from_dict, minimal_composition
 from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, state_from_dict, state_to_dict
 from ardevo.evolution.registry import build_loop
@@ -144,6 +145,22 @@ def test_attempts_carry_champion_sample_metrics(tmp_path: Path, xor_task: Task) 
     _patch_run_task(plain, _fake_run_task({}, []))
     assert plain.solve(xor_task) is None
     assert plain.attempts[-1].sample_metrics == {}  # standard-eval metrics fabricate nothing
+
+
+def test_held_out_report_cannot_replace_search_robustness(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    spec = comp_task_spec(xor_task)
+    comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, orchestrator.state.comp_innovations, orchestrator.state.rng)
+    search = AssessedComposition(comp=comp, metrics={"support_accuracy": 0.8, "weight_robustness": 0.25}, fitness=0.8, net=cast(ComposedNet, object()))
+    result = StrategyResult("composition", metric=0.8, generations_used=1, champion_comp=search, champion_metrics=dict(search.metrics))
+    reported = AssessedComposition(comp=comp, metrics={"query_accuracy": 1.0, "query_loss": 0.0, "weight_robustness": 0.99}, fitness=1.0, net=cast(ComposedNet, object()))
+    setattr(orchestrator.loop, "assess_composition", lambda *_args, **_kwargs: reported)
+
+    attached = orchestrator._attach_report_metrics(result, spec)
+
+    assert attached.champion_metrics["weight_robustness"] == 0.25
+    assert attached.report_metrics["weight_robustness"] == 0.99
+    assert attached.champion_comp is search
 
 
 def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decomposable_task: Task) -> None:

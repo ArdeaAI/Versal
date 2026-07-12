@@ -13,14 +13,14 @@ import math
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from multiprocessing.pool import Pool
 
     from ardevo.library import ModuleLibrary
 
-from ardevo.dataset.icarus import EncodedTask, Level0Encoder
+from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.evaluate import standard as standard_evaluate
 from ardevo.evolution.fitness import FitnessAggregator
@@ -40,7 +40,7 @@ class Adapter(Protocol):
     while keeping the same population.
     """
 
-    encoded: EncodedTask
+    encoded: Any
     n_inputs: int
     n_outputs: int
 
@@ -53,7 +53,7 @@ class Adapter(Protocol):
 class TaskAdapter:
     """Injects task specifics (encoded tensors, widths) so the Evolver stays task-agnostic."""
 
-    encoded: EncodedTask
+    encoded: Any
     encoder: Level0Encoder
     n_inputs: int
     n_outputs: int
@@ -69,6 +69,10 @@ class TaskAdapter:
         return decode_module(genome, self.n_inputs, self.n_outputs)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
+        from ardevo.structured import StructuredGridEncoded, evaluate_structured_grid
+
+        if isinstance(self.encoded, StructuredGridEncoded):
+            return evaluate_structured_grid(module, self.encoded, self.encoder)
         return evaluate(module, self.encoded, self.encoder)
 
 
@@ -140,6 +144,7 @@ class Evolver:
     # Optional population-level trainer (e.g. gradient_batched): assess_many routes a whole
     # generation through one tensor program instead of candidate-by-candidate training.
     train_population_op: Callable[..., list[tuple[Genome, SubstrateModule]]] | None = None
+    execution_mode: str = "serial"
     assess_workers: int = 0
     library_dir: str = "library"
     # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so

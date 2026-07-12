@@ -8,10 +8,15 @@ capped, so checkpoints are written only when a task admits novel library entries
 """
 
 import datetime
+import fnmatch
+import hashlib
 import json
 import random
+import shutil
+import tempfile
 import time
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -27,6 +32,7 @@ from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
+from ardevo.utils.device import capture_hardware_profile
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
 from ardevo.utils.status import BOARD
@@ -69,6 +75,14 @@ class OrchestratedTrial(Proctor):
             seed=int(config.get("seed", 0)),
         )
         self.pool: list[TaskEntry] = report.entries
+        include = schedule_cfg.get("task_include", [])
+        exclude = schedule_cfg.get("task_exclude", [])
+        include_patterns = [str(pattern) for pattern in ([include] if isinstance(include, str) else include)]
+        exclude_patterns = [str(pattern) for pattern in ([exclude] if isinstance(exclude, str) else exclude)]
+        if include_patterns:
+            self.pool = [entry for entry in self.pool if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in include_patterns)]
+        if exclude_patterns:
+            self.pool = [entry for entry in self.pool if not any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in exclude_patterns)]
         self.skipped_rungs = report.skipped
         for skipped in self.skipped_rungs:
             console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
@@ -96,7 +110,10 @@ class OrchestratedTrial(Proctor):
         self.resume_dir = config.get("resume")
         self.run_dir = Path(results.DEFAULT_ROOT)
         self.gc_enabled = bool(config.get("library", {}).get("gc", False))
+        self.fresh_per_task = bool(config.get("library", {}).get("fresh_per_task", False))
+        self.frozen_library_dir: Path | None = None
         self.gc_removed: list[str] | None = None  # set by the run-end sweep, reported in run_summary
+        self.hardware_profile = capture_hardware_profile().to_dict()
 
     def run(self) -> dict[str, Any]:
         if self.resume_dir:
@@ -108,6 +125,8 @@ class OrchestratedTrial(Proctor):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.run_dir = Path(results.DEFAULT_ROOT) / f"{timestamp}_orchestrated"
             self.run_dir.mkdir(parents=True, exist_ok=True)
+            self._snapshot_config()
+            self._prepare_frozen_library()
             state = self.loop.fresh_state(random.Random(int(self.config.get("seed", 0))))
             task_cursor, attempts, counters = 0, [], None
             self.task_records = []
@@ -134,12 +153,19 @@ class OrchestratedTrial(Proctor):
                 BOARD.task(task_cursor + 1, self.tasks_to_run, entry.rung, entry.name)
                 library_keys_before = set(self.library.keys())
                 task_started = time.perf_counter()
-                solution = orchestrator.solve(entry.task)
+                isolated = self._solve_isolated(entry, task_cursor, orchestrator) if self.fresh_per_task else None
+                if isolated is None:
+                    solution = orchestrator.solve(entry.task)
+                    attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
+                    module_pool_sizes = self._module_pool_sizes(state)
+                else:
+                    solution, attempt, isolated_generations = isolated
+                    state.generation += isolated_generations
+                    module_pool_sizes = {}
                 task_seconds = time.perf_counter() - task_started
                 task_cursor += 1
                 self.library.flush_stats()  # deferred bump_stats writes land at the task boundary
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
-                attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
                 outcome = attempt.outcome if attempt is not None else "unknown"
                 if hasattr(self.scheduler, "observe"):  # feedback-driven schedulers (regret); others untouched
                     self.scheduler.observe(entry.rung, attempt.metric if attempt is not None else 0.0, solution is not None)
@@ -147,7 +173,6 @@ class OrchestratedTrial(Proctor):
                 stages = dict(getattr(attempt, "stage_seconds", None) or {})
                 stage_note = f" [{', '.join(f'{k} {v:.0f}s' for k, v in stages.items())}]" if stages else ""
                 console.print(f"  -> {label} (library size {len(self.library)}, {task_seconds:.0f}s{stage_note})")
-                module_pool_sizes = self._module_pool_sizes(state)
                 self._log_task(orchestrator, state, task_cursor, task_seconds, module_pool_sizes)
                 # Durable record EVERY task, regardless of admission: a run is now measurable and
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
@@ -170,7 +195,7 @@ class OrchestratedTrial(Proctor):
         self.library.flush_stats()
         rendering.flush_renders()  # renders land before GC can delete images and before finalize
         self._persist_resume_state(orchestrator, state, task_cursor)
-        if self.gc_enabled:
+        if self.gc_enabled and not self.fresh_per_task:
             self._run_gc(state)
         self._write_run_summary(orchestrator, state, task_cursor, status="done")
         self.results = {
@@ -184,6 +209,64 @@ class OrchestratedTrial(Proctor):
         console.print(f"[bold green]Done[/bold green]: {task_cursor} tasks, library {len(self.library)} entries, counters {orchestrator.counters}")
         self.finalize()
         return self.results
+
+    def _prepare_frozen_library(self) -> None:
+        if not self.fresh_per_task:
+            return
+        frozen = self.run_dir / "frozen_library"
+        if frozen.exists():
+            self.frozen_library_dir = frozen
+            return
+        self.library.root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(self.library.root, frozen, ignore=shutil.ignore_patterns("encoded_cache", "images"))
+        self.frozen_library_dir = frozen
+
+    def _solve_isolated(
+        self,
+        entry: TaskEntry,
+        task_cursor: int,
+        aggregate: Orchestrator,
+    ) -> tuple[Solution | None, Any, int] | None:
+        """Solve one task against a disposable copy of the frozen starting library."""
+
+        if self.frozen_library_dir is None:
+            self._prepare_frozen_library()
+        if self.frozen_library_dir is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="ardevo_task_") as tmp:
+            root = Path(tmp) / "library"
+            shutil.copytree(self.frozen_library_dir, root)
+            library = ModuleLibrary(root)
+            loop = build_loop(self.config)
+            if not isinstance(loop, HierarchicalLoop):
+                raise ValueError('the orchestrated trial requires [evolution] loop = "hierarchical"')
+            loop.attach_library(library)
+            from ardevo.evolution.evolver import get_shared_pool, set_shared_pool
+            from ardevo.substrate import set_macro_resolver
+
+            shared_pool = get_shared_pool()
+            set_shared_pool(None)
+            set_macro_resolver(macro_resolver(library))
+            try:
+                seed = int(self.config.get("seed", 0)) * 1_000_003 + task_cursor
+                state = loop.fresh_state(random.Random(seed))
+                isolated = Orchestrator(self.config, loop, library, state, proctor=self)
+                solution = isolated.solve(entry.task)
+                library.flush_stats()
+                attempt = isolated.attempts[-1] if isolated.attempts else None
+                # The task-local directory is deleted on return. Never publish keys that will point
+                # at vanished entries in checkpoints, summaries, or the returned Solution.
+                for row in isolated.attempts:
+                    row.library_key = None
+                if solution is not None:
+                    solution = replace(solution, key=None)
+                aggregate.attempts.extend(isolated.attempts)
+                for key, value in isolated.counters.items():
+                    aggregate.counters[key] = aggregate.counters.get(key, 0) + value
+                return solution, attempt, state.generation
+            finally:
+                set_macro_resolver(macro_resolver(self.library))
+                set_shared_pool(shared_pool)
 
     def _run_gc(self, state: HierarchicalState) -> None:
         """Run-end sweep of unreferenced tombstones ([library] gc = true). Rooted in the LIVE state:
@@ -274,6 +357,10 @@ class OrchestratedTrial(Proctor):
             record["sample_metrics"] = dict(attempt.sample_metrics)
         if attempt is not None and getattr(attempt, "size_metrics", None):  # champion/population genome size: the bloat readout
             record["size_metrics"] = dict(attempt.size_metrics)
+        if attempt is not None and getattr(attempt, "report_metric", None) is not None:
+            record["report_metric"] = float(attempt.report_metric)
+        if attempt is not None and getattr(attempt, "task_metrics", None):
+            record["task_metrics"] = dict(attempt.task_metrics)
         if module_pool_sizes:
             record["module_pool"] = dict(module_pool_sizes)
         self.task_records.append(record)
@@ -301,10 +388,48 @@ class OrchestratedTrial(Proctor):
             "skipped_rungs": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
             "tasks": self.task_records,
         }
+        hardware_profile = getattr(self, "hardware_profile", None)
+        if hardware_profile is not None:
+            summary["hardware_profile"] = hardware_profile
+            summary["execution"] = {
+                "hierarchical": getattr(self.loop.evolver, "execution_mode", "serial"),
+                "assess_workers": int(getattr(self.loop.evolver, "assess_workers", 0)),
+            }
+            if orchestrator is not None:
+                summary["execution"]["strategies"] = {name: getattr(getattr(strategy, "evolver", None), "execution_mode", "n/a") for name, strategy in orchestrator.strategies}
         gc_removed = getattr(self, "gc_removed", None)  # tolerate partially-constructed trials (white-box tests)
         if gc_removed is not None:
             summary["gc_removed"] = len(gc_removed)
+        if orchestrator is not None and getattr(orchestrator, "blind_query", False):
+            summary["search_metric"] = orchestrator.search_metric
+            summary["report_metric"] = orchestrator.report_metric
         (self.run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
+
+    def _snapshot_config(self) -> None:
+        """Copy the exact run config beside the checkpoint before task zero.
+
+        A hash without bytes is insufficient once a working config evolves. Snapshotting is local
+        run state (``results/`` is gitignored) and makes every crash or interrupted campaign
+        independently reconstructable.
+        """
+
+        source_text = str(self.config.get("config_path", ""))
+        if not source_text:
+            return
+        source = Path(source_text)
+        if not source.exists():
+            return
+        payload = source.read_bytes()
+        source_hash = hashlib.sha256(payload).hexdigest()
+        self.config["config_sha256"] = source_hash
+        (self.run_dir / "config.toml").write_bytes(payload)
+        (self.run_dir / "config.toml.sha256").write_text(f"{source_hash}  config.toml\n")
+
+        effective = json.dumps(self.config, indent=2, sort_keys=True, default=str) + "\n"
+        effective_payload = effective.encode("utf-8")
+        effective_hash = hashlib.sha256(effective_payload).hexdigest()
+        (self.run_dir / "config.effective.json").write_bytes(effective_payload)
+        (self.run_dir / "config.effective.json.sha256").write_text(f"{effective_hash}  config.effective.json\n")
 
     def _persist_resume_state(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
         """Rolling resumable checkpoint at the run root, written every task (not gated on admission),

@@ -61,10 +61,13 @@ The throughput lever that DOES pay is the partitioned gradient_batched trainer o
 populations: 1.5x CPU / 2.1x MPS at pop 48 (measured in phase 3, dense layout).
 """
 
+import argparse
 import random
 import statistics
 import tempfile
 import time
+from pathlib import Path
+from typing import cast
 
 import torch
 
@@ -74,6 +77,8 @@ from ardevo.evolution.evolver import TaskAdapter
 from ardevo.evolution.genome import Genome, InnovationTracker
 from ardevo.evolution.mutation import MutationContext, add_deep_node, add_rich_node
 from ardevo.library import MODULE, ModuleLibrary
+
+WeightSnapshot = list[dict[tuple[int, int, bool], float]]
 
 
 def synthetic_task(width: int, rows: int = 200, seed: int = 0) -> Task:
@@ -212,6 +217,125 @@ def bench_t4(widths: tuple[int, ...] = (784, 3072), population: int = 48, steps:
             print(f"{width:>6} {device:>7} {batched_ms:>11.0f} {serial_ms:>10.0f} {serial_ms / batched_ms:>7.2f}x {drift:>10.2e}")
 
 
+def bench_compute_policy(
+    *,
+    profile_path: Path | None,
+    width: int = 784,
+    population: int = 48,
+    steps: int = 20,
+    workers: int | str = "auto",
+    repeats: int = 3,
+    minimum_speedup: float = 1.15,
+    tolerance: float = 1e-3,
+) -> None:
+    """Calibrate the real pooled-vs-population assessment paths and optionally save the policy."""
+    from ardevo.evolution import evolver as ev_mod
+    from ardevo.evolution.evolver import EvolverState
+    from ardevo.evolution.registry import build_evolver
+    from ardevo.utils.device import (
+        POPULATION_CPU_MODE,
+        POPULATION_CUDA_MODE,
+        POPULATION_MPS_MODE,
+        SERIAL_MODE,
+        calibrate_compute_policy,
+        capture_hardware_profile,
+        resolve_worker_count,
+    )
+
+    task = synthetic_task(width, rows=400, seed=width)
+    encoder = Level0Encoder(max_flat_dim=width)
+    encoded = encode_task(task, encoder)
+    from ardevo.evaluation import input_width, output_features
+
+    adapter = TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded))
+    genomes = [minimal_grown(adapter, random.Random(width * 101 + index), rounds=3) for index in range(population)]
+    worker_count = resolve_worker_count(workers)
+    hardware = capture_hardware_profile()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ev_mod.create_assess_pool(worker_count, tmp)
+
+        def runner(*, device: str | None) -> WeightSnapshot:
+            train_config: dict[str, object] = {
+                "kind": "gradient_scheduled",
+                "steps": steps,
+                "lr": 0.03,
+                "weight_decay": 0.0002,
+                "writeback": True,
+                "batched": device is not None,
+            }
+            if device is not None:
+                train_config.update({"device": device, "max_padded_nodes": 4096})
+            config = {
+                "seed": 0,
+                "library_dir": tmp,
+                "machine_env": "local",
+                "evolution": {
+                    "pop_size": population,
+                    "assess_workers": worker_count,
+                    "init": {"kind": "minimal"},
+                    "selection": {"kind": "tournament", "tournament_size": 2},
+                    "crossover": {"kind": "none"},
+                    "mutation": {"operators": []},
+                    "train": train_config,
+                    "evaluate": {"kind": "standard"},
+                },
+                "fitness": {"components": ["support_accuracy"]},
+            }
+            evolver = build_evolver(config)
+            state = EvolverState(population=[], innovations=InnovationTracker.from_genomes(genomes), rng=random.Random(0))
+            assessed = evolver.assess_many([genome.clone() for genome in genomes], adapter, state)
+            return [
+                {(connection.in_id, connection.out_id, connection.recurrent): connection.weight for connection in item.genome.connections if connection.enabled}
+                for item in assessed
+            ]
+
+        runners = {
+            SERIAL_MODE: lambda: runner(device=None),
+            POPULATION_CPU_MODE: lambda: runner(device="cpu"),
+        }
+        if torch.backends.mps.is_available():
+            runners[POPULATION_MPS_MODE] = lambda: runner(device="mps")
+        if torch.cuda.is_available():
+            runners[POPULATION_CUDA_MODE] = lambda: runner(device="cuda")
+
+        def validate(name: str, reference: object, result: object) -> bool:
+            if not isinstance(reference, list) or not isinstance(result, list):
+                return False
+            reference_rows = cast(WeightSnapshot, reference)
+            result_rows = cast(WeightSnapshot, result)
+            if len(reference_rows) != len(result_rows):
+                return False
+            try:
+                drift = max(abs(reference_row[key] - result_row[key]) for reference_row, result_row in zip(reference_rows, result_rows) for key in reference_row)
+            except (KeyError, ValueError):
+                return False
+            print(f"  {name}: maximum trained-weight drift {drift:.2e}")
+            return drift <= tolerance
+
+        try:
+            policy = calibrate_compute_policy(
+                runners,
+                default_mode=SERIAL_MODE,
+                profile_path=profile_path,
+                repeats=repeats,
+                minimum_speedup=minimum_speedup,
+                validate=validate,
+                hardware=hardware,
+            )
+        finally:
+            ev_mod._close_shared_pool()
+
+    print(f"\nCompute policy: hardware={policy.hardware.fingerprint[:12]} default={policy.default_mode} selected={policy.selected_mode}")
+    for name, seconds in policy.timings_seconds.items():
+        print(f"  {name:<18} {seconds * 1000.0:>9.1f} ms")
+    if policy.errors:
+        for name, error in policy.errors.items():
+            print(f"  {name:<18} rejected: {error}")
+    if profile_path is not None:
+        print(f"  profile: {profile_path}")
+
+
 def bench_t5(width: int = 784, population: int = 48, steps: int = 120, workers: int = 12) -> None:
     """End-to-end assess_many: the pooled per-genome path (batched=false) vs the hybrid path
     (population program on the resolved device + pool for serial subset and evaluation).
@@ -277,8 +401,9 @@ def bench_t7(children: int = 64) -> None:
     from ardevo.evolution.init import minimal, stamp_input_coordinates
     from ardevo.evolution.mutation import MUTATION, MutationContext, MutationPipeline, add_local_node, add_rich_node
     from ardevo.evolution.registry import _bind_prefixed
+    from ardevo.utils.config import Config
 
-    with open("configs/orchestrated_overmind.toml", "rb") as handle:
+    with open(Config.DEFAULT_CONFIG, "rb") as handle:
         mutation_cfg = tomllib.load(handle)["evolution"]["mutation"]
     pipeline = MutationPipeline([partial(MUTATION.get(name), **_bind_prefixed(mutation_cfg, name)) for name in mutation_cfg["operators"]])
 
@@ -352,14 +477,41 @@ def bench_library(sizes: tuple[int, ...] = (100, 300, 1000)) -> None:
 
 
 def main() -> None:
-    torch.set_num_threads(1)
-    print(f"torch {torch.__version__}, intra-op threads pinned to 1")
-    bench_t2()
-    bench_t3()
-    bench_t4()
-    bench_t5()
-    bench_t7()
-    bench_library()
+    parser = argparse.ArgumentParser(description="Run ArdEVO throughput benchmarks and optional hardware calibration.")
+    parser.add_argument("--calibrate-compute", action="store_true", help="benchmark serial/CPU/MPS/CUDA execution modes")
+    parser.add_argument("--compute-profile", type=Path, help="explicit gitignored path where the calibrated policy should be written")
+    parser.add_argument("--calibration-only", action="store_true", help="skip the standard benchmark suite")
+    parser.add_argument("--calibration-width", type=int, default=784)
+    parser.add_argument("--calibration-population", type=int, default=48)
+    parser.add_argument("--calibration-steps", type=int, default=20)
+    parser.add_argument("--calibration-workers", default="auto")
+    parser.add_argument("--calibration-repeats", type=int, default=3)
+    parser.add_argument("--minimum-speedup", type=float, default=1.15)
+    args = parser.parse_args()
+
+    calibrate = args.calibrate_compute or args.compute_profile is not None
+    if args.calibration_only and not calibrate:
+        parser.error("--calibration-only requires --calibrate-compute or --compute-profile")
+    print(f"torch {torch.__version__}, main-process intra-op threads {torch.get_num_threads()}")
+    if calibrate:
+        bench_compute_policy(
+            profile_path=args.compute_profile,
+            width=args.calibration_width,
+            population=args.calibration_population,
+            steps=args.calibration_steps,
+            workers=args.calibration_workers,
+            repeats=args.calibration_repeats,
+            minimum_speedup=args.minimum_speedup,
+        )
+    if not args.calibration_only:
+        torch.set_num_threads(1)
+        print("standard microbenchmarks pin intra-op threads to 1")
+        bench_t2()
+        bench_t3()
+        bench_t4()
+        bench_t5()
+        bench_t7()
+        bench_library()
 
 
 if __name__ == "__main__":

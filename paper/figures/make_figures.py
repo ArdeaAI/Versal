@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["matplotlib"]
 # ///
-"""Generate every figure for paper/paper.md from the frozen archives under ai/archive/.
+"""Generate every figure for paper/preprint.md from the frozen archives under ai/archive/.
 
 Deterministic: fixed jitter seed, no timestamps in any output (PDF CreationDate stripped).
 Run from the repo root:  uv run python paper/figures/make_figures.py

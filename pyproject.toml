@@ -24,6 +24,7 @@ library_gc = "ardevo.tools.library_gc:main"
 motif_census = "ardevo.tools.motif_census:main"
 cppn_spike = "ardevo.tools.cppn_spike:main"
 run_matrix = "ardevo.tools.run_matrix:main"
+runtime_inventory = "ardevo.tools.runtime_inventory:main"
 
 [build-system]
 requires = ["hatchling"]

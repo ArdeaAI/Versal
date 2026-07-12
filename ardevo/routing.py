@@ -826,7 +826,7 @@ class RoutedStrategy:
 
         zero_shot_metrics = evaluate(view, spec.encoded, spec.encoder)
         zero_shot_metric = runtime.metric_of(self._metrics_view(zero_shot_metrics))
-        if self.zero_shot_accept and zero_shot_metric >= runtime.accept_threshold:
+        if self.zero_shot_accept and runtime.accepted(self._metrics_view(zero_shot_metrics)):
             service.record_traffic()  # once per task, from its final evaluation's gate decisions
             return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
@@ -836,7 +836,7 @@ class RoutedStrategy:
         service.record_traffic()  # once per task, from its final evaluation's gate decisions
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
-        if metric >= runtime.accept_threshold:
+        if runtime.accepted(self._metrics_view(metrics)):
             return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost)
         return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost, runtime=runtime)
 
@@ -910,7 +910,7 @@ class RoutedStrategy:
         pathway = self._dominant_pathway(view)
         assessed = self._verify_distilled(pathway, spec, runtime) if pathway else None
         distilled_metric = runtime.metric_of(assessed) if assessed is not None else 0.0
-        if assessed is not None and distilled_metric >= runtime.accept_threshold:
+        if assessed is not None and runtime.accepted(assessed):
             fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(assessed.comp))
             task_embed = view.net.task_embedding(view.support_input, view.input_key, view.head_key)
             service.note_pending_embedding(fingerprint, task_embed)
@@ -1027,7 +1027,7 @@ class RoutedStrategy:
             steps_used=steps_used,
             expert_usage=dict(view.net.last_gate_stats),
         )
-        if metric >= runtime.accept_threshold:
+        if runtime.accepted(self._metrics_view(metrics)):
             service.record_task(
                 {
                     "task": task.meta.name,

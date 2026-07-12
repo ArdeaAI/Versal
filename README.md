@@ -18,18 +18,22 @@ We want to use ClearML for this as well as much as we can make use of it. I alre
 
 ## The workflow
 
-There is ONE run mode: the orchestrated overmind evolver, configured by the single supported config
-`configs/orchestrated_overmind.toml` (also the default when `uv run app` gets no `--config`).
+There is ONE run mode: the orchestrated overmind evolver. The canonical configuration is
+`configs/orchestrated_overmind_all_features.toml`, also the default when `uv run app` gets no `--config`.
+Other files in `configs/` are retained as paper-reproduction, diagnostic, smoke, and ablation arms.
 
 ```bash
 uv sync --group dev
 uv run app                                        # the orchestrated overmind run (all 18 rungs)
+uv run app --config configs/preflight.toml        # 180-task MonadMetal/ClearML production canary
 uv run app --resume results/<ts>_orchestrated     # continue a run from its rolling checkpoint
 uv run render --overmind                          # re-render the library + the routed model portrait
 uv run motif_census --render                      # mine recurring motifs -> library/motifs.json + atlas
 uv run rung_doctor --rungs 1-18 --n-tasks 2       # probe rung loadability/shapes without a run
 uv run library_gc --dry-run                       # sweep unreferenced tombstones (prunes dead router vertices)
 uv run benchmark                                  # measured throughput truths
+uv run benchmark --calibrate-compute --calibration-only --compute-profile results/compute_policy.json
+uv run runtime_inventory --check                  # verify config, registry, CLI, and runtime-path inventory
 ```
 
 Set `[run] clearml = true` to track in ClearML; it degrades gracefully offline. Machine env maps to a queue:
@@ -51,9 +55,11 @@ end up in it as a reusable entry, and it survives across runs (delete `library/`
    (LEARN MODE), a hit spends a small per-entry-decaying budget of evolution seeded from the stored solution
    trying to strictly beat it (metric, then robustness, then LOWER complexity); a failed refinement returns the
    original hit, so a task never regresses.
-2. **EVOLVE**: the strategy ladder (`[orchestrator] evolve = ["routed", "direct", "composition"]`, config order,
+2. **EVOLVE**: the strategy ladder (`[orchestrator] evolve = ["routed", "grammar", "direct", "composition"]`, config order,
    first success wins, unspent budget rolls on):
    - **routed**: the overmind (below). A zero-shot clear costs 0 generations.
+   - **grammar**: typed graph programs induced only from motifs rediscovered in independent library lineages and
+     admitted by a positive MDL gain. Empty or interface-incompatible grammars cost zero generations.
    - **direct**: the flat recipe on the task's REAL I/O; grows structure (the two-spirals class), routes
      TIME-axis tasks through the stepped recurrent substrate, stamps grid coordinates so the geometry operators
      (`add_local_node`, `add_local_connection`, `add_shared_motif`: a structural convolution prior) bite, and
@@ -76,8 +82,9 @@ below-bar STEPPING STONE and the next attempt on that signature warm-starts from
 accumulate trained weights and structure across attempts instead of restarting.
 
 The run is observable end to end: `run_summary.json` gets a row for EVERY task and a rolling resume
-`checkpoint.json` lands at the run root each task (library stats flush at the same boundary), so a crash leaves a
-diagnosable record and `--resume` restores the exact latest state.
+`checkpoint.json` lands at the run root each task (library stats flush at the same boundary). New runs also pin
+`config.toml` and the CLI-adjusted `config.effective.json`, each with a SHA256 sidecar; implicit `--resume` loads
+those run-local snapshots rather than today's repository default.
 
 ## The overmind (routed substrate)
 
@@ -122,38 +129,43 @@ the reuse census reports the growing vocabulary (who is built FROM whom). Report
 ## Lego-block evolution
 
 Every stage of the generational loop is an independent, registered operator selected and tuned from
-`configs/orchestrated_overmind.toml`. The loop runs: **select -> crossover -> mutate -> train -> evaluate ->
+`configs/orchestrated_overmind_all_features.toml`. The loop runs: **select -> crossover -> mutate -> train -> evaluate ->
 fitness -> replace**, with speciation shaping how offspring are allocated. To experiment, change a `kind`,
 reorder `[evolution.mutation].operators`, retune a weight, or register one new function in the matching
 registry; the loop itself never changes.
 
+`runtime_inventory.json` is the machine-generated source of truth for the complete registry and configuration
+surface. Refresh it with `uv run runtime_inventory --write` whenever a registered operator, config key, console
+script, or documented persistent path changes; CI-style checks should use `--check`.
+
 | Stage | Config section | Registered options |
 |---|---|---|
 | loop | `[evolution] loop` | `hierarchical` (compositions + shared module pool) |
-| evolve strategy | `[orchestrator] evolve` | `routed` (the overmind), `direct`, `composition` |
-| init | `[evolution.init]` | `minimal` |
-| selection | `[evolution.selection]` | `tournament`, `truncation` |
+| evolve strategy | `[orchestrator] evolve` | `routed` (the overmind), `grammar`, `direct`, `composition` |
+| init | `[evolution.init]` | `minimal`, `factored`, `sparse`, `cppn` |
+| selection | `[evolution.selection]` | `tournament`, `truncation`, `nsga2` |
 | crossover | `[evolution.crossover]` | `none`, `neat` |
-| mutation | `[evolution.mutation]` | `add_rich_node` (width), `add_deep_node` (depth), `add_local_node` / `add_local_connection` / `add_shared_motif` (coordinate-aware locality / structural conv prior), `add_connection`, `toggle_connection` (prune), `add_node`, `mutate_activation`, `mutate_aggregation` (sum/product flip), `add_recurrent_connection` (time-delayed memory), `tweak_refine_steps` (TRM recursion depth), `add_library_module` (graft a stored mini-model), `add_macro_node` (frozen whole network), `perturb_weights` |
-| train | `[evolution.train]` | `none`, `gradient` (params `steps`, `lr`, `writeback`, `weight_decay`), `gradient_refine` (deep-supervised BPTT for refine genomes), `gradient_batched` (whole generation in one tensor program; `device`, `max_padded_nodes`) |
-| evaluate | `[evolution.evaluate]` | `standard`, `weight_samples` (weight-agnostic scoring), `hybrid` (trained metrics + robustness) |
+| mutation | `[evolution.mutation]` | NEAT connection/node growth; rich/deep/hinted/relation/local growth; recurrence; activation/aggregation changes; library/macro reuse; shared-motif tie/untie; remove, toggle, and prune/regrow; refinement-depth and weight mutation |
+| train | `[evolution.train]` | `none`, `gradient`, `gradient_scheduled`, `gradient_refine`; population trainers `gradient_batched`, `gradient_refine`, `gradient_scheduled` |
+| evaluate | `[evolution.evaluate]` | `standard`, `weight_samples`, `augmented_vote`, `hybrid` |
 | speciation | `[evolution.speciation]` | `none`, `neat` (compatibility threshold auto-targets a species count) |
-| schedule | `[schedule]` | `random`, `round_robin`, `interleave_rungs` (picks the next pool task) |
+| schedule | `[schedule]` | `random`, `round_robin`, `interleave_rungs`, `regret` |
 | comp mutation | `[evolution.composition.mutation]` | `add_module_node`, `switch_ref`, `add_comp_edge`, `toggle_comp_edge`, `perturb_glue` (crossover: `none`, `comp_neat`) |
 | decompose | `[orchestrator] decompose` | `output_slices`, `input_subsets`, `time_windows`, `spatial_patches` (grid->grid bands) |
 | library admission | `[library] admission` | `accept_all` (legacy), `default` (floors + flat per-signature cap), `archive` (open-ended QD: per-(io, behavior-niche) diversity) |
-| fitness | `[fitness]` | `support_accuracy`, `query_accuracy`, `negative_support_loss`, `negative_query_loss`, `bounded_negative_support_loss` / `bounded_negative_query_loss` ((0,1] so loss does not swamp the rest), `mean_sample_accuracy`, `max_sample_accuracy`, `weight_robustness`, `negative_mean_sample_loss`, `complexity_penalty`, `hidden_penalty` |
+| fitness | `[fitness]` | support/query accuracy and loss variants, sample accuracy/loss, robustness, novelty, connection cost, and complexity/hidden penalties |
 
 Notes from getting this to actually grow useful topologies: `add_rich_node` only widens a layer, so depth-needing
 tasks (two-spirals) require `add_deep_node`; `toggle_connection` is the only operator that prunes, so a complexity
 penalty needs it to simplify; and `neat` speciation auto-adjusts its threshold (a fixed one fractures the
 population into singletons and starves reproduction). The torch substrate is vectorized (level-wise matmuls).
 
-Honest throughput notes from `uv run benchmark`: stacked sample-eval measured SLOWER at current kernel sizes and
-ships default-off (thread-parallel assess measured slower too and was removed outright); the levers that pay are
-the partitioned `gradient_batched` trainer (1.5x CPU / 2.1x MPS at pop 48) and the direct strategy's
-`assess_workers` process pool. Library I/O is cached (parsed-entry cache) and hot stats writes are deferred to
-one flush per task; structural admissions stay immediately durable.
+Hardware choices are measured, not inferred from the machine name. The calibration command above compares the
+real process-pool path with scheduled population training on the available CPU, Metal, or CUDA device, verifies
+trained-weight drift, and writes a hardware-fingerprinted policy only when an alternative is at least 15% faster.
+Stale or absent profiles preserve the process-pool path. Population training uses adaptive microbatches and
+falls back to the semantically identical serial operator on recognized allocator failures. Library I/O is cached
+and hot stats writes are deferred to one flush per task; structural admissions stay immediately durable.
 
 On the prior art: CoDeepNEAT's two-population idea survives here as compositions-referencing-species and fitness
 attribution; WANN's weight-agnostic insight survives as the robustness metric and the `weight_samples`/`hybrid`
@@ -185,10 +197,12 @@ ardevo/
 ├── substrate_batched.py# BatchedGraphNet: the whole population as one padded tensor program
 ├── temporal.py         # TemporalEncoder + adapter: rebuild the TIME axis for the stepped substrate
 ├── evaluation.py       # score a substrate on a Task via the Icarus encoder/loss
+├── structured.py       # support-only variable-grid canvas, learned shape rule, exact/baseline metrics
 ├── decompose.py        # DECOMPOSE registry: split a Task into valid subtasks with port wiring specs
 ├── library.py          # the persistent search space: module/composition entries, signatures, grafting, GC
 ├── orchestrator.py     # the escalation-ladder policy: lookup -> refine -> evolve -> decompose -> admit
-├── strategy.py         # EVOLVE_STRATEGY registry: routed / direct / composition
+├── strategy.py         # EVOLVE_STRATEGY registry: routed / grammar / direct / composition
+├── grammar.py          # independently-supported motif grammar, program variation, compilation
 ├── routing.py          # the overmind: sparse MoE over frozen library entries, distillation, persistence
 ├── motifs.py           # motif census: canonical substructure mining across the library
 ├── checkpoint.py       # serialize/restore orchestrated runs for --resume
@@ -199,11 +213,12 @@ ardevo/
 │   ├── net_gallery.py      # uv run render: re-render the library (+ --overmind portrait)
 │   ├── library_gc.py       # uv run library_gc: mark-and-sweep unreferenced tombstones
 │   ├── motif_census.py     # uv run motif_census: the motif report + atlas
-│   └── bench_throughput.py # uv run benchmark: measured throughput truths
+│   ├── bench_throughput.py # uv run benchmark: measured throughput truths
+│   └── runtime_inventory.py # deterministic canonical-surface manifest/check
 ├── trials/
 │   └── orchestrated_trial.py # OrchestratedTrial(Proctor): the run loop, observability, resume
 ├── utils/
-│   ├── config.py       # configs/orchestrated_overmind.toml -> runtime dict
+│   ├── config.py       # canonical all-features TOML -> runtime dict
 │   ├── pipelines.py    # ClearML task + machine->queue + trial orchestration
 │   ├── proctor.py      # base trial: logging, device, artifacts
 │   └── logging.py      # Rich logger / console
