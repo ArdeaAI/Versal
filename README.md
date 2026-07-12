@@ -103,11 +103,12 @@ at zero cost, so evolution populates the vertex set first.
 
 `uv run render --overmind` draws the whole routed model to `library/images/overmind.png` as a top-down flow
 grid: input-adapter band up top, every expert a fully-embedded cell, output heads across the bottom, edges
-widthed by observed lifetime gate traffic. A gold dot at each cell's top-left is its network ingress anchor:
-cross-network routes and structural references terminate there instead of obscuring the embedded network;
-input/output feeds and internal edges retain their ordinary endpoints. Per-entry renders are recursive and dark:
-nested networks draw fully inside translucent callout boxes green-lined to their footprints, and every render
-failure degrades to a labeled opaque box, never an exception.
+widthed by observed lifetime gate traffic. A gold dot at each card's top-left is its network input anchor.
+Global inputs and inter-network or recurrent routes enter there; routes and final-output feeds leave from the
+rendered network's actual output nodes. Nested execution is explicit: a green line runs from the containing
+module/macro footprint node to the nested card's input anchor. Internal forward, recurrent, and glue edges stay
+node-to-node. The redundant dashed "built from" overlay is omitted. Every render failure degrades to a labeled
+opaque box, never an exception.
 
 ## Motif census
 

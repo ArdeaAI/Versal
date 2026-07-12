@@ -62,22 +62,28 @@ def test_genome_spec_expands_macro_as_callout(tmp_path: Path, solving_genome: Ge
     container = spec.containers[0]
     assert not container.opaque
     assert key in container.label and "L1" in container.label
-    # All 5 host nodes (the stub stays, as the macro's green footprint) + the 6 inner nodes.
-    assert spec.node_count == 5 + len(solving_genome.nodes)
+    # All 5 host nodes (the stub stays, as the macro's green footprint), the inner nodes, and the
+    # gold input anchor on the nested network card.
+    assert spec.node_count == 5 + len(solving_genome.nodes) + 1
     # Inner edges + the host readout (stub -> output) + 2 implied macro edges + 1 green callout line.
     assert len(spec.edges) == len(solving_genome.enabled_connections()) + 1 + 2 + 1
     assert any(edge.color == THEME["edge_macro"] for edge in spec.edges)
     # The callout box sits ABOVE the host network, green-lined to the footprint stub.
     callout_lines = [edge for edge in spec.edges if edge.color == THEME["edge_callout"]]
     footprints = [node for node in spec.nodes if node.color == THEME["node_module"]]
+    anchors = [node for node in spec.nodes if node.color == THEME["node_anchor"]]
     assert len(callout_lines) == 1 and len(footprints) == 1
+    assert len(anchors) == 1
+    assert (anchors[0].x, anchors[0].y) == pytest.approx((container.x0 + 0.3, container.y1 - 0.3))
+    assert (callout_lines[0].x0, callout_lines[0].y0) == pytest.approx((footprints[0].x, footprints[0].y))
+    assert (callout_lines[0].x1, callout_lines[0].y1) == pytest.approx((anchors[0].x, anchors[0].y))
     assert container.y0 > footprints[0].y
 
 
 def test_macro_missing_ref_is_opaque_box(solving_genome: Genome) -> None:
     spec = build_genome_spec(_macro_host("m1_gone"), resolve=lambda key: None)
     assert len(spec.containers) == 1 and spec.containers[0].opaque
-    assert spec.node_count == 5  # host only (incl the footprint stub), nothing expanded
+    assert spec.node_count == 6  # host incl. footprint stub + the opaque nested card's input anchor
     assert len(spec.edges) == 1 + 2 + 1  # readout + implied macro edges + the green callout line
 
 
@@ -316,21 +322,26 @@ def test_overmind_fresh_library_draws_uniform_feeds() -> None:
     exit_edges = [edge for edge in spec.edges if edge.color == THEME["edge_exit"]]
     assert len(entry_edges) == 3 and len(exit_edges) == 3
     assert all(edge.width == 0.8 for edge in entry_edges + exit_edges)  # uniform thin: the flow story on day one
+    anchors = {(node.x, node.y) for node in spec.nodes if node.color == THEME["node_anchor"]}
+    assert {(edge.x1, edge.y1) for edge in entry_edges} == anchors
 
 
-def test_overmind_pathway_targets_card_anchor() -> None:
+def test_overmind_pathway_flows_from_card_output_to_input_anchor() -> None:
     from ardevo.rendering import THEME, build_overmind_spec
 
     view = _grid_view(2)
-    view.pathways = [(0, 1, 0.75)]
+    view.pathways = [(0, 1, 0.75), (1, 1, 0.5)]  # repeated selection is recurrent flow through one expert
     spec = build_overmind_spec(view, legend=False)
     cells = [box for box in spec.containers if box.depth == 1]
-    pathway = next(edge for edge in spec.edges if edge.color == THEME["edge_pathway"])
-    assert (pathway.x0, pathway.y0) == pytest.approx(((cells[0].x0 + cells[0].x1) / 2, (cells[0].y0 + cells[0].y1) / 2))
-    assert (pathway.x1, pathway.y1) == pytest.approx((cells[1].x0 + 0.3, cells[1].y1 - 0.3))
+    pathways = [edge for edge in spec.edges if edge.color == THEME["edge_pathway"]]
+    assert len(pathways) == 2
+    assert (pathways[0].x0, pathways[0].y0) == pytest.approx(((cells[0].x0 + cells[0].x1) / 2, cells[0].y0))  # opaque fallback has no rendered output node
+    assert (pathways[0].x1, pathways[0].y1) == pytest.approx((cells[1].x0 + 0.3, cells[1].y1 - 0.3))
+    assert (pathways[1].x0, pathways[1].y0) == pytest.approx(((cells[1].x0 + cells[1].x1) / 2, cells[1].y0))
+    assert (pathways[1].x1, pathways[1].y1) == pytest.approx((cells[1].x0 + 0.3, cells[1].y1 - 0.3))
 
 
-def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_genome: Genome) -> None:
+def test_overmind_nested_flow_runs_from_footprint_to_callout_anchor(tmp_path: Path, solving_genome: Genome) -> None:
     from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
 
     library = ModuleLibrary(tmp_path / "lib")
@@ -343,16 +354,30 @@ def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_geno
         d_model=8,
         top_k=1,
         max_steps=1,
+        pathways=[(0, 1, 0.75)],
     )
     spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
-    containment = [edge for edge in spec.edges if edge.color == THEME["edge_macro"] and edge.style == "dashed"]
-    assert len(containment) == 1  # host cell -> inner cell, dashed: structure, not traffic
-    cells = [box for box in spec.containers if box.depth == 1]
-    host_box = next(box for box in cells if box.label == "host")
-    inner_box = next(box for box in cells if box.label == "inner")
-    edge = containment[0]
-    assert (edge.x0, edge.y0) == pytest.approx(((host_box.x0 + host_box.x1) / 2, (host_box.y0 + host_box.y1) / 2))
-    assert (edge.x1, edge.y1) == pytest.approx((inner_box.x0 + 0.3, inner_box.y1 - 0.3))
+    assert not any(edge.color == THEME["edge_macro"] and edge.style == "dashed" for edge in spec.edges)
+    nested_box = next(box for box in spec.containers if box.depth > 1 and inner_key in box.label)
+    nested_anchor = next(node for node in spec.nodes if node.color == THEME["node_anchor"] and (node.x, node.y) == pytest.approx((nested_box.x0 + 0.3, nested_box.y1 - 0.3)))
+    flow = next(edge for edge in spec.edges if edge.color == THEME["edge_callout"])
+    footprint = next(node for node in spec.nodes if node.color == THEME["node_module"])
+    assert (flow.x0, flow.y0) == pytest.approx((footprint.x, footprint.y))
+    assert (flow.x1, flow.y1) == pytest.approx((nested_anchor.x, nested_anchor.y))
+
+    host_box = next(box for box in spec.containers if box.depth == 1 and box.label == "host")
+    inner_box = next(box for box in spec.containers if box.depth == 1 and box.label == "inner")
+    host_output = next(
+        node
+        for node in spec.nodes
+        if node.color == THEME["node_output"]
+        and host_box.x0 < node.x < host_box.x1
+        and host_box.y0 < node.y < host_box.y1
+        and not (nested_box.x0 < node.x < nested_box.x1 and nested_box.y0 < node.y < nested_box.y1)
+    )
+    pathway = next(edge for edge in spec.edges if edge.color == THEME["edge_pathway"])
+    assert (pathway.x0, pathway.y0) == pytest.approx((host_output.x, host_output.y))
+    assert (pathway.x1, pathway.y1) == pytest.approx((inner_box.x0 + 0.3, inner_box.y1 - 0.3))
 
 
 def test_overmind_legend_populates_texts_and_widens() -> None:
@@ -364,8 +389,9 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     labels = [text.text for text in keyed.texts]
     assert "key" in labels
     expected_labels = ("routing traffic (observed)", "input feed (step-0 gate mass)", "output feed (final-step gate mass)", "recurrent (time-delayed)")
-    for expected in expected_labels + ("built from (structural ref)", "network ingress anchor"):
+    for expected in expected_labels + ("network input anchor", "nested-network flow"):
         assert expected in labels
+    assert "built from (structural ref)" not in labels
 
 
 def test_spec_text_draws() -> None:
