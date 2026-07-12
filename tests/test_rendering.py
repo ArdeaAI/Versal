@@ -314,6 +314,33 @@ def test_overmind_grid_bands_and_rows() -> None:
     assert "IN_2" in band_labels and "OUT_1" in band_labels
 
 
+def test_overmind_default_grid_keeps_order_at_eight_across() -> None:
+    from ardevo.rendering import build_overmind_spec
+
+    spec = build_overmind_spec(_grid_view(9), legend=False)
+    cells = [box for box in spec.containers if box.depth == 1]
+    row_tops = sorted({round(box.y1, 6) for box in cells}, reverse=True)
+    first_row = sorted((box for box in cells if round(box.y1, 6) == row_tops[0]), key=lambda box: box.x0)
+    second_row = sorted((box for box in cells if round(box.y1, 6) == row_tops[1]), key=lambda box: box.x0)
+    assert [box.label for box in first_row] == [f"v{index}" for index in range(8)]
+    assert [box.label for box in second_row] == ["v8"]
+
+
+def test_overmind_render_uses_double_resolution_and_wider_sides(monkeypatch, tmp_path: Path) -> None:
+    import ardevo.rendering as rendering
+
+    captured: dict[str, float | int] = {}
+
+    def capture(path, _spec, _title, **kwargs):
+        captured.update(kwargs)
+        return path
+
+    monkeypatch.setattr(rendering, "_render_spec_png", capture)
+    out_path = tmp_path / "overmind.png"
+    assert rendering.render_overmind(out_path, _grid_view(1)) == out_path
+    assert captured == {"dpi": 300, "x_padding": 1.8}
+
+
 def test_overmind_fresh_library_draws_uniform_feeds() -> None:
     from ardevo.rendering import THEME, build_overmind_spec
 

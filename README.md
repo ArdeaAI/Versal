@@ -28,6 +28,7 @@ uv run app                                        # the orchestrated overmind ru
 uv run app --config configs/preflight.toml        # 180-task MonadMetal/ClearML production canary
 uv run app --resume results/<ts>_orchestrated     # continue a run from its rolling checkpoint
 uv run render --overmind                          # re-render the library + the routed model portrait
+nice -n 20 uv run render --config configs/preflight.toml --metadata-overmind --images /tmp/ardevo-overmind-preview
 uv run motif_census --render                      # mine recurring motifs -> library/motifs.json + atlas
 uv run rung_doctor --rungs 1-18 --n-tasks 2       # probe rung loadability/shapes without a run
 uv run library_gc --dry-run                       # sweep unreferenced tombstones (prunes dead router vertices)
@@ -107,8 +108,14 @@ widthed by observed lifetime gate traffic. A gold dot at each card's top-left is
 Global inputs and inter-network or recurrent routes enter there; routes and final-output feeds leave from the
 rendered network's actual output nodes. Nested execution is explicit: a green line runs from the containing
 module/macro footprint node to the nested card's input anchor. Internal forward, recurrent, and glue edges stay
-node-to-node. The redundant dashed "built from" overlay is omitted. Every render failure degrades to a labeled
-opaque box, never an exception.
+node-to-node. The redundant dashed "built from" overlay is omitted. Cards retain their traffic-first order in
+eight-column rows; the canvas remains content-sized, writes at 300 DPI, and carries extra horizontal margin for
+large curves. Every render failure degrades to a labeled opaque box, never an exception.
+
+During a live campaign, `--metadata-overmind` is the isolated preview path: `--config` resolves its
+configured `library_dir`, entry/gallery renders are skipped, `router_state.pt` is never loaded, and only
+the requested `--images` directory is written. It preserves the last saved vertex and traffic metadata;
+new experts or latent ordering not yet present in `router_meta.json` wait for the next router save.
 
 ## Motif census
 

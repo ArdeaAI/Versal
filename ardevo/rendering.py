@@ -573,7 +573,7 @@ def build_entry_spec(entry: LibraryEntry, *, resolve: ResolveFn | None = None, n
 # --- painting --------------------------------------------------------------------------------------
 
 
-def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None) -> None:
+def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_padding: float = _PAD) -> None:
     """Paint a spec onto a matplotlib axis (single renders and gallery cells share this path)."""
     import matplotlib
 
@@ -661,7 +661,7 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None) -> None:
             zorder=3,
         )
 
-    axis.set_xlim(-_PAD, spec.width + _PAD)
+    axis.set_xlim(-x_padding, spec.width + x_padding)
     axis.set_ylim(-_PAD, spec.height + _PAD)
     axis.set_aspect("equal")
     axis.axis("off")
@@ -669,7 +669,7 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None) -> None:
         axis.set_title(title, fontsize=11, color=THEME["title"])
 
 
-def _render_spec_png(out_path: Path, spec: RenderSpec, title: str) -> Path:
+def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int = 150, x_padding: float = _PAD) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -682,10 +682,10 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str) -> Path:
     fig_h = max(spec.height * 0.6 * scale, 4.0)
     figure, axis = plt.subplots(figsize=(fig_w, fig_h))
     figure.patch.set_facecolor(THEME["background"])
-    draw_spec(axis, spec, title=title)
+    draw_spec(axis, spec, title=title, x_padding=x_padding)
     figure.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(out_path, dpi=150, facecolor=figure.get_facecolor())
+    figure.savefig(out_path, dpi=dpi, facecolor=figure.get_facecolor())
     plt.close(figure)
     return out_path
 
@@ -908,6 +908,9 @@ _BAND_GAP = 2.5  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
 _LEGEND_ROW_STEP = 1.1
 _LEGEND_WIDTH = 16.0
+_OVERMIND_COLUMNS = 8
+_OVERMIND_DPI = 300
+_OVERMIND_X_PADDING = 2 * _PAD
 
 
 def _overmind_legend_entries() -> list[tuple[str, dict[str, Any], str]]:
@@ -953,7 +956,13 @@ def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tu
 
 
 def build_overmind_spec(
-    view: OvermindView, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET, cell_node_budget: int = 160, columns: int = 4, legend: bool = True
+    view: OvermindView,
+    *,
+    resolve: ResolveFn | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    cell_node_budget: int = 160,
+    columns: int = _OVERMIND_COLUMNS,
+    legend: bool = True,
 ) -> RenderSpec:
     """The whole routed model as a top-down flow portrait: input adapters band across the TOP, every
     expert a fully-embedded cell in a `columns`-wide grid (row order = observed firing order, so an
@@ -1082,4 +1091,4 @@ def render_overmind(out_path: Path, view: OvermindView, *, library: ModuleLibrar
     spec = build_overmind_spec(view, resolve=resolve, node_budget=node_budget)
     live = sum(1 for vertex in view.vertices if not vertex.retired)
     title = f"overmind: {live} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
-    return _render_spec_png(out_path, spec, title)
+    return _render_spec_png(out_path, spec, title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)

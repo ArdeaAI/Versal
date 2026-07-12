@@ -410,8 +410,8 @@ elitism = 1
   max_inline_depth = 4
   glue_rank = 8               # NEW glue factorizes to rank 8 when in*out exceeds the threshold
   glue_rank_threshold = 4096  # (a width-784 dense edge is 614k floats; rank 8 is 12.5k)
-  max_initial_glue_values = 5000000  # decline any candidate whose exact tuple-backed glue allocation
-                                     # exceeds this cap before population construction or distillation
+  max_initial_glue_values = 5000000 # decline any candidate whose exact tuple-backed glue allocation
+                                    # exceeds this cap before population construction or distillation
   catalog_width_tolerance = -1  # -1 = expose every library entry to comp mutations (glue adapts)
     [evolution.composition.selection]
     kind = "tournament"
