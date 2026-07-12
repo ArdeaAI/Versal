@@ -1,0 +1,268 @@
+{
+  "key": "m2_2d2c9e702fa3",
+  "entry_type": "module",
+  "level": 2,
+  "io": {
+    "inputs": [
+      {
+        "signature": "BINARY|C",
+        "width": 8
+      }
+    ],
+    "output": {
+      "signature": "BINARY|C",
+      "width": 1
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 0,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 1,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 3,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 4,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 5,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 6,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 7,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 8,
+        "kind": "bias",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 9,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2369,
+        "kind": "hidden",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2513,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": null,
+        "aggregation": "sum"
+      }
+    ],
+    "connections": [
+      {
+        "in": 0,
+        "out": 9,
+        "weight": 0.5127382278442383,
+        "enabled": true,
+        "innovation": 0,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 9,
+        "weight": 0.2645266652107239,
+        "enabled": true,
+        "innovation": 1,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 9,
+        "weight": 0.0393008291721344,
+        "enabled": true,
+        "innovation": 2,
+        "recurrent": false
+      },
+      {
+        "in": 3,
+        "out": 9,
+        "weight": -0.9798978567123413,
+        "enabled": true,
+        "innovation": 3,
+        "recurrent": false
+      },
+      {
+        "in": 4,
+        "out": 9,
+        "weight": 0.32362785935401917,
+        "enabled": true,
+        "innovation": 4,
+        "recurrent": false
+      },
+      {
+        "in": 5,
+        "out": 9,
+        "weight": 1.0647975206375122,
+        "enabled": true,
+        "innovation": 5,
+        "recurrent": false
+      },
+      {
+        "in": 6,
+        "out": 9,
+        "weight": 8.292374695884064e-05,
+        "enabled": false,
+        "innovation": 6,
+        "recurrent": false
+      },
+      {
+        "in": 7,
+        "out": 9,
+        "weight": -8.248533049481921e-06,
+        "enabled": false,
+        "innovation": 7,
+        "recurrent": false
+      },
+      {
+        "in": 8,
+        "out": 9,
+        "weight": 0.27457064390182495,
+        "enabled": true,
+        "innovation": 8,
+        "recurrent": false
+      },
+      {
+        "in": 2369,
+        "out": 9,
+        "weight": 1.3395915031433105,
+        "enabled": true,
+        "innovation": 9677,
+        "recurrent": false
+      },
+      {
+        "in": 2369,
+        "out": 2513,
+        "weight": -2.5924952030181885,
+        "enabled": true,
+        "innovation": 10300,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 2513,
+        "weight": -2.2101361751556396,
+        "enabled": true,
+        "innovation": 10301,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 2513,
+        "weight": -1.3916666507720947,
+        "enabled": true,
+        "innovation": 10302,
+        "recurrent": false
+      },
+      {
+        "in": 0,
+        "out": 2513,
+        "weight": -1.6623649597167969,
+        "enabled": true,
+        "innovation": 10303,
+        "recurrent": false
+      },
+      {
+        "in": 2513,
+        "out": 9,
+        "weight": 3.7767391204833984,
+        "enabled": true,
+        "innovation": 10304,
+        "recurrent": false
+      }
+    ],
+    "macros": [
+      {
+        "ref": "library:m1_f177fc096797",
+        "inputs": [
+          5,
+          3,
+          0,
+          4,
+          1,
+          7,
+          2,
+          6
+        ],
+        "outputs": [
+          2369
+        ],
+        "innovation": 9676,
+        "trainable": false
+      }
+    ],
+    "refine_steps": 1
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "parity.n6.b0",
+    "rung": 2,
+    "depth": 0,
+    "strategy": "direct",
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.23076923191547394,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ]
+  },
+  "stats": {
+    "use_count": 295,
+    "max_attributed_fitness": 3.1309829374728175
+  }
+}
