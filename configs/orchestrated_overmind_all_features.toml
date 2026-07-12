@@ -1,27 +1,48 @@
 # THE main orchestrated ladder (configs/orchestrated_overmind.toml) with the WHOLE phase-9 /
-# gate-E feature stack switched ON at once. Everything the base run does is unchanged EXCEPT the
-# five new levers below; flip any one back to its base value to A/B it in isolation.
+# gate-E feature stack switched ON at once, MERGED (2026-07-12) with the wall-survival levers
+# proven by configs/smoke_all_rungs.toml, for full-ladder overnight campaigns.
 #
+# The gate-E search stack (unchanged):
 #   1. sin/gaussian activation palette          (already on in the base config)
 #   2. NSGA-II + novelty + connection_cost      Pareto multi-objective (the G1 flip)
 #   3. gradient_scheduled on the direct path     warmup + cosine that defeats the training-time valley
 #   4. cppn generative init                      per-member pair-query generators, structural diversity from gen 0
 #   5. self-adaptive per-genome mutation rates   ES perturb-and-inherit; rates adapt per problem
 #
+# The smoke wall levers (merged in, marked MERGE below):
+#   6. decompose_first_above                     oversize tasks decompose BEFORE any flat attempt
+#   7. max_init_genes + max_flat_outputs         direct declines wedge-class tasks (the recon-wedge net)
+#   8. prune_and_regrow                          SET rewiring at constant density
+#   9. add_library_module DROPPED                the one uncapped library-grafting mutator (the 25-min
+#                                                BPTT blowup channel, 2026-07-07); add_macro_node STAYS
+#                                                because its k/m node-count filter already excludes wide
+#                                                entries. Restore add_library_module once a size budget
+#                                                on library-reading mutators exists.
+#  10. pool sized for an 18-rung load            tasks_per_rung/tasks/n_samples cut so startup can hold
+#                                                rungs 12-14 in memory (100x400 was never loaded; the
+#                                                arrow 2 GB chunk limit + require_all_rungs would abort)
+#
+# Deliberately NOT taken from smoke (the smoke value was probe economics, not a feature):
+#   init stays cppn (not factored), direct train stays gradient_scheduled at 160 steps (not
+#   gradient_refine at 20), pop_size stays 64, budgets stay 240/120/80, floor 0.35, max_depth 2,
+#   refine budget_k 24 (learn mode), decompose_solvability_floor 0.6, shared persistent library.
+#
 # CAVEATS worth reading before a long run:
 #   - cppn init trades grow-from-minimal for generative diversity: every fresh module/direct seed
 #     starts with hidden nodes, so easy rungs (1-2) pay a complexity/hidden penalty they did not
-#     before. Its DESIGNED payoff is the rungs 11-14 dense-bipartite init wall, which the default
-#     rungs 1-5 schedule never reaches (set [schedule] rungs = "all" to exercise it). Revert with
-#     [evolution.init] kind = "minimal" if low-rung solve rates drop.
+#     before. Its DESIGNED payoff is the wide-rung init wall (and it is the reason the 2026-07-11
+#     ARC run survived init at 900->9000). Revert with [evolution.init] kind = "minimal" if
+#     low-rung solve rates drop.
 #   - gradient_scheduled REPLACES gradient_refine on the direct path, so refine_steps>1 genomes lose
-#     per-pass deep supervision there (they still train, just with a final-pass loss). The base
-#     config keeps gradient_refine; this variant bets the valley fix matters more on the two-spirals
-#     class than TRM deep supervision does.
+#     per-pass deep supervision there (they still train, just with a final-pass loss).
 #   - NSGA-II mildens the hierarchical module pool's selection to a deterministic binary tournament
 #     (the scalar-degradation path), since the loop never enters the Pareto block.
+#   - Wide flat attempts under pop 64 x 160 steps can burn a whole 600 s budget on ONE generation
+#     (measured on rung 18, ai/arc_report.md); the merge relies on decompose-first + the decline
+#     guards to route those rungs away from flat evolution instead.
 #
 #   uv run app --config configs/orchestrated_overmind_all_features.toml
+#   uv run app --resume results/<ts>_orchestrated     # continue after a Ctrl-C
 
 [run]
 project = "ardevo"
@@ -43,18 +64,25 @@ live_status = true            # pinned Rich footer with the live task/generation
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 400
+n_samples = 128               # MERGE: the whole pool loads into memory at startup and rung 14
+                              # (psicov, per-task up to 5.1M inputs) scales as samples x width;
+                              # 400 x 100-per-rung was never loaded and risks the arrow 2 GB chunk
+                              # limit aborting under require_all_rungs. 128 keeps low-rung fits
+                              # honest (support 102 / query 26) while bounding the heavy rungs.
+                              # Smoke ran the ladder at 48; the flagship rungs 1-6 anchor used 400.
 support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
 rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 100
+tasks_per_rung = 8            # MERGE: 8 x 18 rungs = 144 pool tasks; at the 600 s cap plus
+                              # decompose recursion an overnight covers a few full interleave
+                              # cycles, and the run resumes from its checkpoint for the rest
 shuffle = true
 
 [orchestrator]
-tasks = 400                    # how many scheduled tasks this run attempts
+tasks = 144                   # how many scheduled tasks this run attempts (= the whole pool)
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall
@@ -68,6 +96,9 @@ max_task_seconds = 600        # per-attempt wall-clock budget: past it the runni
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
 library_dir = "library"       # persistent across runs: delete it to start the search space cold
+decompose_first_above = 2000000   # MERGE: a task whose dense-init gene estimate exceeds this runs
+                              # DECOMPOSE before any flat attempt (rungs 11-14, 17, 18), the route
+                              # that produced smoke's first production decomposition (cosmic 0.986)
 evolve = ["routed", "direct", "composition"]   # routed goes FIRST: a zero-shot clear costs 0 generations
                                      # and a miss charges only generation_cost before direct takes over
                                      # (config order, first success wins, unspent budget rolls on).
@@ -152,6 +183,11 @@ decompose_probe_generations = 6     # short evolve to probe each subtask before 
   assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
                               # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
                               # (independent genomes, rng-free training); the dominant run cost.
+  max_flat_outputs = 4096     # MERGE: the [n, h] dense-column guard; wider outputs decline direct
+                              # and escalate to composition, whose glue is already rank-factored
+  max_init_genes = 2000000    # MERGE: decline any direct attempt above the dense-init gene cap
+                              # (the recon-wedge net: rung 17 wedged two runs inside init where no
+                              # deadline check exists; a task that slips decompose-first stops here)
     [orchestrator.direct.train]  # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
                                  # cosine decay to 5% of it. Fixed-lr Adam stalls in the oscillatory
                                  # loss regions of the two-spirals class; the schedule anneals through
@@ -246,7 +282,30 @@ elitism = 1
   # remove_connection / remove_hidden_node: the structural SHRINK moves (true gene deletion, not
   # toggle-disable), so a lineage can climb back down in size. Self-adaptive seeds like every
   # other rate: they rise where pruning pays and sink to the floor where it hurts.
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node"]
+  # MERGE: add_library_module is DROPPED on the mixed-width ladder. It inlines a random library
+  # entry with NO size filter, and this shared library already holds 9,905-node ARC stones: grafted
+  # into a small temporal genome, one candidate becomes a 25-minute, tens-of-GB BPTT backward the
+  # between-generations deadline cannot reach (observed twice, 2026-07-07). add_macro_node STAYS:
+  # its candidate filter (inner input nodes <= host sources, output nodes <= max_outputs, macro
+  # depth cap) already excludes wide entries. prune_and_regrow joins (SET rewiring at constant
+  # density, the partner to the sparse cppn seeds).
+  operators = [
+    "add_rich_node", 
+    "add_deep_node", 
+    "add_connection", 
+    "toggle_connection", 
+    "mutate_activation", 
+    "mutate_aggregation", 
+    "add_recurrent_connection", 
+    "add_macro_node", 
+    "tweak_refine_steps", 
+    "add_local_node", 
+    "add_local_connection", 
+    "add_shared_motif", 
+    "remove_connection", 
+    "remove_hidden_node", 
+    "prune_and_regrow"
+  ]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -258,7 +317,6 @@ elitism = 1
   mutate_aggregation_prob = 0.05
   mutate_aggregation_max_fan_in = 4
   add_recurrent_connection_prob = 0.04
-  add_library_module_prob = 0.05
   add_macro_node_prob = 0.05
   add_macro_node_max_outputs = 16
   tweak_refine_steps_prob = 0.06   # TRM lever: nudge per-genome refinement depth (paired with recurrence)
@@ -274,6 +332,8 @@ elitism = 1
   add_shared_motif_copies = 2
   remove_connection_prob = 0.05
   remove_hidden_node_prob = 0.05
+  prune_and_regrow_prob = 0.1       # MERGE: magnitude-prune the weakest fraction, regrow the same
+  prune_and_regrow_fraction = 0.05  # count elsewhere (strictly forward in one topo order = acyclic)
   [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
                               # steps must tune a freshly-grown candidate enough for its capacity to
                               # show BEFORE it competes (champions are never re-trained); weight_decay
