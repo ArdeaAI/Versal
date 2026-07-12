@@ -11,6 +11,7 @@ import torch
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.composition import comp_to_dict, minimal_composition
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from ardevo.evolution.loop import AssessedComposition
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
 from ardevo.orchestrator import comp_task_spec
 from ardevo.routing import RoutedNet, RoutedTaskView, RouterService, build_vertex, sanitize_key
@@ -217,6 +218,46 @@ def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, s
     assert result.metric == 0.0 and result.champion_comp is None and result.champion_routed is None
     assert result.champion_metrics["routed_undistillable"] == 1.0
     assert result.champion_metrics["routed_metric"] >= 0.2  # the router-space win is kept as a diagnostic
+    assert "support_accuracy" not in result.champion_metrics
+    assert not orchestrator._accepts_result(result)
+
+
+def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    from ardevo.routing import RoutedStrategy
+
+    torch.manual_seed(0)
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.95, "decompose": []})
+    planted = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    strategy = RoutedStrategy(library_dir=str(tmp_path / "lib"), d_model=16, top_k=1, max_steps=2, train_steps=1, persist=False)
+    service = strategy._service(orchestrator.library)
+    service.sync(include_compositions=True, exclude_temporal=True)
+    view, _x, _width = _task_view(service.net, xor_task)
+    spec = comp_task_spec(xor_task)
+    comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, orchestrator.state.comp_innovations, orchestrator.state.rng)
+    payload_metrics = {"support_accuracy": 0.25, "support_loss": 1.0, "query_accuracy": 0.25, "query_loss": 1.0}
+    assessed = AssessedComposition(comp=comp, metrics=payload_metrics, fitness=0.25, net=None)
+    monkeypatch.setattr(strategy, "_dominant_pathway", lambda _view: [[planted]])
+    monkeypatch.setattr(strategy, "_verify_distilled", lambda _pathway, _spec, _runtime: assessed)
+
+    result = strategy._resolve_win(
+        xor_task,
+        spec,
+        orchestrator._runtime(),
+        service,
+        view,
+        {"support_accuracy": 1.0, "support_loss": 0.0, "query_accuracy": 1.0, "query_loss": 0.0},
+        1.0,
+        zero_shot=False,
+        steps_used=1,
+        generations_used=10,
+    )
+
+    assert result.champion_comp is assessed
+    assert result.metric == 0.25
+    assert result.champion_metrics["support_accuracy"] == 0.25
+    assert result.champion_metrics["routed_metric"] == 1.0
+    assert result.champion_metrics["routed_distilled_metric"] == 0.25
+    assert not orchestrator._accepts_result(result)
 
 
 def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:

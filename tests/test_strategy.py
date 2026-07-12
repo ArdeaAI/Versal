@@ -93,6 +93,50 @@ def test_evolve_runs_strategies_in_order_with_budget_carry(tmp_path: Path, xor_t
     assert attempt.outcome == "evolved" and attempt.strategy == "stub_high" and attempt.generations == 2
 
 
+def test_metric_only_routed_miss_escalates_to_an_admissible_strategy(tmp_path: Path, xor_task: Task) -> None:
+    calls: list[str] = []
+
+    @EVOLVE_STRATEGY.register("stub_undistillable_routed")
+    def _build_undistillable(config: dict):
+        def run(task, spec, runtime, *, budget, seed_comps=None) -> StrategyResult:
+            calls.append("routed")
+            return StrategyResult(
+                strategy="routed",
+                metric=0.2,
+                generations_used=1,
+                champion_metrics={"support_accuracy": 1.0, "query_accuracy": 1.0, "routed_undistillable": 1.0},
+            )
+
+        return run
+
+    @EVOLVE_STRATEGY.register("stub_after_routed")
+    def _build_after_routed(config: dict):
+        def run(task, spec: CompTaskSpec, runtime, *, budget, seed_comps=None) -> StrategyResult:
+            calls.append("composition")
+            from ardevo.evolution.composition import minimal_composition
+
+            comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, runtime.state.comp_innovations, runtime.state.rng)
+            metrics = {"support_accuracy": 1.0, "support_loss": 0.0, "query_accuracy": 1.0, "query_loss": 0.0}
+            champion = AssessedComposition(comp=comp, metrics=metrics, fitness=1.0, net=None)
+            return StrategyResult(strategy="composition", metric=1.0, generations_used=1, champion_comp=champion, champion_metrics=metrics)
+
+        return run
+
+    table = {
+        "evolve": ["stub_undistillable_routed", "stub_after_routed"],
+        "evolve_budget": {"stub_undistillable_routed": 1.0, "stub_after_routed": 1.0},
+        "budgets": {"depth0": 4},
+        "decompose": [],
+    }
+    orchestrator = _orchestrator(tmp_path, table=table)
+
+    solution = orchestrator.solve(xor_task)
+
+    assert calls == ["routed", "composition"]
+    assert solution is not None and solution.entry_type == "composition"
+    assert orchestrator.attempts[-1].strategy == "composition"
+
+
 def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Path, xor_task: Task) -> None:
     table = {"evolve": ["direct"], "accept_threshold": 0.2, "decompose": [], "budgets": {"depth0": 3}, "direct": {"pop_size": 12, "elitism": 2}}
     orchestrator = _orchestrator(tmp_path, table=table)

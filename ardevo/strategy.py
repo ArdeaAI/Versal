@@ -76,6 +76,12 @@ class StrategyResult:
     # free-growth arm hit hour-scale tasks with zero size signal in any record).
     size_metrics: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def has_admissible_champion(self) -> bool:
+        """Whether this result carries an executable payload that can satisfy the solve contract."""
+
+        return self.champion_comp is not None or self.champion_genome is not None or self.champion_routed is not None
+
 
 def _module_size_metrics(champion: Genome, population: list[Assessed]) -> dict[str, float]:
     """Champion plus final-population genome size. The population medians are what show a

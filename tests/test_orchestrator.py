@@ -163,6 +163,21 @@ def test_held_out_report_cannot_replace_search_robustness(tmp_path: Path, xor_ta
     assert attached.champion_comp is search
 
 
+def test_passing_metrics_without_an_executable_payload_are_never_accepted() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator.accept_metric = "support_task_appropriate"
+    orchestrator.accept_threshold = 0.95
+    result = StrategyResult(
+        "routed",
+        metric=0.1,
+        generations_used=10,
+        champion_metrics={"support_accuracy": 1.0, "support_task_exact": 1.0, "routed_undistillable": 1.0},
+    )
+
+    assert not result.has_admissible_champion
+    assert not orchestrator._accepts_result(result)
+
+
 def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     calls: list[str] = []

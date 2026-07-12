@@ -553,7 +553,10 @@ class Orchestrator:
                 return outcome
             if remaining <= 0:
                 break
-        return max(results, key=lambda item: item.metric)
+        # Metric-only diagnostics (for example an adapter-space routed score whose pathway could
+        # not be distilled) must not displace a real below-bar champion that the wall ledger can
+        # preserve. When every strategy declined, the metric remains a useful failure diagnostic.
+        return max(results, key=lambda item: (item.has_admissible_champion, item.metric))
 
     # --- learn-mode refinement of library hits --------------------------------------------------------
 
@@ -1176,7 +1179,10 @@ class Orchestrator:
         return self._accepts_metrics(item.metrics)
 
     def _accepts_result(self, result: StrategyResult) -> bool:
-        return self._accepts_metrics(result.champion_metrics)
+        # A score is not a solution unless the strategy can hand admission an executable payload.
+        # This defense is intentionally strategy-agnostic: declined guards, empty grammars, and
+        # undistillable router wins all use metric-only StrategyResults to continue the ladder.
+        return result.has_admissible_champion and self._accepts_metrics(result.champion_metrics)
 
     def _report(self, item: Any) -> float:
         return self._report_value(item.metrics) or 0.0

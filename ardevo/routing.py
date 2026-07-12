@@ -933,17 +933,28 @@ class RoutedStrategy:
                 size_metrics=comp_size_metrics(assessed.comp),
             )
 
-        # Adapter bypass or an unverifiable pathway: what the system can KEEP is the metric that
-        # counts, so this reports as a miss and the ladder escalates to the evolutionary strategies.
-        stamped = dict(metrics)
+        # Adapter bypass or a pathway below the solve bar: what the system can KEEP is the metric
+        # that counts, so this reports as a miss and the ladder escalates. If assembly succeeded,
+        # retain that real below-bar composition for loser ranking and the wall ledger; never expose
+        # the router adapter's winning support metrics as if they belonged to the distilled payload.
+        stamped = dict(assessed.metrics) if assessed is not None else {}
         stamped["routed_undistillable"] = 1.0
         stamped["routed_metric"] = float(metric)
+        stamped["routed_distilled_metric"] = float(distilled_metric)
+        stamped["routed_zero_shot_metric"] = float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0))
         stamped["routed_steps_used"] = float(steps_used)
         service.record_task(
             {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": False}
         )
         logger.info("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
-        return StrategyResult(strategy=self.name, metric=float(distilled_metric), generations_used=generations_used, champion_metrics=stamped)
+        return StrategyResult(
+            strategy=self.name,
+            metric=float(distilled_metric),
+            generations_used=generations_used,
+            champion_comp=assessed,
+            champion_metrics=stamped,
+            size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
+        )
 
     def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
         """Per routing step, the ORIGINAL library keys whose mean gate weight over the support batch
