@@ -217,8 +217,7 @@ def make_fig1() -> None:
     draw_arrow(ax, (60, 25.5), (65, 26.5))
     arrow_label(ax, 62.3, 23.6, "stall", color="#444444")
     # Recursion loop back to the task, routed around the right and top edges.
-    recurse_style = {"color": "#444444", "linewidth": 1.0, "linestyle": (0, (4, 2)), "zorder": 1}
-    ax.plot([80.6, 99.0, 99.0, 8.0], [27.0, 27.0, 66.0, 66.0], **recurse_style)
+    ax.plot([80.6, 99.0, 99.0, 8.0], [27.0, 27.0, 66.0, 66.0], color="#444444", linewidth=1.0, linestyle=(0, (4, 2)), zorder=1)
     draw_arrow(ax, (8.0, 66.0), (8.0, 46.6), color="#444444", lw=1.0, ls=(0, (4, 2)))
     arrow_label(ax, 53.5, 67.9, "sub-tasks recurse (depth + 1); parent re-evolves over the sub-solutions", color="#444444")
 

@@ -27,6 +27,8 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 render_async = true           # admission/overmind PNGs draw on a background thread instead of
                               # blocking the run loop (flushed before uploads, GC, and run end)
 tf32 = false                  # opt-in TF32 CUDA matmuls: faster on Ampere+, changes numerics
+live_status = true            # pinned Rich footer with the live task/generation/budget state
+                              # (auto-off when stdout is not a terminal)
   [run.duration]
   generations = 1000          # informational; the orchestrated run is bounded by [orchestrator] tasks
 

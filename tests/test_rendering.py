@@ -168,6 +168,61 @@ def test_isolated_node_is_faint() -> None:
     assert len(faint) == 1 and faint[0].size == 0.5
 
 
+def test_small_genome_layout_pinned() -> None:
+    # Pins the pre-wrap column layout: layers below _MAX_COLUMN_NODES must place exactly as before
+    # the block-wrap change (fixed 2.6-unit column pitch, vertically centered stacks).
+    genome = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.INPUT, "identity"),
+            2: NodeGene(2, NodeKind.BIAS, "identity"),
+            3: NodeGene(3, NodeKind.OUTPUT, "identity"),
+            4: NodeGene(4, NodeKind.HIDDEN, "tanh"),
+        },
+        connections=[ConnectionGene(0, 4, 1.0, True, 0), ConnectionGene(4, 3, 1.0, True, 1), ConnectionGene(1, 3, 1.0, True, 2)],
+    )
+    spec = build_genome_spec(genome)
+    positions = {(round(node.x, 6), round(node.y, 6)) for node in spec.nodes}
+    assert positions == {(0.5, 3.9), (0.5, 2.2), (0.5, 0.5), (3.1, 2.2), (5.7, 2.2)}
+    assert (round(spec.width, 6), round(spec.height, 6)) == (6.2, 4.4)
+
+
+def test_wide_layer_wraps_into_block() -> None:
+    # The ARC-scale failure: a 2,000-node output layer must wrap into a near-square block instead of
+    # one 3,400-unit column that set_aspect("equal") crushes into a one-pixel vertical line.
+    n_in, n_out = 200, 2000
+    nodes = {i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(n_in)}
+    for j in range(n_out):
+        nodes[n_in + j] = NodeGene(n_in + j, NodeKind.OUTPUT, "identity")
+    connections = [ConnectionGene(j % n_in, n_in + j, 0.1, True, j) for j in range(n_out)]
+    spec = build_genome_spec(Genome(nodes=nodes, connections=connections))
+
+    assert spec.node_count == n_in + n_out
+    aspect = max(spec.width, spec.height) / min(spec.width, spec.height)
+    assert aspect < 5.0
+    output_columns = {round(node.x, 6) for node in spec.nodes if node.color == THEME["node_output"]}
+    assert len(output_columns) == 45  # ceil(sqrt(2000)) rows -> 45 sub-columns
+
+
+def test_draw_spec_caps_edge_count() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    from ardevo.rendering import _MAX_STRAIGHT_EDGES, RenderSpec, SpecEdge, draw_spec
+
+    count = _MAX_STRAIGHT_EDGES + 10_000
+    edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
+    figure, axis = plt.subplots()
+    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0))
+    drawn = sum(len(artist.get_segments()) for artist in axis.collections if isinstance(artist, LineCollection))
+    assert drawn <= _MAX_STRAIGHT_EDGES
+    assert any(f"{count:,}" in text.get_text() for text in axis.texts)  # the honesty note names the true total
+    plt.close(figure)
+
+
 # --- png renders -----------------------------------------------------------------------------------
 
 

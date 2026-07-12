@@ -37,13 +37,13 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = "all"                         # SMOKE: the whole ladder, 1-18
+rungs = "all"                         # "all" = SMOKE: the whole ladder, 1-18
 require_all_rungs = true
-tasks_per_rung = 1
+tasks_per_rung = 4
 shuffle = true
 
 [orchestrator]
-tasks = 18                            # SMOKE: one probe per rung, whole ladder
+tasks = 80                            # SMOKE: one probe per rung, whole ladder
 accept_metric = "query_accuracy"
 accept_threshold = 0.95
 floor = 0.0                           # WALL: no early-stall floor; the probe wants full forensics
@@ -51,8 +51,8 @@ stall_generations = 28
 stall_epsilon = 0.005
 max_depth = 1                         # WALL: each sub-solve refreshes the wall clock; keep the tree small
 quick_eval_top_k = 5
-library_dir = "library_wall"          # WALL: isolated probe library
-max_task_seconds = 180                # WALL
+library_dir = "library"               # WALL: isolated probe library
+max_task_seconds = 600                # WALL
 decompose_first_above = 2000000       # WALL: rungs 11-14 decompose before any flat attempt
 evolve = ["routed", "direct", "composition"]
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]

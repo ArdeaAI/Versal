@@ -36,6 +36,8 @@ repo = "https://github.com/ArdeaAI/ardevo.git"
 render_async = true           # admission/overmind PNGs draw on a background thread instead of
                               # blocking the run loop (flushed before uploads, GC, and run end)
 tf32 = false                  # opt-in TF32 CUDA matmuls: faster on Ampere+, changes numerics
+live_status = true            # pinned Rich footer with the live task/generation/budget state
+                              # (auto-off when stdout is not a terminal)
   [run.duration]
   generations = 1000          # informational; the orchestrated run is bounded by [orchestrator] tasks
 
@@ -46,7 +48,7 @@ support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5, 6]       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
 tasks_per_rung = 100
 shuffle = true

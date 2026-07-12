@@ -124,8 +124,16 @@ def print_scorecard(scorecard: dict[str, Any]) -> None:
     for rung, entry in scorecard["rungs"].items():
         best = f"{entry['best_metric']:.3f}" if entry["best_metric"] is not None else "-"
         style = {"T4": "green", "T3": "cyan", "T2": "yellow", "T1": "white"}.get(entry["tier"], "red")
-        table.add_row(rung, f"[{style}]{entry['tier']}[/{style}]", str(entry["attempts"]), best, str(entry["solves"]), str(entry["admissions"]), str(entry["time_budget_hits"]),
-                      str(entry["total_seconds"]))
+        table.add_row(
+            rung,
+            f"[{style}]{entry['tier']}[/{style}]",
+            str(entry["attempts"]),
+            best,
+            str(entry["solves"]),
+            str(entry["admissions"]),
+            str(entry["time_budget_hits"]),
+            str(entry["total_seconds"]),
+        )
     console.print(table)
     console.print(f"tier counts: {scorecard['tier_counts']}")
 

@@ -317,6 +317,7 @@ class Evolver:
                 current[index] = triple[0]
                 results[index] = triple
             if stage_index < len(deltas) - 1:
+
                 def support_loss_of(index: int) -> float:
                     triple = results[index]
                     return float(triple[1].get("support_loss", float("inf"))) if triple is not None else float("inf")

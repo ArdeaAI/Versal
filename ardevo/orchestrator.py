@@ -34,6 +34,7 @@ from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
 from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
 from ardevo.utils.logging import Logger
+from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
 
@@ -315,6 +316,7 @@ class Orchestrator:
         self._solve_started: float | None = time.perf_counter()
         self._active_stages: dict[str, float] | None = {}
         self._solve_deadline: float | None = (time.perf_counter() + self.max_task_seconds) if self.max_task_seconds > 0 else None
+        BOARD.clock(float(self.max_task_seconds) if self.max_task_seconds > 0 else None)
         try:
             return self._solve_timed(task, depth)
         finally:
@@ -468,6 +470,7 @@ class Orchestrator:
             if allocation <= 0:
                 break
             stage_started = time.perf_counter()
+            BOARD.stage(name, f"starting (budget {allocation} gens)")
             if name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
@@ -1041,8 +1044,10 @@ class Orchestrator:
             attempt.stage_seconds = dict(getattr(self, "_active_stages", None) or {})
         self.attempts.append(attempt)
         logger.info("attempt: %s", attempt.to_dict())
+        BOARD.event(f"{attempt.task} d{attempt.depth}: {attempt.outcome} {self.accept_metric}={attempt.metric:.3f}")
 
     def _on_generation(self, strategy: str, generation: int, best: Any, mean_fitness: float) -> None:
+        BOARD.generation(strategy, generation, best.fitness, self._metric(best), mean_fitness)
         if self.proctor is not None:
             self.proctor.log_scalar("Fitness", f"{strategy}_best", best.fitness, self.state.generation)
             self.proctor.log_scalar("Fitness", f"{strategy}_mean", mean_fitness, self.state.generation)

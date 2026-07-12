@@ -102,6 +102,9 @@ _H_GAP = 1.6
 _V_GAP = 0.7
 _PAD = 0.9
 _CALLOUT_GAP = 1.4  # vertical clearance between the host network and the callout band
+_MAX_COLUMN_NODES = 64  # a layer taller than this wraps into a near-square block of sub-columns
+_MAX_STRAIGHT_EDGES = 60_000  # LineCollection cap; beyond it edges stride-subsample with a note
+_MAX_CURVED_EDGES = 2_000  # FancyArrowPatch is one artist per edge, so its cap is much lower
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -224,8 +227,21 @@ class _Item:
     sort_rank: tuple[int, int]
 
 
+def _layer_shape(count: int) -> tuple[int, int]:
+    """(rows, sub_columns) for one layer. A layer taller than _MAX_COLUMN_NODES wraps into a
+    near-square block; below the cap it stays a single column, byte-identical to the old layout.
+    Wide I/O banks (an ARC output field is 9,000 nodes) would otherwise stretch the frame to
+    thousands of units tall while set_aspect("equal") crushes the X axis into a one-pixel line."""
+    if count <= _MAX_COLUMN_NODES:
+        return count, 1
+    rows = math.ceil(math.sqrt(count))
+    return rows, math.ceil(count / rows)
+
+
 def _place_items(items: list[_Item]) -> tuple[dict[int, tuple[float, float]], float, float]:
     """Layered layout: x = layer column, y = stacked with barycenter ordering to reduce crossings.
+    Oversized layers wrap into blocks of sub-columns, filled column-major in sort order (a grid
+    field stamped in raster order redraws as its grid).
 
     The frame is [0, width] x [0, height] with every column vertically centered. Returns
     (center positions, width, height)."""
@@ -236,8 +252,16 @@ def _place_items(items: list[_Item]) -> tuple[dict[int, tuple[float, float]], fl
     if not layers:
         return {}, 1.0, 1.0
 
-    col_x = {k: index * (1.0 + _H_GAP) + 0.5 for index, k in enumerate(layers)}
-    height = max(len(by_layer[k]) + _V_GAP * (len(by_layer[k]) - 1) for k in layers)
+    pitch = 1.0 + _V_GAP  # node pitch, shared by stacked rows and wrapped sub-columns
+    shapes = {k: _layer_shape(len(by_layer[k])) for k in layers}
+    col_x: dict[int, float] = {}
+    cursor_x = 0.5
+    for k in layers:
+        col_x[k] = cursor_x
+        cursor_x += (shapes[k][1] - 1) * pitch + 1.0 + _H_GAP
+    width = cursor_x - 1.0 - _H_GAP + 0.5
+
+    height = max(shapes[k][0] + _V_GAP * (shapes[k][0] - 1) for k in layers)
     centers: dict[int, tuple[float, float]] = {}
     for index, k in enumerate(layers):
         column = by_layer[k]
@@ -250,13 +274,13 @@ def _place_items(items: list[_Item]) -> tuple[dict[int, tuple[float, float]], fl
                 return sum(placed) / len(placed) if placed else 0.0
 
             column.sort(key=barycenter, reverse=True)  # highest predecessor mass lands on top
-        total = len(column) + _V_GAP * (len(column) - 1)
-        cursor = height / 2 + total / 2
-        for item in column:
-            centers[item.key] = (col_x[k], cursor - 0.5)
-            cursor -= 1.0 + _V_GAP
+        rows = shapes[k][0]
+        total = rows + _V_GAP * (rows - 1)
+        top = height / 2 + total / 2 - 0.5
+        for position, item in enumerate(column):
+            sub_column, row = divmod(position, rows)
+            centers[item.key] = (col_x[k] + sub_column * pitch, top - row * pitch)
 
-    width = col_x[layers[-1]] + 0.5
     return centers, width, height
 
 
@@ -569,13 +593,30 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None) -> None:
     for text in spec.texts:
         axis.text(text.x, text.y, text.text, fontsize=text.size, color=text.color, ha=text.ha, va=text.va, zorder=4)
 
+    # Cap what actually reaches matplotlib: a dense wide-I/O net can carry millions of edges, which
+    # stalls the LineCollection (and one FancyArrowPatch PER curved edge is far worse). A stride
+    # subsample keeps the drawing deterministic and the density picture honest via the note.
+    straight = [edge for edge in spec.edges if edge.curve == 0.0]
+    curved = [edge for edge in spec.edges if edge.curve != 0.0]
+    dropped_notes = []
+    if len(straight) > _MAX_STRAIGHT_EDGES:
+        stride = math.ceil(len(straight) / _MAX_STRAIGHT_EDGES)
+        dropped_notes.append(f"showing {len(straight[::stride]):,} of {len(straight):,} edges")
+        straight = straight[::stride]
+    if len(curved) > _MAX_CURVED_EDGES:
+        stride = math.ceil(len(curved) / _MAX_CURVED_EDGES)
+        dropped_notes.append(f"showing {len(curved[::stride]):,} of {len(curved):,} recurrent edges")
+        curved = curved[::stride]
+    if dropped_notes:
+        axis.text(0.005, 0.005, "  |  ".join(dropped_notes), transform=axis.transAxes, fontsize=7, color=THEME["label"], ha="left", va="bottom", zorder=4)
+
     for style in ("solid", "dashed"):
-        group = [edge for edge in spec.edges if edge.curve == 0.0 and edge.style == style]
+        group = [edge for edge in straight if edge.style == style]
         if group:
             segments = [((edge.x0, edge.y0), (edge.x1, edge.y1)) for edge in group]
             rgba = [mcolors.to_rgba(edge.color, edge.alpha) for edge in group]
             axis.add_collection(LineCollection(segments, colors=rgba, linewidths=[edge.width for edge in group], linestyle=style, zorder=2))
-    for edge in spec.edges:
+    for edge in curved:
         if edge.curve != 0.0:
             arc = FancyArrowPatch(
                 (edge.x0, edge.y0),

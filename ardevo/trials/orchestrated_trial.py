@@ -29,6 +29,7 @@ from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
+from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
 console = Logger.get_console()
@@ -114,6 +115,8 @@ class OrchestratedTrial(Proctor):
 
         if bool(self.config.get("render_async", False)):
             rendering.enable_async_rendering()
+        if bool(self.config.get("live_status", True)):
+            BOARD.enable(console)  # quietly refuses off-terminal (pipes, agents, CI)
 
         # A durable record exists before the first task so a crash during setup or task 0 leaves a
         # diagnosable run_summary.json instead of an empty directory (the silent-failure mode we kill).
@@ -128,6 +131,7 @@ class OrchestratedTrial(Proctor):
                 index = self.scheduler.next_index(self.pool, state.rng)
                 entry = self.pool[index]
                 console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
+                BOARD.task(task_cursor + 1, self.tasks_to_run, entry.rung, entry.name)
                 library_keys_before = set(self.library.keys())
                 task_started = time.perf_counter()
                 solution = orchestrator.solve(entry.task)
@@ -154,6 +158,7 @@ class OrchestratedTrial(Proctor):
                 if new_library_keys:
                     self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
+            BOARD.close()  # release the terminal first so the traceback and summaries print clean
             self.library.flush_stats()  # a crash still leaves the stats it had
             rendering.flush_renders()  # pending async renders finish (their own failures only log)
             self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
@@ -161,6 +166,7 @@ class OrchestratedTrial(Proctor):
                 self._persist_resume_state(orchestrator, state, task_cursor)
             raise
 
+        BOARD.close()
         self.library.flush_stats()
         rendering.flush_renders()  # renders land before GC can delete images and before finalize
         self._persist_resume_state(orchestrator, state, task_cursor)

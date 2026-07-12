@@ -24,7 +24,7 @@ def _summary(tasks: list[dict], **overrides: object) -> dict:
 
 def test_config_stamps_path_and_content_hash(tmp_path: Path) -> None:
     config_file = tmp_path / "tiny.toml"
-    config_file.write_text('[run]\nseed = 7\n[orchestrator]\ntasks = 1\n')
+    config_file.write_text("[run]\nseed = 7\n[orchestrator]\ntasks = 1\n")
     config = Config(conf_path=config_file)
     assert config.current["config_path"] == str(config_file)
     assert config.current["config_sha256"] == hashlib.sha256(config_file.read_bytes()).hexdigest()

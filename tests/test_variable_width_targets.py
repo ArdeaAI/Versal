@@ -56,6 +56,7 @@ def test_queryless_task_is_the_same_object() -> None:
 
 def test_narrow_query_target_pads_under_ignored_mask() -> None:
     encoded = fit_query_target(encode_task(_continuous_task(9, 4), Level0Encoder(9)))
+    assert encoded.query_target is not None
     target, mask, _descriptor = encoded.query_target
     assert target.shape[1] == 9 and mask is not None and mask.shape == target.shape
     assert bool(mask[:, 4:].all()) and not bool(mask[:, :4].any())
@@ -65,6 +66,7 @@ def test_narrow_query_target_pads_under_ignored_mask() -> None:
 
 def test_wide_query_target_crops_to_the_support_width() -> None:
     encoded = fit_query_target(encode_task(_continuous_task(4, 9), Level0Encoder(4)))
+    assert encoded.query_target is not None
     target, _mask, _descriptor = encoded.query_target
     assert target.shape[1] == 4
     metrics = evaluate(_FixedHead(4), encoded, Level0Encoder(4))
@@ -73,9 +75,10 @@ def test_wide_query_target_crops_to_the_support_width() -> None:
 
 def test_categorical_padding_keeps_the_logit_reshape_sound() -> None:
     encoded = fit_query_target(encode_task(_categorical_task(4, 2), Level0Encoder(4)))
+    assert encoded.query_target is not None
     target, mask, descriptor = encoded.query_target
     assert target.shape[1] == 4 and target.dtype == torch.long
-    assert bool(mask[:, 2:].all())
+    assert mask is not None and bool(mask[:, 2:].all())
     head_width = model_output_features(descriptor, 4)
     metrics = evaluate(_FixedHead(head_width), encoded, Level0Encoder(4))
     assert all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
