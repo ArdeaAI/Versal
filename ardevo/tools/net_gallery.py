@@ -2,6 +2,7 @@
 
     uv run render                                  # one <key>.png per entry -> library/images/
     uv run render --images renders/ --gallery      # custom dir, plus a single contact-sheet PNG
+    uv run render --overmind                        # also (re)render the whole routed model -> library/images/overmind.png
 
 Everything goes through `ardevo.rendering`, so nested networks expand into callout boxes across the
 top of each image and a broken entry degrades to a labeled box instead of killing the batch.
@@ -45,6 +46,7 @@ def main() -> None:
     parser.add_argument("--library", default="library", help="library dir to render")
     parser.add_argument("--images", default=None, help="per-entry output dir (default: <library>/images)")
     parser.add_argument("--gallery", nargs="?", const="__default__", default=None, help="also write a contact-sheet PNG (default path: <library>/gallery.png)")
+    parser.add_argument("--overmind", action="store_true", help="also (re)render the whole routed model to <library>/images/overmind.png from <library>/router state")
     parser.add_argument("--columns", type=int, default=4, help="gallery columns")
     parser.add_argument("--include-retired", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-dependencies", action=argparse.BooleanOptionalAction, default=True)
@@ -64,6 +66,31 @@ def main() -> None:
         gallery_path = library_root / "gallery.png" if args.gallery == "__default__" else Path(args.gallery)
         render_library_gallery(library, gallery_path, columns=args.columns, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
         gallery_note = f" | gallery -> {gallery_path}"
+
+    if args.overmind:
+        router_dir = library_root / "router"
+        if not (router_dir / "router_meta.json").exists():
+            console.print(f"[yellow]no router state at {router_dir}[/yellow] (run a config with a 'routed' strategy first)")
+        else:
+            import json
+
+            from ardevo.routing import RouterService
+
+            meta = json.loads((router_dir / "router_meta.json").read_text())
+            service = RouterService(
+                library,
+                d_model=int(meta["d_model"]),
+                top_k=int(meta["top_k"]),
+                max_steps=int(meta["max_steps"]),
+                adapter_rank=int(meta.get("adapter_rank", 0)),
+                halting=bool(meta.get("halting", False)),
+                edge_bias=bool(meta.get("edge_bias", False)),
+                persist_dir=router_dir,
+                image_dir=images_dir,
+            )
+            service._rendered_vertex_count = -1  # force a render even if the count is unchanged
+            service.render_overmind()
+            gallery_note += f" | overmind -> {images_dir / 'overmind.png'}"
 
     from rich.table import Table
 

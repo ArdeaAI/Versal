@@ -1,0 +1,246 @@
+# SMOKE ALL RUNGS (2026-07-06): one task per rung across the WHOLE ladder, 1-18, under the wall
+# survivability levers. Purpose: prove every rung completes an attempt end to end (T1) with the
+# per-task budget actually able to fire; this is the regression run for the 2026-07-06 recon wedge
+# (rung 17 pgm, 409,600 x 8 = 3.28M dense-init genes, included by a never-computed audit line,
+# wedged two runs inside direct init + generation 1 where no deadline check exists).
+# New net on top of the wall levers: [orchestrator.direct] max_init_genes declines any direct
+# attempt whose dense-init arithmetic exceeds the cap, so a task that slips decompose-first can
+# never wedge the run again.
+#
+#   uv run run_matrix --config configs/smoke_all_rungs.toml --seeds 0 --cold --tag smoke
+#
+# Derived from configs/wall_ladder.toml; deltas marked SMOKE.
+[run]
+project = "ardevo"
+experiment = "smoke_all_rungs"       # SMOKE
+clearml = true
+machine = "MonadMetal"
+seed = 0
+log_level = "INFO"
+output_uri = false
+repo = "https://github.com/ArdeaAI/ardevo.git"
+render_async = true
+tf32 = false
+  [run.duration]
+  generations = 1000
+
+[dataset]
+source = "Ardea/Icarus-dataset"
+n_samples = 48                        # SMOKE: probe-sized further down from WALL's 128. The per-candidate
+                                      # cost unit on long-TIME-axis rungs is one BPTT backward over
+                                      # T x batch, and by task 16 the library holds 65k-wide entries the
+                                      # macro/inline mutators can graft into a temporal genome (a 25+ min,
+                                      # 46 GB single backward observed 2026-07-07). Smaller batches keep
+                                      # every candidate bounded so the between-generations deadline stays
+                                      # reachable; T1 coverage needs no more data than this.
+support_fraction = 0.8
+
+[schedule]
+kind = "interleave_rungs"
+rungs = "all"                         # "all" = SMOKE: the whole ladder, 1-18
+require_all_rungs = true
+tasks_per_rung = 4
+shuffle = true
+
+[orchestrator]
+tasks = 80                            # SMOKE: one probe per rung, whole ladder
+accept_metric = "query_accuracy"
+accept_threshold = 0.95
+floor = 0.0                           # WALL: no early-stall floor; the probe wants full forensics
+stall_generations = 28
+stall_epsilon = 0.005
+max_depth = 1                         # WALL: each sub-solve refreshes the wall clock; keep the tree small
+quick_eval_top_k = 5
+library_dir = "library"               # WALL: isolated probe library
+max_task_seconds = 600                # WALL
+decompose_first_above = 2000000       # WALL: rungs 11-14 decompose before any flat attempt
+evolve = ["routed", "direct", "composition"]
+decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
+output_slices_n_groups = 2
+input_subsets_n_subsets = 2
+time_windows_n_windows = 2
+spatial_patches_n_patches = 2
+decompose_solvability_floor = 0.0     # WALL: no probe gate; we want to SEE what each stage does
+decompose_probe_generations = 4
+  [orchestrator.budgets]
+  depth0 = 40                         # WALL: probe budgets
+  depth1 = 20
+  depth2 = 10
+  [orchestrator.evolve_budget]
+  routed = 0.1
+  direct = 0.5
+  composition = 0.4
+  [orchestrator.routed]
+  d_model = 64
+  top_k = 2
+  max_steps = 4
+  train_steps = 100
+  lr = 0.003
+  weight_decay = 0.0001
+  adapter_rank = 4
+  load_balance_weight = 0.01
+  zero_shot_accept = true
+  generation_cost = 10
+  distill = true
+  distill_usage_floor = 0.1
+  distill_max_nodes = 6
+  replay_tasks = 8
+  replay_every = 4
+  include_compositions = true
+  exclude_temporal = true
+  persist = true
+  persist_strict = false
+  halting = true
+  ponder_epsilon = 0.01
+  ponder_cost = 0.001
+  edge_bias = true
+  [orchestrator.refine]
+  budget_k = 0                        # WALL: live mode; the probe never refines hits
+  [orchestrator.wall]
+  ledger = true
+  min_metric = 0.45
+  seed_top_k = 1
+  [orchestrator.direct]
+  pop_size = 16                       # WALL: wide genomes; a 64-strong population is probe overkill
+  elitism = 2
+  assess_workers = 12
+  max_flat_outputs = 4096             # WALL: the [n, h] dense-column guard; wide outputs escalate
+  max_init_genes = 2000000            # SMOKE: decline any direct attempt above the dense-init gene cap (the recon-wedge net)
+    [orchestrator.direct.train]
+    kind = "gradient_refine"
+    batched = false
+    steps = 20                        # SMOKE: half WALL's probe-length; bounds the BPTT cost per candidate
+    lr = 0.03
+    writeback = true
+    weight_decay = 0.0002
+
+[library]
+admission = "archive"
+gc = true
+min_metric = 0.9
+min_robustness = 0.0
+per_niche_cap = 2
+max_per_signature = 12
+
+[substrate]
+available_activations = ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"]
+default_activation = "tanh"
+recurrent = true
+
+[evolution]
+loop = "hierarchical"
+pop_size = 32                         # WALL: smaller module pool for the probe
+elitism = 1
+  [evolution.init]
+  kind = "factored"                   # WALL: the init-wall lever; minimal below threshold, rank-4 above
+  weight_scale = 1.0
+  rank = 4
+  threshold = 200000                  # SMOKE: above every rung the recon run proved survivable under
+                                      # minimal init (deepsea 144k genes completed in 350 s), below the
+                                      # init-wall class (spherical 1.08M+). Factored's hidden latents
+                                      # turn long-TIME-axis tasks into deep BPTT chains: at 4096 one
+                                      # deepsea candidate ran 20+ min at 20 GB (2026-07-07), a second
+                                      # in-generation hang class the deadline cannot reach. Keep
+                                      # temporal rungs minimal until a temporal-aware seed exists.
+  [evolution.selection]
+  kind = "tournament"
+  tournament_size = 3
+  parsimony_epsilon = 0.01
+  [evolution.crossover]
+  kind = "neat"
+  rate = 0.2
+  [evolution.mutation]                # WALL: recon set + prune pair + SET rewiring
+  # SMOKE: add_library_module / add_macro_node REMOVED. On a mixed-width ladder they graft wide
+  # library entries (65k cosmic compositions by task 12) into small temporal genomes, where the
+  # 1000-step BPTT unroll turns one candidate into a 25-minute, tens-of-GB backward the deadline
+  # cannot reach (observed twice, 2026-07-07). A coverage probe does not test macro reuse; long
+  # campaigns need a size budget on the library-reading mutators instead (see instructions).
+  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node", "prune_and_regrow"]
+  add_rich_node_prob = 0.12
+  add_rich_node_fan_in = 4
+  add_deep_node_prob = 0.12
+  add_deep_node_fan_in = 4
+  add_deep_node_fan_out = 2
+  add_connection_prob = 0.12
+  toggle_connection_prob = 0.05
+  mutate_activation_prob = 0.06
+  mutate_aggregation_prob = 0.05
+  mutate_aggregation_max_fan_in = 4
+  add_recurrent_connection_prob = 0.04
+  add_library_module_prob = 0.05
+  add_macro_node_prob = 0.05
+  add_macro_node_max_outputs = 16
+  tweak_refine_steps_prob = 0.06
+  tweak_refine_steps_max_steps = 6
+  add_local_node_prob = 0.1
+  add_local_node_fan_in = 4
+  add_local_connection_prob = 0.1
+  add_local_connection_radius = 1.5
+  add_shared_motif_prob = 0.05
+  add_shared_motif_copies = 2
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
+  prune_and_regrow_prob = 0.1         # WALL: SET rewiring keeps sparse-seeded density constant
+  prune_and_regrow_fraction = 0.05
+  [evolution.train]
+  kind = "gradient"
+  steps = 20                          # WALL: probe-length composition training
+  lr = 0.03
+  writeback = true
+  weight_decay = 0.0002
+  [evolution.evaluate]
+  kind = "hybrid"
+  samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+  batched_samples = "auto"
+  [evolution.speciation]
+  kind = "neat"
+  threshold = 1.5
+  target_species = 6
+  threshold_adjust = 0.3
+  min_threshold = 0.3
+  c_excess = 1.0
+  c_disjoint = 1.0
+  c_weight = 0.5
+
+  [evolution.composition]
+  pop_size = 24                       # WALL: probe-sized comp population
+  elitism = 2
+  max_inline_depth = 4
+  glue_rank = 8
+  glue_rank_threshold = 4096
+  catalog_width_tolerance = -1
+    [evolution.composition.selection]
+    kind = "tournament"
+    tournament_size = 2
+    [evolution.composition.crossover]
+    kind = "comp_neat"
+    rate = 0.3
+    [evolution.composition.mutation]
+    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
+    add_module_node_prob = 0.3
+    switch_ref_prob = 0.12
+    add_comp_edge_prob = 0.15
+    toggle_comp_edge_prob = 0.05
+    perturb_glue_prob = 0.6
+    perturb_glue_sigma = 0.3
+
+  [evolution.modules]
+  pop_size = 32
+  elitism = 1
+  in_ports = 4
+  out_ports = 2
+  advance_every = 3
+  writeback = "champion"
+  attribution = "max"
+  decay = 0.95
+  offspring_discount = 0.9
+  seed_fraction = 0.25
+  absorb_top_k = 2
+
+[fitness]
+components = ["bounded_negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
+w_bounded_negative_support_loss = 2.0
+w_support_accuracy = 1.0
+w_weight_robustness = 0.5
+w_hidden_penalty = 0.05
+w_complexity_penalty = 0.01

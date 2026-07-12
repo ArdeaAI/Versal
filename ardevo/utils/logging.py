@@ -16,7 +16,9 @@ class Logger:
         if cls._logger is None:
             cls._logger = logging.getLogger("ardevo")
             cls._logger.setLevel(level)
-            handler = RichHandler(rich_tracebacks=True)
+            # Share the singleton console: a Live status footer can only hoist prints above its
+            # pinned region when every writer goes through the ONE console it manages.
+            handler = RichHandler(rich_tracebacks=True, console=cls.get_console())
             handler.setLevel(level)
             handler.setFormatter(logging.Formatter("%(message)s", datefmt="[%X]"))
             cls._logger.addHandler(handler)

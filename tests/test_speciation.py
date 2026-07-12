@@ -81,3 +81,13 @@ def test_neat_speciation_plans_fill_population(solving_genome):
     fitnesses = [0.5] * 20
     plans = speciator(genomes, fitnesses, rng=random.Random(1), elitism=2, pop_size=20)
     assert sum(plan.n_elites + plan.n_offspring for plan in plans) == 20
+
+
+def test_neat_survives_non_finite_fitness(linear_genome, solving_genome):
+    """Degenerate shares (NaN fitness that slipped past upstream floors) even-split the offspring
+    budget instead of crashing the run at `int(round(NaN))`."""
+    speciator = NeatSpeciation(threshold=0.1, c_excess=1.0, c_disjoint=1.0, c_weight=0.5)
+    genomes = [linear_genome, solving_genome, linear_genome.clone(), solving_genome.clone()]
+    plans = speciator(genomes, [float("nan"), 1.0, 0.5, float("nan")], rng=random.Random(0), elitism=1, pop_size=8)
+    assert plans and sum(plan.n_offspring for plan in plans) == 8 - len(plans)
+    assert all(plan.n_offspring >= 0 for plan in plans)

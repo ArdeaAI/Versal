@@ -6,14 +6,17 @@ in or out via `[evolution.mutation].operators` with no code change. The shared `
 hands out fresh node ids / innovation numbers and the activation palette.
 """
 
+import heapq
+import inspect
 import math
 import random
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Callable
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Callable
 
 from ardevo.evolution.genome import (
     ConnectionGene,
+    ForwardReachability,
     Genome,
     InnovationTracker,
     MacroGene,
@@ -21,6 +24,7 @@ from ardevo.evolution.genome import (
     NodeKind,
     coordinate_distance,
     set_connection,
+    topological_order,
     would_create_cycle,
 )
 from ardevo.evolution.registry import Registry
@@ -59,6 +63,57 @@ class MutationPipeline:
         return genome
 
 
+def _operator_base_prob(operator: Mutator, params: dict[str, Any]) -> float:
+    """The rate an operator starts self-adapting from: its configured `prob`, else its own default."""
+    if "prob" in params:
+        return float(params["prob"])
+    parameter = inspect.signature(operator).parameters.get("prob")
+    if parameter is not None and parameter.default is not inspect.Parameter.empty:
+        return float(parameter.default)
+    return 0.1
+
+
+@dataclass
+class AdaptiveMutationPipeline:
+    """Self-adaptive mutation (lever F): each genome carries its own per-operator rates as strategy genes.
+
+    ES perturb-and-inherit (Rechenberg/Schwefel): before applying the operators to a child, perturb the
+    rates it inherited from its parent with a log-normal step (`rate * exp(learning_rate * N(0, 1))`, a
+    multiplicative random walk that stays positive), apply each operator at its own perturbed rate, then
+    stamp the perturbed rates onto the child so a fitter lineage's schedule propagates and a bad one dies
+    with its owner. The search rate thus adapts per problem instead of being hand-tuned per config.
+
+    Off is the ordinary `MutationPipeline` (a different object entirely), so the fixed-rate path is
+    byte-identical; this is constructed only under `[evolution.mutation] self_adaptive = true`. Rates seed
+    from each operator's configured `prob` on a genome that has none yet, and clamp to [min_rate, max_rate].
+    """
+
+    operators: Sequence[tuple[str, Mutator, dict[str, Any]]]
+    learning_rate: float = 0.1
+    min_rate: float = 0.001
+    max_rate: float = 1.0
+    _base_rates: dict[str, float] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        self._base_rates = {name: _operator_base_prob(operator, params) for name, operator, params in self.operators}
+
+    def __call__(self, genome: Genome, ctx: MutationContext, *, rng: random.Random) -> Genome:
+        inherited = genome.operator_rates
+        perturbed: dict[str, float] = {}
+        for name, _operator, _params in self.operators:
+            base = inherited.get(name, self._base_rates[name])
+            drifted = base * math.exp(self.learning_rate * rng.gauss(0.0, 1.0))
+            perturbed[name] = min(self.max_rate, max(self.min_rate, drifted))
+        child = genome
+        for name, operator, params in self.operators:
+            passthrough = {key: value for key, value in params.items() if key != "prob"}
+            child = operator(child, ctx, rng=rng, prob=perturbed[name], **passthrough)
+        if child is genome:  # no operator fired: never stamp rates onto a genome we do not own
+            child = genome.clone()
+        child.operator_rates = perturbed
+        return child
+
+
 @MUTATION.register("perturb_weights")
 def perturb_weights(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.8, sigma: float = 0.5) -> Genome:
     child = genome.clone()
@@ -75,11 +130,16 @@ def add_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     rng.shuffle(sources)
     rng.shuffle(targets)
+    # Per-call precomputation instead of per-pair O(E) scans: the wide-input pair sweep was the
+    # image-rung wedge (see ForwardReachability). Same iteration order, same accept decisions,
+    # no rng draws touched, so children are bitwise-identical to the scanning form.
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    reach = ForwardReachability(child)
     for source in sources:
         for target in targets:
-            if source == target or child.has_connection(source, target):
+            if source == target or (source, target) in existing:
                 continue
-            if would_create_cycle(child, source, target):
+            if reach.creates_cycle(source, target):
                 continue
             innovation = ctx.innovations.innovation(source, target)
             child.connections.append(ConnectionGene(source, target, rng.gauss(0.0, 1.0), True, innovation))
@@ -250,6 +310,215 @@ def toggle_connection(genome: Genome, ctx: MutationContext, *, rng: random.Rando
     return child
 
 
+@MUTATION.register("remove_connection")
+def remove_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Delete one connection gene outright, enabled or disabled (toggle_connection owns disable).
+    True deletion is the structural shrink move: it cuts clone/payload cost AND the excess/disjoint
+    gene counts speciation distance sees, so pruned lineages niche apart from their bloated kin.
+    Innovation numbers are memoized per (in, out, recurrent), so a later re-add restores the same
+    number and crossover alignment is unaffected; orphaning a downstream node is decode-safe (a
+    zero-in-degree hidden node computes an all-zero column, exactly as toggle-disable produces today)."""
+    if rng.random() >= prob or not genome.connections:
+        return genome
+    child = genome.clone()
+    del child.connections[rng.randrange(len(child.connections))]
+    return child
+
+
+@MUTATION.register("remove_hidden_node")
+def remove_hidden_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Delete one hidden node plus EVERY incident gene (enabled/disabled, forward/recurrent).
+    The macro filters mirror the add-ops: output stubs carry the inner network's value, and macro
+    input references are position-looked-up at decode, so deleting either corrupts the placement.
+    The full incident-edge sweep is what keeps NEAT crossover's node-pull and the decode position
+    maps consistent: no surviving gene may reference the deleted id."""
+    macro_input_ids = {node_id for macro in genome.macros for node_id in macro.input_node_ids}
+    candidates = [node_id for node_id in genome.hidden_ids if node_id not in genome.macro_output_ids and node_id not in macro_input_ids]
+    if rng.random() >= prob or not candidates:
+        return genome
+    child = genome.clone()
+    node_id = rng.choice(candidates)
+    del child.nodes[node_id]
+    child.connections = [conn for conn in child.connections if conn.in_id != node_id and conn.out_id != node_id]
+    return child
+
+
+@MUTATION.register("prune_and_regrow")
+def prune_and_regrow(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fraction: float = 0.05) -> Genome:
+    """SET-style rewiring (Mocanu et al. 2018, Sparse Evolutionary Training): delete the smallest
+    magnitude enabled FORWARD edges and regrow the same count at fresh random positions, so a
+    sparse-seeded wide genome discovers which connections matter at constant density instead of
+    only shrinking (the remove_* ops) or only growing (the add_* ops). Regrown edges are accepted
+    only strictly forward in one fixed topological order, which makes any batch of additions
+    jointly acyclic with O(1) checks per candidate: the per-edge reachability rebuild a naive batch
+    add would pay is exactly the image-rung-wedge shape (see ForwardReachability). Innovation
+    numbers come from the run tracker's memo, so a pruned-then-regrown edge restores its original
+    number and crossover alignment survives the churn. Macro output stubs are never targeted."""
+    if rng.random() >= prob:
+        return genome
+    prunable = [conn for conn in genome.connections if conn.enabled and not conn.recurrent]
+    if not prunable:
+        return genome
+    child = genome.clone()
+    count = min(len(prunable), max(1, round(len(prunable) * fraction)))
+    doomed = {id(conn) for conn in heapq.nsmallest(count, prunable, key=lambda conn: abs(conn.weight))}
+    child.connections = [conn for conn in child.connections if id(conn) not in doomed]
+
+    order_position = {node_id: index for index, node_id in enumerate(topological_order(child))}
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
+    targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
+    if not sources or not targets:
+        return child
+    added, attempts = 0, 0
+    while added < count and attempts < 20 * count:
+        attempts += 1
+        source = rng.choice(sources)
+        target = rng.choice(targets)
+        if source == target or (source, target) in existing or order_position[source] >= order_position[target]:
+            continue
+        child.connections.append(ConnectionGene(source, target, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, target)))
+        existing.add((source, target))
+        added += 1
+    return child
+
+
+def _hint_weighted_choice(candidates: list[int], hints: dict[int, float] | None, rng: random.Random) -> int:
+    """Sample a node id proportional to its growth-hint score, uniform when hints are absent.
+    The epsilon floor keeps zero-scored nodes reachable (exploration never fully closes)."""
+    if not hints:
+        return rng.choice(candidates)
+    weights = [hints.get(node_id, 0.0) + 1e-12 for node_id in candidates]
+    return rng.choices(candidates, weights=weights, k=1)[0]
+
+
+@MUTATION.register("add_hinted_connection")
+def add_hinted_connection(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, attempts: int = 16) -> Genome:
+    """NeST-guided add_connection: source sampled by activation mass, target by delta mass (the
+    rank-1 marginals of the dormant-edge gradient |dL/dw_ij| = |a_i x delta_j| the train stage
+    stashed as growth_hints), so new wiring lands where the loss says signal is missing instead of
+    uniformly. Without hints (scoring off, crossover child, non-plain substrate) it degrades to
+    uniform sampling: same legality rules as add_connection, gradient only biases WHERE."""
+    if rng.random() >= prob:
+        return genome
+    sources = [*genome.input_ids, *genome.bias_ids, *genome.hidden_ids]
+    targets = [node_id for node_id in (*genome.hidden_ids, *genome.output_ids) if node_id not in genome.macro_output_ids]
+    if not sources or not targets:
+        return genome
+    hints = genome.growth_hints or {}
+    child = genome.clone()
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    reach = ForwardReachability(child)
+    for _ in range(attempts):
+        source = _hint_weighted_choice(sources, hints.get("source"), rng)
+        target = _hint_weighted_choice(targets, hints.get("target"), rng)
+        if source == target or (source, target) in existing or reach.creates_cycle(source, target):
+            continue
+        child.connections.append(ConnectionGene(source, target, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, target)))
+        return child
+    return child
+
+
+@MUTATION.register("add_hinted_node")
+def add_hinted_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.1, fan_in: int = 4) -> Genome:
+    """GradMax-lite: install a hidden node where the delta mass says capacity is missing, with a
+    ZERO-weight fan-out edge so the child computes the identical function at birth (Net2Net/GradMax
+    function preservation: selection never culls fresh structure before gradient training exploits
+    it; the fan-in weights are positioned to receive gradient immediately). Fan-in sources sample
+    by activation mass. Degrades to uniform sampling without hints."""
+    if rng.random() >= prob:
+        return genome
+    hints = genome.growth_hints or {}
+    macro_input_ids = {node_id for macro in genome.macros for node_id in macro.input_node_ids}
+    targets = [node_id for node_id in (*genome.hidden_ids, *genome.output_ids) if node_id not in genome.macro_output_ids and node_id not in macro_input_ids]
+    sources = [*genome.input_ids, *genome.bias_ids, *genome.hidden_ids]
+    if not sources or not targets:
+        return genome
+    child = genome.clone()
+    reach = ForwardReachability(child)
+    target = _hint_weighted_choice(targets, hints.get("target"), rng)
+    legal_sources = [source for source in sources if source != target and not reach.creates_cycle(source, target)]
+    if not legal_sources:
+        return genome
+    new_id = ctx.innovations.new_node_id()
+    child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, ctx.default_activation)
+    chosen: list[int] = []
+    for _ in range(min(fan_in, len(legal_sources))):
+        pick = _hint_weighted_choice([source for source in legal_sources if source not in chosen], hints.get("source"), rng)
+        chosen.append(pick)
+    for source in chosen:
+        child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
+    child.connections.append(ConnectionGene(new_id, target, 0.0, True, ctx.innovations.innovation(new_id, target)))
+    return child
+
+
+@MUTATION.register("split_node")
+def split_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Net2WiderNet: duplicate a hidden node (incoming edges copied verbatim, outgoing weights
+    halved on both copies), so the child computes the EXACT same function and gradient training
+    decides how the twins specialize. Excluded: macro-tied nodes (decode position maps), nodes
+    with recurrent out-edges (state semantics differ across copies), and nodes feeding a product
+    target (an extra factor changes the product, breaking neutrality)."""
+    if rng.random() >= prob:
+        return genome
+    macro_input_ids = {node_id for macro in genome.macros for node_id in macro.input_node_ids}
+    product_nodes = {node.id for node in genome.nodes.values() if node.aggregation == "product"}
+
+    def splittable(node_id: int) -> bool:
+        if node_id in genome.macro_output_ids or node_id in macro_input_ids:
+            return False
+        for conn in genome.connections:
+            if conn.recurrent and node_id in (conn.in_id, conn.out_id):
+                return False  # a recurrent in-edge makes the twins compute different values; out-edges double state
+            if conn.in_id == node_id and conn.out_id in product_nodes:
+                return False
+        return True
+
+    candidates = [node_id for node_id in genome.hidden_ids if splittable(node_id)]
+    if not candidates:
+        return genome
+    child = genome.clone()
+    original_id = rng.choice(candidates)
+    original = child.nodes[original_id]
+    new_id = ctx.innovations.new_node_id()
+    child.nodes[new_id] = replace(original, id=new_id)
+    rebuilt: list[ConnectionGene] = []
+    for conn in child.connections:
+        if conn.out_id == original_id and not conn.recurrent:
+            rebuilt.append(conn)
+            rebuilt.append(ConnectionGene(conn.in_id, new_id, conn.weight, conn.enabled, ctx.innovations.innovation(conn.in_id, new_id, conn.recurrent)))
+        elif conn.in_id == original_id and not conn.recurrent:
+            rebuilt.append(replace(conn, weight=conn.weight / 2.0))
+            rebuilt.append(ConnectionGene(new_id, conn.out_id, conn.weight / 2.0, conn.enabled, ctx.innovations.innovation(new_id, conn.out_id, conn.recurrent)))
+        else:
+            rebuilt.append(conn)
+    child.connections = rebuilt
+    return child
+
+
+@MUTATION.register("add_relation_node")
+def add_relation_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, fan_in: int = 2) -> Genome:
+    """Relational-bottleneck primitive (Webb et al.): a PRODUCT-aggregation hidden node over a few
+    bounded activations approximates a similarity detector, and downstream nodes that read it see
+    relations between values instead of the values themselves: the inductive bias behind
+    sample-efficient abstract-rule learning (RAVEN/PGM class). One gene plus wiring, built from the
+    existing product machinery: evolution decides whether relations pay."""
+    if rng.random() >= prob:
+        return genome
+    sources = [*genome.input_ids, *genome.hidden_ids]  # bias excluded: a constant factor only rescales
+    outputs = genome.output_ids
+    if len(sources) < 2 or not outputs:
+        return genome
+    child = genome.clone()
+    new_id = ctx.innovations.new_node_id()
+    child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, "tanh", aggregation="product")
+    for source in rng.sample(sources, min(fan_in, len(sources))):
+        child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
+    for output in outputs:
+        child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+    return child
+
+
 _LIBRARY_CACHE: dict[str, object] = {}
 
 
@@ -348,6 +617,7 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         return genome
     from ardevo.library import MODULE as MODULE_ENTRY
     from ardevo.library import ModuleLibrary
+    from ardevo.substrate import _MAX_MACRO_DEPTH
 
     library = ctx.library if ctx.library is not None else _cached_library(path)
     assert isinstance(library, ModuleLibrary)
@@ -364,8 +634,13 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         nodes = entry.payload.get("nodes", [])
         k = sum(1 for node in nodes if node.get("kind") == "input")
         m = sum(1 for node in nodes if node.get("kind") == "output")
-        if 1 <= k <= len(host_sources) and 1 <= m <= max_outputs:
-            candidates.append((entry, k, m))
+        if not (1 <= k <= len(host_sources) and 1 <= m <= max_outputs):
+            continue
+        # Embedding this entry nests its whole macro chain one level deeper; past the decode cap
+        # the child is a dead phenotype (the wall ledger's seed-then-embed cycles get there fast).
+        if library.macro_subtree_depth(entry.key) > _MAX_MACRO_DEPTH - 1:
+            continue
+        candidates.append((entry, k, m))
     if not candidates:
         return genome
     entry, k, m = candidates[rng.randrange(len(candidates))]
@@ -443,9 +718,15 @@ def add_local_connection(genome: Genome, ctx: MutationContext, *, rng: random.Ra
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     candidates: list[tuple[int, int]] = []
     weights: list[float] = []
+    # This full pair sweep (every input x every target on a stamped grid) was THE image-rung wedge:
+    # per-pair has_connection/would_create_cycle scans measured 4.9s PER CALL at width 3072 on the
+    # main thread. Precompute once; the sweep itself is preserved verbatim (same candidate order,
+    # same weights, same rng draws), so evolution is bitwise-identical.
+    existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
+    reach = ForwardReachability(child)
     for source in sources:
         for target in targets:
-            if source == target or child.has_connection(source, target) or would_create_cycle(child, source, target):
+            if source == target or (source, target) in existing or reach.creates_cycle(source, target):
                 continue
             distance = coordinate_distance(child.nodes[source].coordinate, child.nodes[target].coordinate)
             if math.isinf(distance):
@@ -487,13 +768,17 @@ def add_local_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
 
 
 @MUTATION.register("add_shared_motif")
-def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, copies: int = 2) -> Genome:
-    """Replicate an existing local detector's motif at other coordinate locations (independent weights).
+def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05, copies: int = 2, tied: bool = False) -> Genome:
+    """Replicate an existing local detector's motif at other coordinate locations.
 
     A structural convolution prior: take a hidden node's local fan-in size and output readouts, and
-    grow `copies` siblings centered on other seeds, each reading its own local neighborhood. Weights
-    are NOT tied (hard weight-sharing would touch the substrate); only the connectivity pattern repeats.
-    """
+    grow `copies` siblings centered on other seeds, each reading its own local neighborhood. With
+    `tied = false` (the default, byte-identical to the historical operator) only the connectivity
+    pattern repeats and every copy trains its own weights. With `tied = true` the template's edges
+    are tagged with tie groups (fan-in matched to copies by RELATIVE coordinate offset from the
+    detector's center, the convolution correspondence) and each copy's edges join those groups, so
+    all copies share ONE trainable weight per template edge: hard weight sharing, the mechanic that
+    lets translation-invariant feature detectors become affordable at image widths."""
     if rng.random() >= prob:
         return genome
     hidden = [node_id for node_id in genome.hidden_ids if genome.nodes[node_id].coordinate is not None]
@@ -501,10 +786,39 @@ def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random
         return genome
     child = genome.clone()
     template = rng.choice(hidden)
-    incoming = [conn.in_id for conn in child.enabled_connections() if conn.out_id == template and child.nodes[conn.in_id].coordinate is not None]
-    outputs = [conn.out_id for conn in child.enabled_connections() if conn.in_id == template and child.nodes[conn.out_id].kind is NodeKind.OUTPUT]
-    if not incoming or not outputs:
+    incoming = [conn for conn in child.enabled_connections() if conn.out_id == template and child.nodes[conn.in_id].coordinate is not None]
+    output_edges = [conn for conn in child.enabled_connections() if conn.in_id == template and child.nodes[conn.out_id].kind is NodeKind.OUTPUT]
+    if not incoming or not output_edges:
         return child
+
+    def offset_key(node_id: int, center: tuple[float, ...] | None) -> tuple[float, ...]:
+        coordinate = child.nodes[node_id].coordinate
+        if coordinate is None or center is None or len(coordinate) != len(center):
+            return (math.inf,)
+        return tuple(value - anchor for value, anchor in zip(coordinate, center))
+
+    template_center = child.nodes[template].coordinate
+    incoming = sorted(incoming, key=lambda conn: offset_key(conn.in_id, template_center))
+    if tied:
+        # Tag the template's own genes first (idempotent: existing groups are reused), so the
+        # template and every copy share parameters. Group ids are run-unique tracker markers.
+        retagged: dict[int, int] = {}
+        for index, conn in enumerate(incoming):
+            group = conn.tie_group if conn.tie_group is not None else ctx.innovations.new_marker()
+            retagged[id(conn)] = group
+        out_groups: dict[int, int] = {}
+        for conn in output_edges:
+            out_groups[id(conn)] = conn.tie_group if conn.tie_group is not None else ctx.innovations.new_marker()
+        child.connections = [
+            replace(conn, tie_group=retagged[id(conn)]) if id(conn) in retagged else replace(conn, tie_group=out_groups[id(conn)]) if id(conn) in out_groups else conn
+            for conn in child.connections
+        ]
+        incoming = sorted(
+            [conn for conn in child.enabled_connections() if conn.out_id == template and child.nodes[conn.in_id].coordinate is not None],
+            key=lambda conn: offset_key(conn.in_id, template_center),
+        )
+        output_edges = [conn for conn in child.enabled_connections() if conn.in_id == template and child.nodes[conn.out_id].kind is NodeKind.OUTPUT]
+
     field_size = len(incoming)
     sources = [node_id for node_id in (*child.input_ids, *child.hidden_ids) if child.nodes[node_id].coordinate is not None]
     for seed in rng.sample(sources, min(copies, len(sources))):
@@ -513,10 +827,43 @@ def add_shared_motif(genome: Genome, ctx: MutationContext, *, rng: random.Random
         if not coords:
             continue
         new_id = ctx.innovations.new_node_id()
-        child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, child.nodes[template].activation, _centroid(coords))
-        for source in field:
-            if not would_create_cycle(child, source, new_id):
+        center = _centroid(coords)
+        child.nodes[new_id] = NodeGene(new_id, NodeKind.HIDDEN, child.nodes[template].activation, center)
+        # One reachability snapshot per copy instead of a per-source adjacency rebuild. Mid-loop
+        # appends only add edges INTO new_id, which cannot extend any walk FROM new_id, so the
+        # snapshot answers exactly what the per-call rebuild answered (structurally always False
+        # today: new_id is a sink until its output readouts land below).
+        reach = ForwardReachability(child)
+        field_sorted = sorted(field, key=lambda node_id: offset_key(node_id, center)) if tied else field
+        for index, source in enumerate(field_sorted):
+            if reach.creates_cycle(source, new_id):
+                continue
+            if tied and index < len(incoming):
+                matched = incoming[index]  # offset-rank correspondence: i-th offset shares the i-th template weight
+                child.connections.append(ConnectionGene(source, new_id, matched.weight, True, ctx.innovations.innovation(source, new_id), tie_group=matched.tie_group))
+            else:
                 child.connections.append(ConnectionGene(source, new_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(source, new_id)))
-        for output in outputs:
-            child.connections.append(ConnectionGene(new_id, output, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output)))
+        for edge_index, output_edge in enumerate(output_edges):
+            if tied:
+                child.connections.append(
+                    ConnectionGene(new_id, output_edge.out_id, output_edge.weight, True, ctx.innovations.innovation(new_id, output_edge.out_id), tie_group=output_edge.tie_group)
+                )
+            else:
+                child.connections.append(ConnectionGene(new_id, output_edge.out_id, rng.gauss(0.0, 1.0), True, ctx.innovations.innovation(new_id, output_edge.out_id)))
+    return child
+
+
+@MUTATION.register("untie_motif_weights")
+def untie_motif_weights(genome: Genome, ctx: MutationContext, *, rng: random.Random, prob: float = 0.05) -> Genome:
+    """Dissolve one tie group: every member keeps the shared value as its own independent weight,
+    so the child computes the identical function at birth and gradient training may then specialize
+    the copies (the inverse of add_shared_motif(tied=true); evolution owns the share/unshare dial)."""
+    if rng.random() >= prob:
+        return genome
+    groups = sorted({conn.tie_group for conn in genome.connections if conn.tie_group is not None})
+    if not groups:
+        return genome
+    child = genome.clone()
+    doomed = rng.choice(groups)
+    child.connections = [replace(conn, tie_group=None) if conn.tie_group == doomed else conn for conn in child.connections]
     return child

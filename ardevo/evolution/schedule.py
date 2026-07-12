@@ -1,9 +1,9 @@
-"""Schedule: an independent, swappable stage that picks which task the population faces next.
+"""Schedule: an independent, swappable stage that picks which task the run faces next.
 
-The continuous trial runs `generations_per_task` generations on one task, then asks the scheduler
-for the next one. Schedulers are stateful (cursors / last pick) so the interleaving is reproducible
-and survives a checkpoint; the registry returns configured instances, like speciation. To add a
-curriculum, register one class and name it in `[schedule].kind`.
+The orchestrated trial asks the scheduler for the next pool index before every solve. Schedulers
+are stateful (cursors / last pick) so the interleaving is reproducible and survives a checkpoint;
+the registry returns configured instances, like speciation. To add a curriculum, register one
+class and name it in `[schedule].kind`.
 """
 
 import random
@@ -29,6 +29,11 @@ def _build_round_robin(**_params: object) -> "RoundRobinSchedule":
 @SCHEDULE.register("interleave_rungs")
 def _build_interleave(**_params: object) -> "InterleaveRungsSchedule":
     return InterleaveRungsSchedule()
+
+
+@SCHEDULE.register("regret")
+def _build_regret(*, accept_threshold: float = 0.95, explore_fraction: float = 0.25, hard_floor: float = 0.1, solved_weight: float = 0.05, **_params: object) -> "RegretSchedule":
+    return RegretSchedule(accept_threshold=accept_threshold, explore_fraction=explore_fraction, hard_floor=hard_floor, solved_weight=solved_weight)
 
 
 def build_schedule(config: dict[str, Any]) -> Any:
@@ -77,6 +82,67 @@ class RoundRobinSchedule:
 
     def load_state_dict(self, data: dict[str, Any]) -> None:
         self.position = int(data["position"])
+
+
+@dataclass
+class RegretSchedule:
+    """ACCEL-style frontier prioritization: attempt the rung with the most learnable headroom.
+
+    Regret per rung = accept_threshold minus the best metric any attempt has reached there
+    (the trial feeds outcomes back through `observe`). Unattempted rungs outrank everything
+    (regret plus an unseen bonus), solved rungs decay to `solved_weight` (revisits are cheap
+    library hits anyway), and rungs stuck below `hard_floor` halve their score (a wall with no
+    signal should not eat the run: the goldilocks band). `explore_fraction` of picks stay uniform
+    random so no rung is ever starved and the rng contract matches the other schedulers. Within a
+    rung, tasks advance by cursor exactly like interleave_rungs."""
+
+    accept_threshold: float = 0.95
+    explore_fraction: float = 0.25
+    hard_floor: float = 0.1
+    solved_weight: float = 0.05
+    best_metric: dict[int, float] = field(default_factory=dict)
+    attempts: dict[int, int] = field(default_factory=dict)
+    task_cursors: dict[int, int] = field(default_factory=dict)
+
+    def observe(self, rung: int, metric: float, solved: bool) -> None:
+        self.attempts[rung] = self.attempts.get(rung, 0) + 1
+        observed = self.accept_threshold if solved else float(metric)
+        self.best_metric[rung] = max(self.best_metric.get(rung, 0.0), observed)
+
+    def _score(self, rung: int) -> float:
+        if rung not in self.attempts:
+            return self.accept_threshold + 1.0  # first contact beats every partially-known rung
+        best = self.best_metric.get(rung, 0.0)
+        if best >= self.accept_threshold:
+            return self.solved_weight
+        regret = self.accept_threshold - best
+        return regret * 0.5 if best < self.hard_floor else regret
+
+    def next_index(self, pool: list[TaskEntry], rng: random.Random) -> int:
+        by_rung: dict[int, list[int]] = {}
+        for index, entry in enumerate(pool):
+            by_rung.setdefault(entry.rung, []).append(index)
+        rungs = sorted(by_rung)
+        if rng.random() < self.explore_fraction:
+            rung = rungs[rng.randrange(len(rungs))]
+        else:
+            rung = max(rungs, key=lambda candidate: (self._score(candidate), -candidate))  # ties: lowest rung first
+        cursor = self.task_cursors.get(rung, 0)
+        self.task_cursors[rung] = cursor + 1
+        indices = by_rung[rung]
+        return indices[cursor % len(indices)]
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "best_metric": {str(rung): value for rung, value in self.best_metric.items()},
+            "attempts": {str(rung): count for rung, count in self.attempts.items()},
+            "task_cursors": {str(rung): cursor for rung, cursor in self.task_cursors.items()},
+        }
+
+    def load_state_dict(self, data: dict[str, Any]) -> None:
+        self.best_metric = {int(rung): float(value) for rung, value in data["best_metric"].items()}
+        self.attempts = {int(rung): int(count) for rung, count in data["attempts"].items()}
+        self.task_cursors = {int(rung): int(cursor) for rung, cursor in data["task_cursors"].items()}
 
 
 @dataclass

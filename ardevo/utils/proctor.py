@@ -42,22 +42,15 @@ class Proctor(ABC):
         self.start_time = time.time()
 
     def _get_device(self) -> torch.device:
-        """Map machine_env to a torch device."""
-        machine_env = self.config.get("machine_env", "local")
-        if machine_env == "MonadMetal":
-            if torch.backends.mps.is_available():
-                logger.info("Using Metal (MPS) device")
-                return torch.device("mps")
-            logger.warning("MPS not available, falling back to CPU")
-            return torch.device("cpu")
-        if machine_env == "LatticeCUDA":
-            if torch.cuda.is_available():
-                logger.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
-                return torch.device("cuda")
-            logger.warning("CUDA not available, falling back to CPU")
-            return torch.device("cpu")
-        logger.info("Using CPU device")
-        return torch.device("cpu")
+        """Map the run configuration to a torch device (the shared resolver owns the mapping)."""
+        from ardevo.utils.device import resolve_compute_device
+
+        device = resolve_compute_device(self.config)
+        if device.type == "cuda":
+            logger.info("Using CUDA device: %s", torch.cuda.get_device_name(0))
+        else:
+            logger.info("Using %s device", device.type.upper() if device.type == "mps" else device.type)
+        return device
 
     def log_scalar(self, category: str, series: str, value: float, iteration: int) -> None:
         """Report a scalar to ClearML (no-op when offline)."""

@@ -9,6 +9,9 @@ results/*
 analysis_results/*
 ablation_results/*
 ai/*
+library/
+library_wall/
+results/
 
 
 # ==================================================================

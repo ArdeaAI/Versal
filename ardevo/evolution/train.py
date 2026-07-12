@@ -16,10 +16,11 @@ elementwise, so one optimizer over the stack updates each candidate exactly as i
 would. Padded and non-edge entries start at zero with zero gradient and stay zero.
 """
 
+import math
 import random
 import time
 from dataclasses import replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
@@ -28,6 +29,9 @@ from ardevo.evaluation import support_loss, support_loss_deep
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
 from ardevo.substrate import SubstrateModule
+
+if TYPE_CHECKING:
+    from ardevo.substrate import GraphNet
 
 TrainOp = Callable[..., tuple[Genome, SubstrateModule]]
 PopulationTrainOp = Callable[..., list[tuple[Genome, SubstrateModule]]]
@@ -59,6 +63,7 @@ def gradient(
     lr: float = 0.01,
     writeback: bool = True,
     weight_decay: float = 0.0,
+    score_candidates: bool = False,
 ) -> tuple[Genome, SubstrateModule]:
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
@@ -77,6 +82,65 @@ def gradient(
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
+    if score_candidates:  # NeST/GradMax growth hints from the trained weights (one extra backward)
+        from ardevo.evolution.growth import attach_growth_hints
+
+        genome = attach_growth_hints(genome, module, encoded, cloned=writeback)
+    return genome, module
+
+
+def _scheduled_learning_rates(steps: int, lr: float, *, warmup_fraction: float = 0.05, final_lr_fraction: float = 0.05) -> list[float]:
+    """Linear warmup to `lr`, then cosine decay to `lr * final_lr_fraction`."""
+    warmup_steps = max(1, int(steps * warmup_fraction))
+    floor = lr * final_lr_fraction
+    rates: list[float] = []
+    for step in range(steps):
+        if step < warmup_steps:
+            rates.append(lr * (step + 1) / warmup_steps)
+        else:
+            progress = (step - warmup_steps) / max(1, steps - warmup_steps)
+            rates.append(floor + (lr - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return rates
+
+
+@TRAIN.register("gradient_scheduled")
+def gradient_scheduled(
+    genome: Genome,
+    module: SubstrateModule,
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 200,
+    lr: float = 0.01,
+    warmup_fraction: float = 0.05,
+    final_lr_fraction: float = 0.05,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+    score_candidates: bool = False,
+) -> tuple[Genome, SubstrateModule]:
+    # Warmup + cosine decay: fixed-lr Adam stalls in oscillatory loss regions that a decaying rate
+    # anneals through. Measured on the CPPN-generator landscape (ai/trial/probe_6): the same
+    # topology goes 0.55 (fixed lr) -> 0.92+ (scheduled) query, which made trainability, not
+    # search, gate E's binding constraint. rng-free like every train op (the batching contract).
+    parameters = _trainable_parameters(module)
+    if steps <= 0 or not module.has_edges or not parameters:
+        return genome, module
+    optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
+    for step_lr in _scheduled_learning_rates(steps, lr, warmup_fraction=warmup_fraction, final_lr_fraction=final_lr_fraction):
+        for group in optimizer.param_groups:
+            group["lr"] = step_lr
+        optimizer.zero_grad()
+        loss = support_loss(module, encoded)
+        if not loss.requires_grad or not torch.isfinite(loss):
+            break
+        loss.backward()
+        optimizer.step()
+    if writeback:
+        genome = _writeback(genome, module)
+    if score_candidates:
+        from ardevo.evolution.growth import attach_growth_hints
+
+        genome = attach_growth_hints(genome, module, encoded, cloned=writeback)
     return genome, module
 
 
@@ -91,12 +155,19 @@ def gradient_refine(
     lr: float = 0.01,
     writeback: bool = True,
     weight_decay: float = 0.0,
+    score_candidates: bool = False,
+    contractivity_weight: float = 0.0,
 ) -> tuple[Genome, SubstrateModule]:
     """Deep-supervised gradient training for the refine substrate (TRM): backprop a loss summed over
     every refinement pass, through the full recursion. Falls back to plain `gradient` for modules
-    that do not refine (steps==1 genomes decode to a GraphNet), so it is a safe drop-in trainer."""
+    that do not refine (steps==1 genomes decode to a GraphNet), so it is a safe drop-in trainer.
+
+    `contractivity_weight` > 0 adds a Lipschitz-style penalty on the recurrent weight block
+    (relu(frobenius - 1), the cheap upper bound on the spectral norm), keeping the iterated update
+    map contractive: the DT-L finding that makes deep unrolls train stably and gives fixed-point
+    convergence a meaning. 0.0 (the default) is off, byte-identical."""
     if not hasattr(module, "refine_trace"):
-        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates)
     parameters = _trainable_parameters(module)
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
@@ -104,6 +175,14 @@ def gradient_refine(
     for _ in range(steps):
         optimizer.zero_grad()
         loss = support_loss_deep(module, encoded)
+        if contractivity_weight > 0.0 and hasattr(module, "recurrent_weights"):
+            from typing import cast
+
+            from ardevo.substrate import RecurrentGraphNet
+
+            recurrent_net = cast(RecurrentGraphNet, module)
+            recurrent_masked = recurrent_net.recurrent_weights * recurrent_net.recurrent_mask
+            loss = loss + contractivity_weight * torch.relu(recurrent_masked.norm() - 1.0)
         if not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
@@ -111,6 +190,42 @@ def gradient_refine(
     if writeback:
         genome = _writeback(genome, module)
     return genome, module
+
+
+def partition_batchable(
+    cores: "list[tuple[GraphNet | None, torch.Tensor | None]]",
+    *,
+    steps: int,
+    max_padded_nodes: int,
+    min_batch_nodes: int = 0,
+) -> tuple[list[int], list[int]]:
+    """Split candidate indices into (batchable, serial). The single partition seam shared by the
+    population trainers and the Evolver's hybrid assess router, so the two can never disagree
+    about which candidates the batch program will take. Batchable = a plain GraphNet core within
+    the padding budget whose I/O signature + head columns match the FIRST batchable candidate.
+    `min_batch_nodes` is the WIDTH FLOOR: below it the pool wins (measured: 12 workers beat the
+    MPS batch program at grown-from-minimal sizes), so small candidates go serial and the device
+    engages only where it measured a win. 0 = no floor (the pre-knob behavior)."""
+    batch_indices: list[int] = []
+    serial_indices: list[int] = []
+    reference: tuple[tuple[int, int], torch.Tensor | None] | None = None
+    for index, (net, columns) in enumerate(cores):
+        if net is None or steps <= 0 or net.n > max_padded_nodes or net.n < min_batch_nodes:
+            serial_indices.append(index)
+            continue
+        signature = (int(net.input_pos.numel()), int(net.output_pos.numel()))
+        if reference is None:
+            reference = (signature, columns)
+        ref_signature, ref_columns = reference
+        same_columns = (columns is None and ref_columns is None) or (columns is not None and ref_columns is not None and bool(torch.equal(columns, ref_columns)))
+        if signature == ref_signature and same_columns:
+            batch_indices.append(index)
+        else:
+            serial_indices.append(index)
+    if len(batch_indices) < 2:  # padding a single candidate buys nothing over the plain path
+        serial_indices = sorted(serial_indices + batch_indices)
+        batch_indices = []
+    return batch_indices, serial_indices
 
 
 @TRAIN_POPULATION.register("gradient_batched")
@@ -126,44 +241,116 @@ def gradient_batched(
     weight_decay: float = 0.0,
     device: str = "auto",
     max_padded_nodes: int = 1024,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+    score_candidates: bool = False,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
     params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
     product/macro/composed substrates, oversized padding, mismatched heads) no longer force the
     WHOLE generation onto the sequential path; `fallback` reports the serial fraction."""
+    return _gradient_batched_impl(
+        genomes,
+        modules,
+        encoded,
+        rng=rng,
+        steps=steps,
+        lr=lr,
+        writeback=writeback,
+        weight_decay=weight_decay,
+        device=device,
+        max_padded_nodes=max_padded_nodes,
+        min_batch_nodes=min_batch_nodes,
+        adam_fused=adam_fused,
+        torch_compile=torch_compile,
+        score_candidates=score_candidates,
+        serial_op=gradient,
+    )
+
+
+@TRAIN_POPULATION.register("gradient_refine")
+def gradient_refine_population(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 20,
+    lr: float = 0.01,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+    device: str = "auto",
+    max_padded_nodes: int = 1024,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+    score_candidates: bool = False,
+) -> list[tuple[Genome, SubstrateModule]]:
+    """Population form of `gradient_refine`. Correct by exclusion: `core()` keeps every refine/
+    recurrent/product/macro module OUT of the batch (they train through sequential
+    `gradient_refine`, deep supervision intact), and for the plain-GraphNet remainder
+    `gradient_refine` IS plain `gradient` (no `refine_trace`), which is exactly the batch program's
+    math. Registered under the same name so `[orchestrator.direct.train] kind = "gradient_refine"`
+    batches with zero config edits; `batched = false` on the table restores the pool-only path."""
+    return _gradient_batched_impl(
+        genomes,
+        modules,
+        encoded,
+        rng=rng,
+        steps=steps,
+        lr=lr,
+        writeback=writeback,
+        weight_decay=weight_decay,
+        device=device,
+        max_padded_nodes=max_padded_nodes,
+        min_batch_nodes=min_batch_nodes,
+        adam_fused=adam_fused,
+        torch_compile=torch_compile,
+        score_candidates=score_candidates,
+        serial_op=gradient_refine,
+    )
+
+
+def _gradient_batched_impl(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int,
+    lr: float,
+    writeback: bool,
+    weight_decay: float,
+    device: str,
+    max_padded_nodes: int,
+    serial_op: TrainOp,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+    score_candidates: bool = False,
+) -> list[tuple[Genome, SubstrateModule]]:
     from ardevo.substrate_batched import BatchedGraphNet
 
     started = time.perf_counter()
     cores = [module.core() for module in modules]
-    batch_indices: list[int] = []
-    serial_indices: list[int] = []
-    reference: tuple[tuple[int, int], torch.Tensor | None] | None = None
-    for index, (net, columns) in enumerate(cores):
-        if steps <= 0 or net is None or net.n > max_padded_nodes:
-            serial_indices.append(index)
-            continue
-        signature = (int(net.input_pos.numel()), int(net.output_pos.numel()))
-        if reference is None:
-            reference = (signature, columns)
-        ref_signature, ref_columns = reference
-        same_columns = (columns is None and ref_columns is None) or (columns is not None and ref_columns is not None and bool(torch.equal(columns, ref_columns)))
-        if signature == ref_signature and same_columns:
-            batch_indices.append(index)
-        else:
-            serial_indices.append(index)
-    if len(batch_indices) < 2:  # padding a single candidate buys nothing over the plain path
-        serial_indices = sorted(serial_indices + batch_indices)
-        batch_indices = []
+    batch_indices, serial_indices = partition_batchable(cores, steps=steps, max_padded_nodes=max_padded_nodes, min_batch_nodes=min_batch_nodes)
 
     results: list[tuple[Genome, SubstrateModule] | None] = [None] * len(modules)
     for index in serial_indices:
-        results[index] = gradient(genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay)
+        # score_candidates threads to the serial subset only; batch-trained candidates skip growth
+        # hints (the tensor program has no per-candidate replay), which is honest and documented.
+        results[index] = serial_op(
+            genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates
+        )
 
     n_max = 0.0
     pad_efficiency = 0.0
     if batch_indices:
+        from ardevo.utils.device import auto_device
+
         nets = [net for index in batch_indices if (net := cores[index][0]) is not None]
-        resolved = torch.device("mps") if device == "auto" and torch.backends.mps.is_available() else torch.device(device if device != "auto" else "cpu")
+        resolved = auto_device() if device == "auto" else torch.device(device)
         batched = BatchedGraphNet(nets, device=resolved)
         x, _descriptor = encoded.support_input
         target, mask, descriptor = encoded.support_target
@@ -174,10 +361,15 @@ def gradient_batched(
         population = len(nets)
 
         if batched.mask.any():
-            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay)
+            # Both knobs default OFF: fused Adam is cuda-only and not bit-equal to the unfused
+            # step; torch.compile recompiles as the population shape churns generation to
+            # generation, so it must prove itself on `uv run benchmark` before use.
+            fused = bool(adam_fused and resolved.type == "cuda")
+            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay, fused=fused)
+            program = torch.compile(batched, dynamic=True) if torch_compile else batched
             for _ in range(steps):
                 optimizer.zero_grad()
-                out = batched(x_device)  # [P, B, n_out]
+                out = program(x_device)  # [P, B, n_out]
                 if columns is not None:
                     out = out.index_select(2, columns)
                 folded = out.reshape(population * x_device.shape[0], -1)

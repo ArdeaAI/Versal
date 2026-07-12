@@ -9,9 +9,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "clearml>=1.16",
     "datasets>=5.0.0",
-    "evosax>=0.2.0",
     "matplotlib>=3.9",
-    "networkx>=3",
     "psutil>=6.0",
     "rich",
     "torch>=2.12.0",
@@ -22,6 +20,10 @@ app = "ardevo.main:main"
 rung_doctor = "ardevo.tools.rung_doctor:main"
 render = "ardevo.tools.net_gallery:main"
 benchmark = "ardevo.tools.bench_throughput:main"
+library_gc = "ardevo.tools.library_gc:main"
+motif_census = "ardevo.tools.motif_census:main"
+cppn_spike = "ardevo.tools.cppn_spike:main"
+run_matrix = "ardevo.tools.run_matrix:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,7 +35,6 @@ packages = ["ardevo"]
 [dependency-groups]
 dev = [
     "pytest",
-    "pytest-asyncio",
     "ruff",
     "ty",
 ]

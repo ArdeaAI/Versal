@@ -20,12 +20,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
-from ardevo.evaluation import input_width, output_features
+from ardevo.evaluation import fit_query_target, input_width, output_features
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
-from ardevo.evolution.genome import Genome
+from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
-from ardevo.library import ModuleLibrary
+from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, structural_fingerprint
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
 
@@ -55,6 +55,42 @@ class StrategyResult:
     champion_comp: AssessedComposition | None = None  # composition-shaped winner (verified fresh)
     champion_genome: Genome | None = None  # module-shaped winner (trained weights written back)
     champion_metrics: dict[str, float] = field(default_factory=dict)
+    # A routed winner is a RECORD (ardevo.routing.RoutedSolution), not an admissible payload: the
+    # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
+    champion_routed: Any | None = None
+    # Refine-on-hit fairness: the best metric the grafted seed itself reached under THIS run's
+    # training. The refine comparator uses it as the incumbent baseline, so a candidate must beat
+    # the incumbent given the same training, not just beat its untrained quick-eval score.
+    seed_metric: float | None = None
+    # Champion/population size stats: the always-on bloat readout. Task cost tracks genome size,
+    # so growth must be visible in run_summary rows, not only through `seconds` (the diag_g2
+    # free-growth arm hit hour-scale tasks with zero size signal in any record).
+    size_metrics: dict[str, float] = field(default_factory=dict)
+
+
+def _module_size_metrics(champion: Genome, population: list[Assessed]) -> dict[str, float]:
+    """Champion plus final-population genome size. The population medians are what show a
+    free-growth run inflating task over task; the champion scalars are what admission shelves."""
+    metrics = {
+        "champion_nodes": float(len(champion.nodes)),
+        "champion_connections": float(len(champion.enabled_connections())),
+        "champion_complexity": float(champion.complexity()),
+    }
+    if population:
+        node_counts = sorted(len(member.genome.nodes) for member in population)
+        connection_counts = sorted(len(member.genome.enabled_connections()) for member in population)
+        metrics["pop_median_nodes"] = float(node_counts[len(node_counts) // 2])
+        metrics["pop_max_nodes"] = float(node_counts[-1])
+        metrics["pop_median_connections"] = float(connection_counts[len(connection_counts) // 2])
+        metrics["pop_max_connections"] = float(connection_counts[-1])
+    return metrics
+
+
+def comp_size_metrics(comp: Any) -> dict[str, float]:
+    """Composition-shaped champions: module count plus glue complexity (inner genome cost is
+    priced at the module layer, not here). Public because the routed strategy stamps the same
+    keys on a distilled win."""
+    return {"champion_modules": float(len(comp.module_ids)), "champion_complexity": float(comp.complexity())}
 
 
 @EVOLVE_STRATEGY.register("composition")
@@ -90,6 +126,7 @@ class CompositionStrategy:
             generations_used=progress["generations"],
             champion_comp=verified,
             champion_metrics=dict(verified.metrics),
+            size_metrics=comp_size_metrics(verified.comp),
         )
 
     def _verify(self, best: AssessedComposition, spec: CompTaskSpec, runtime: StrategyRuntime) -> AssessedComposition:
@@ -117,13 +154,15 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
     evolution = {key: value for key, value in config.get("evolution", {}).items() if key != "loop"}
     evolution["pop_size"] = int(table.get("pop_size", 48))
     evolution["elitism"] = int(table.get("elitism", 2))
+    evolution["assess_workers"] = table.get("assess_workers", 0)  # "auto" resolves in build_evolver
+    overlay["library_dir"] = config.get("orchestrator", {}).get("library_dir", "library")
     # Single-task structure growth usually wants a stronger inner trainer (and sometimes a
     # different mutation recipe) than the composition loop's glue fitting; both are overridable.
-    for overridable in ("mutation", "train", "evaluate"):
+    for overridable in ("mutation", "train", "evaluate", "novelty", "halving_stages", "halving_keep"):
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
-    return DirectStrategy(evolver=build_evolver(overlay))
+    return DirectStrategy(evolver=build_evolver(overlay), max_flat_outputs=int(table.get("max_flat_outputs", 0)), max_init_genes=int(table.get("max_init_genes", 0)))
 
 
 @dataclass
@@ -134,6 +173,19 @@ class DirectStrategy:
 
     evolver: Evolver
     name: str = "direct"
+    # Decline tasks whose flattened OUTPUT width exceeds this ([orchestrator.direct]
+    # max_flat_outputs; 0 = off). The flat substrate's [n, h] weight matrix is DENSE and h spans
+    # every output node, so a wide-output task (rungs 12-14, 18 class) would allocate GBs per
+    # genome before its first forward. Declining lets the ladder escalate to composition (whose
+    # glue is already rank-factored above glue_rank_threshold) and to the decomposers.
+    max_flat_outputs: int = 0
+    # Decline tasks whose dense-init gene count (flat_inputs + 1) * flat_outputs exceeds this
+    # ([orchestrator.direct] max_init_genes; 0 = off): the input-side twin of max_flat_outputs.
+    # The per-task deadline only fires between ladder positions and between generations, so an
+    # oversize minimal init plus its first generation (Python object churn, ~0.8 GB genome pickles
+    # to the assess pool) runs for HOURS before any check exists; a 409,600 x 8 task wedged two
+    # runs on 2026-07-06 exactly this way. The attempt must be refused from arithmetic alone.
+    max_init_genes: int = 0
 
     def _adapter(self, task: Task) -> TaskAdapter | TemporalTaskAdapter:
         support_input, _support_output = support_loader(task)
@@ -143,8 +195,8 @@ class DirectStrategy:
         for dim in support_input.data.shape[1:]:
             width *= int(dim)
         encoder = Level0Encoder(max_flat_dim=width)
-        encoded = encode_task(task, encoder)
-        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded))
+        encoded = fit_query_target(encode_task(task, encoder))
+        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), grid_shape=self._grid_shape(task))
 
     @staticmethod
     def _grid_shape(task: Task) -> tuple[int, ...] | None:
@@ -160,7 +212,21 @@ class DirectStrategy:
         *,
         budget: int,
         seed_comps: list | None = None,
+        seed_entries: list[LibraryEntry] | None = None,
     ) -> StrategyResult:
+        if self.max_flat_outputs > 0 or self.max_init_genes > 0:
+            support_input, support_output = support_loader(task)
+            flat_outputs = 1
+            for dim in support_output.data.shape[1:]:
+                flat_outputs *= int(dim)
+            if 0 < self.max_flat_outputs < flat_outputs:
+                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
+            flat_inputs = 1
+            for dim in support_input.data.shape[1:]:
+                flat_inputs *= int(dim)
+            init_genes = (flat_inputs + 1) * flat_outputs
+            if 0 < self.max_init_genes < init_genes:
+                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
         adapter = self._adapter(task)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
@@ -174,11 +240,37 @@ class DirectStrategy:
             from ardevo.evolution.init import stamp_input_coordinates
 
             self.evolver.init_op = lambda n_inputs, n_outputs, *, rng: stamp_input_coordinates(original_init(n_inputs, n_outputs, rng=rng), grid)
+
+        def seeded_front(tracker: InnovationTracker) -> list[Genome]:
+            # Refine-on-hit warm start: grafted entries take the front of the population and are
+            # trained/assessed like every other member. Grid stamping keeps geometry mutators live.
+            grafted = [graft(entry, tracker) for entry in (seed_entries or [])]
+            if grid is not None:
+                from ardevo.evolution.init import stamp_input_coordinates
+
+                grafted = [stamp_input_coordinates(genome, grid) for genome in grafted]
+            return grafted
+
         try:
             # Shared rng: keeps the whole solve deterministic per seed and checkpoint-coherent.
-            state = self.evolver.seed_state(adapter, runtime.state.rng)
+            state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
         finally:
             self.evolver.init_op = original_init
+        # Refine fairness: the grafted seeds' TRAINED standing is the incumbent baseline. Lineage is
+        # tracked by structural fingerprint (selection reshuffles the population, and a same-topology
+        # descendant with remixed weights is still the incumbent topology, so it counts).
+        seed_fingerprints: set[str] = set()
+        seed_metric: float | None = None
+        if seed_entries:
+            seed_fingerprints = {structural_fingerprint(MODULE, genome_to_dict(member.genome)) for member in state.population[: len(seed_entries)]}
+
+        def refresh_seed_metric() -> None:
+            nonlocal seed_metric
+            for member in state.population:
+                if structural_fingerprint(MODULE, genome_to_dict(member.genome)) in seed_fingerprints:
+                    value = runtime.metric_of(member)
+                    seed_metric = value if seed_metric is None else max(seed_metric, value)
+
         stop = runtime.stall_factory(budget)
         best: Assessed = max(state.population, key=lambda item: item.fitness)
         generations = 0
@@ -186,6 +278,8 @@ class DirectStrategy:
             generation_best = max(state.population, key=lambda item: item.fitness)
             if generation_best.fitness > best.fitness:
                 best = generation_best
+            if seed_fingerprints:
+                refresh_seed_metric()
             if runtime.on_generation is not None:
                 mean_fitness = sum(item.fitness for item in state.population) / len(state.population)
                 runtime.on_generation(self.name, generation, generation_best, mean_fitness)
@@ -204,7 +298,17 @@ class DirectStrategy:
             generations_used=generations,
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
+            seed_metric=seed_metric,
+            size_metrics=_module_size_metrics(verified.genome, state.population),
         )
+
+
+@EVOLVE_STRATEGY.register("routed")
+def _build_routed(config: dict[str, Any]) -> Any:
+    # Lazy import (the train.py pattern): routing pulls in torch-heavy machinery only when configured.
+    from ardevo.routing import build_routed_strategy
+
+    return build_routed_strategy(config)
 
 
 def build_strategies(config: dict[str, Any]) -> list[tuple[str, Callable[..., StrategyResult]]]:

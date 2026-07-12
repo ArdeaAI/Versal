@@ -168,6 +168,61 @@ def test_isolated_node_is_faint() -> None:
     assert len(faint) == 1 and faint[0].size == 0.5
 
 
+def test_small_genome_layout_pinned() -> None:
+    # Pins the pre-wrap column layout: layers below _MAX_COLUMN_NODES must place exactly as before
+    # the block-wrap change (fixed 2.6-unit column pitch, vertically centered stacks).
+    genome = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.INPUT, "identity"),
+            2: NodeGene(2, NodeKind.BIAS, "identity"),
+            3: NodeGene(3, NodeKind.OUTPUT, "identity"),
+            4: NodeGene(4, NodeKind.HIDDEN, "tanh"),
+        },
+        connections=[ConnectionGene(0, 4, 1.0, True, 0), ConnectionGene(4, 3, 1.0, True, 1), ConnectionGene(1, 3, 1.0, True, 2)],
+    )
+    spec = build_genome_spec(genome)
+    positions = {(round(node.x, 6), round(node.y, 6)) for node in spec.nodes}
+    assert positions == {(0.5, 3.9), (0.5, 2.2), (0.5, 0.5), (3.1, 2.2), (5.7, 2.2)}
+    assert (round(spec.width, 6), round(spec.height, 6)) == (6.2, 4.4)
+
+
+def test_wide_layer_wraps_into_block() -> None:
+    # The ARC-scale failure: a 2,000-node output layer must wrap into a near-square block instead of
+    # one 3,400-unit column that set_aspect("equal") crushes into a one-pixel vertical line.
+    n_in, n_out = 200, 2000
+    nodes = {i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(n_in)}
+    for j in range(n_out):
+        nodes[n_in + j] = NodeGene(n_in + j, NodeKind.OUTPUT, "identity")
+    connections = [ConnectionGene(j % n_in, n_in + j, 0.1, True, j) for j in range(n_out)]
+    spec = build_genome_spec(Genome(nodes=nodes, connections=connections))
+
+    assert spec.node_count == n_in + n_out
+    aspect = max(spec.width, spec.height) / min(spec.width, spec.height)
+    assert aspect < 5.0
+    output_columns = {round(node.x, 6) for node in spec.nodes if node.color == THEME["node_output"]}
+    assert len(output_columns) == 45  # ceil(sqrt(2000)) rows -> 45 sub-columns
+
+
+def test_draw_spec_caps_edge_count() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    from ardevo.rendering import _MAX_STRAIGHT_EDGES, RenderSpec, SpecEdge, draw_spec
+
+    count = _MAX_STRAIGHT_EDGES + 10_000
+    edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
+    figure, axis = plt.subplots()
+    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0))
+    drawn = sum(len(artist.get_segments()) for artist in axis.collections if isinstance(artist, LineCollection))
+    assert drawn <= _MAX_STRAIGHT_EDGES
+    assert any(f"{count:,}" in text.get_text() for text in axis.texts)  # the honesty note names the true total
+    plt.close(figure)
+
+
 # --- png renders -----------------------------------------------------------------------------------
 
 
@@ -214,3 +269,130 @@ def test_composition_spec_without_library_uses_opaque_boxes() -> None:
     entry = library.load("c2_88ff427f98da")
     spec = build_entry_spec(entry, resolve=None)
     assert len(spec.containers) == 1 and spec.containers[0].opaque
+
+
+# --- overmind flow grid ----------------------------------------------------------------------------
+
+
+def _grid_view(count: int):
+    from ardevo.rendering import OvermindVertex, OvermindView
+
+    vertices = [OvermindVertex(key="", label=f"v{index}", embedding_rank=index) for index in range(count)]
+    return OvermindView(vertices=vertices, input_signatures=["IN_2"], output_signatures=["OUT_1"], d_model=8, top_k=1, max_steps=2)
+
+
+def test_overmind_grid_bands_and_rows() -> None:
+    from ardevo.rendering import THEME, build_overmind_spec
+
+    spec = build_overmind_spec(_grid_view(5), columns=4, legend=False)
+    input_nodes = [node for node in spec.nodes if node.color == THEME["node_input"]]
+    output_nodes = [node for node in spec.nodes if node.color == THEME["node_output"]]
+    assert len(input_nodes) == 1 and len(output_nodes) == 1
+    assert input_nodes[0].y == max(node.y for node in spec.nodes)  # input band at the TOP (y-up frame)
+    assert output_nodes[0].y == min(node.y for node in spec.nodes)  # output band at the BOTTOM
+    cells = [box for box in spec.containers if box.depth == 1]
+    assert len(cells) == 5
+    assert all(box.y1 < input_nodes[0].y and box.y0 > output_nodes[0].y for box in cells)  # grid strictly between the bands
+    row_tops = sorted({round(box.y1, 6) for box in cells}, reverse=True)
+    assert len(row_tops) == 2  # 5 cells at columns=4 -> a 4-row and a 1-row
+    assert sum(1 for box in cells if round(box.y1, 6) == row_tops[0]) == 4
+    assert not any(node.marker == "D" for node in spec.nodes)  # the gate hub is gone
+    band_labels = [text.text for text in spec.texts]
+    assert "IN_2" in band_labels and "OUT_1" in band_labels
+
+
+def test_overmind_fresh_library_draws_uniform_feeds() -> None:
+    from ardevo.rendering import THEME, build_overmind_spec
+
+    spec = build_overmind_spec(_grid_view(3), legend=False)  # every share is 0.0: no traffic yet
+    entry_edges = [edge for edge in spec.edges if edge.color == THEME["edge_entry"]]
+    exit_edges = [edge for edge in spec.edges if edge.color == THEME["edge_exit"]]
+    assert len(entry_edges) == 3 and len(exit_edges) == 3
+    assert all(edge.width == 0.8 for edge in entry_edges + exit_edges)  # uniform thin: the flow story on day one
+
+
+def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_genome: Genome) -> None:
+    from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
+
+    library = ModuleLibrary(tmp_path / "lib")
+    inner_key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
+    host_key = library.add(entry_type=MODULE, payload=genome_to_dict(_macro_host(inner_key)), io=_IO, provenance={"accepted_metric": 1.0})
+    view = OvermindView(
+        vertices=[OvermindVertex(key=host_key, label="host"), OvermindVertex(key=inner_key, label="inner", embedding_rank=1)],
+        input_signatures=["IN_2"],
+        output_signatures=["OUT_1"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    containment = [edge for edge in spec.edges if edge.color == THEME["edge_macro"] and edge.style == "dashed"]
+    assert len(containment) == 1  # host cell -> inner cell, dashed: structure, not traffic
+
+
+def test_overmind_legend_populates_texts_and_widens() -> None:
+    from ardevo.rendering import build_overmind_spec
+
+    bare = build_overmind_spec(_grid_view(2), legend=False)
+    keyed = build_overmind_spec(_grid_view(2), legend=True)
+    assert keyed.width > bare.width
+    labels = [text.text for text in keyed.texts]
+    assert "key" in labels
+    expected_labels = ("routing traffic (observed)", "input feed (step-0 gate mass)", "output feed (final-step gate mass)", "recurrent (time-delayed)")
+    for expected in expected_labels + ("built from (structural ref)",):
+        assert expected in labels
+
+
+def test_spec_text_draws() -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from ardevo.rendering import RenderSpec, SpecText, draw_spec
+
+    spec = RenderSpec(texts=[SpecText(1.0, 2.0, "hello")], width=4.0, height=4.0)
+    figure, axis = plt.subplots()
+    draw_spec(axis, spec)
+    assert any(text.get_text() == "hello" for text in axis.texts)
+    plt.close(figure)
+
+
+def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
+    import matplotlib.image as mpimg
+
+    from ardevo.rendering import RenderSpec, _render_spec_png
+
+    tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
+    image = mpimg.imread(tall)
+    assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square
+
+
+def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_genome: Genome) -> None:
+    """An image-scale expert (the 798-node MNIST stepping stone class) must degrade to its opaque
+    footprint instead of embedding a ~784-node input column that degenerates the whole portrait
+    into a tall-narrow bar and starves every other cell's budget."""
+    from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec
+
+    nodes = {i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(784)}
+    nodes[784] = NodeGene(784, NodeKind.OUTPUT, "identity")
+    wide = Genome(nodes=nodes, connections=[ConnectionGene(i, 784, 0.1, True, i) for i in range(784)])
+
+    library = ModuleLibrary(tmp_path / "lib")
+    wide_key = library.add(entry_type=MODULE, payload=genome_to_dict(wide), io=_IO, provenance={"accepted_metric": 0.7})
+    small_key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
+    view = OvermindView(
+        vertices=[OvermindVertex(key=wide_key, label="wide stone"), OvermindVertex(key=small_key, label="small", embedding_rank=1)],
+        input_signatures=["IN_784"],
+        output_signatures=["OUT_10"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    wide_boxes = [box for box in spec.containers if "wide stone" in (box.label or "")]
+    assert wide_boxes and all(box.opaque for box in wide_boxes)  # capped: footprint, not a 784-node bar
+    small_boxes = [box for box in spec.containers if (box.label or "").startswith("small")]
+    assert small_boxes and not all(box.opaque for box in small_boxes)  # small experts keep full detail
+    assert max(spec.width, spec.height) / max(min(spec.width, spec.height), 1e-6) < 6.0  # sane aspect

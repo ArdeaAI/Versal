@@ -1,19 +1,22 @@
 """Orchestrator: ladder order, stall detection, decomposition recursion, admission, anti-forgetting."""
 
 import json
+import math
 import random
 from pathlib import Path
 
+import pytest
 import torch
 
 from ardevo import checkpoint
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.composition import AssemblyContext, assemble, comp_from_dict, minimal_composition
-from ardevo.evolution.genome import InnovationTracker, genome_to_dict
+from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, state_from_dict, state_to_dict
 from ardevo.evolution.registry import build_loop
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
-from ardevo.orchestrator import Orchestrator, StallDetector, attempts_from_dicts, attempts_to_dicts, comp_task_spec
+from ardevo.orchestrator import Attempt, Orchestrator, RefinementRank, StallDetector, attempts_from_dicts, attempts_to_dicts, comp_task_spec, refinement_improves
+from ardevo.strategy import StrategyResult
 from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from tests.test_hierarchical_loop import _config as _loop_config
 
@@ -106,6 +109,41 @@ def test_max_depth_prevents_decomposition(tmp_path: Path, decomposable_task: Tas
     assert orchestrator.attempts[-1].outcome == "failed"
     assert orchestrator.counters["decompositions"] == 0
     assert calls == ["half_parity"]  # one evolve attempt, no recursion
+
+
+def test_attempts_carry_champion_sample_metrics(tmp_path: Path, xor_task: Task) -> None:
+    """The G0 diagnostic: hybrid-eval champions stamp their weight-sample metrics onto the Attempt
+    (whitelisted keys only), and metrics without the weight-sample marker leave the field empty."""
+    from ardevo.evolution.composition import minimal_composition as _minimal
+
+    orchestrator = _orchestrator(tmp_path, table={"max_depth": 0})
+
+    def run_task(spec, state, *, budget, stop=None, seed_comps=None, on_generation=None):
+        comp = _minimal(spec.input_specs, spec.output_ref, spec.output_width, state.comp_innovations, state.rng)
+        metrics = {
+            "query_accuracy": 0.6,
+            "query_loss": 0.4,
+            "support_accuracy": 0.6,
+            "support_loss": 0.4,
+            "mean_sample_accuracy": 0.55,
+            "max_sample_accuracy": 0.91,
+            "min_sample_accuracy": 0.4,
+            "best_sample_weight": -1.0,
+            "weight_robustness": 0.38,
+            "mean_sample_loss": 0.7,
+        }
+        return AssessedComposition(comp=comp, metrics=metrics, fitness=0.6, net=None)
+
+    _patch_run_task(orchestrator, run_task)
+    assert orchestrator.solve(xor_task) is None  # below the bar -> failed attempt
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.sample_metrics == {"mean_sample_accuracy": 0.55, "max_sample_accuracy": 0.91, "best_sample_weight": -1.0, "weight_robustness": 0.38}
+
+    plain = _orchestrator(tmp_path / "plain", table={"max_depth": 0})
+    _patch_run_task(plain, _fake_run_task({}, []))
+    assert plain.solve(xor_task) is None
+    assert plain.attempts[-1].sample_metrics == {}  # standard-eval metrics fabricate nothing
 
 
 def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decomposable_task: Task) -> None:
@@ -327,3 +365,360 @@ def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Tas
     assert len(state.modules) == len(orchestrator.state.modules)
     attempts = attempts_from_dicts(restored["attempts"])
     assert attempts_to_dicts(attempts) == attempts_to_dicts(orchestrator.attempts)
+
+
+# --- learn-mode refinement of library hits ---------------------------------------------------------
+
+
+def _refine_table(**overrides) -> dict:
+    return {"refine": {"budget_k": 8, "decay": 0.5, "min_generations": 4, "metric_epsilon": 0.005, "robustness_epsilon": 0.01, **overrides}}
+
+
+def _fake_direct(metric: float, robustness: float, genome, calls: list[dict], seed_metric: float | None = None):
+    """A stand-in direct strategy: records what refinement asked for, returns a fixed champion."""
+
+    def strategy(task, spec, runtime, *, budget: int, seed_comps=None, seed_entries=None) -> StrategyResult:
+        calls.append({"budget": budget, "seed_entries": seed_entries, "threshold": runtime.accept_threshold})
+        return StrategyResult(
+            strategy="direct",
+            metric=metric,
+            generations_used=budget,
+            champion_genome=genome,
+            champion_metrics={"weight_robustness": robustness, "query_accuracy": metric},
+            seed_metric=seed_metric,
+        )
+
+    return strategy
+
+
+def test_refine_disabled_is_exactly_todays_hit(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    """budget_k = 0 (live mode, the default) must be byte-identical to the plain hit path."""
+    orchestrator = _orchestrator(tmp_path)
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    calls: list[str] = []
+    _patch_run_task(orchestrator, _fake_run_task({}, calls))
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.metric == 1.0 and calls == []
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "library_hit" and attempt.refine_generations == 0
+    assert "refine_generations" not in attempt.to_dict()  # run summaries stay byte-identical
+    assert not any(name.startswith("refine") for name in orchestrator.counters)
+    assert "refine_attempts" not in orchestrator.library.load(key).stats  # no stats I/O on the hit path
+
+
+@pytest.mark.parametrize(
+    ("metric", "robustness", "complexity", "entry_type", "expected"),
+    [
+        (0.91, 0.0, 99, MODULE, True),  # metric win beats everything downstream
+        (0.89, 0.9, 1, MODULE, False),  # metric loss loses regardless
+        (0.90, 0.52, 99, MODULE, True),  # metric tie, robustness win
+        (0.90, 0.48, 1, MODULE, False),  # metric tie, robustness loss
+        (0.90, 0.50, 9, MODULE, True),  # tie-tie, smaller topology wins (minimize over time)
+        (0.90, 0.50, 10, MODULE, False),  # equal everything is a non-event
+        (0.905, 0.50, 10, MODULE, False),  # epsilon boundary: not strictly beyond the band
+        (0.90, 0.50, 1, COMPOSITION, False),  # cross-type size comparison is meaningless
+        (math.nan, 0.9, 1, MODULE, False),  # non-finite candidate never wins
+        (0.99, math.inf, 1, MODULE, False),
+    ],
+)
+def test_refine_comparator_lexicographic(metric: float, robustness: float, complexity: int, entry_type: str, expected: bool) -> None:
+    incumbent = RefinementRank(metric=0.90, robustness=0.50, complexity=10, entry_type=MODULE)
+    candidate = RefinementRank(metric=metric, robustness=robustness, complexity=complexity, entry_type=entry_type)
+    assert refinement_improves(candidate, incumbent, metric_epsilon=0.005, robustness_epsilon=0.01) is expected
+
+
+def test_refine_improvement_admits_and_retires_superseded(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """A smaller topology at equal metric/robustness is a strict win: shelved, the bulky incumbent
+    tombstoned (it is dominated on the stored ranking fields), and the decay reset."""
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    old_key = orchestrator.library.add(
+        entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
+    )
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(1.0, 0.5, linear_genome, calls))]
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key is not None and solution.key != old_key
+    assert calls[0]["budget"] == 8 and calls[0]["threshold"] == pytest.approx(1.0 + 0.005)
+    assert calls[0]["seed_entries"] is not None and calls[0]["seed_entries"][0].key == old_key
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "refined" and attempt.refine_generations == 8 and attempt.library_key == solution.key
+    assert orchestrator.library.is_retired(old_key)
+    assert orchestrator.counters["refine_improvements"] == 1 and orchestrator.counters["refine_attempts"] == 1
+    stats = orchestrator.library.load(old_key).stats
+    assert stats["refine_attempts"] == 1 and stats["refine_failures_since_gain"] == 0  # gain resets decay
+    assert orchestrator.library.load(solution.key).entry_type == MODULE
+
+
+def test_refine_no_gain_returns_original_and_decays(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5})
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.5, 0.0, linear_genome, calls))]
+    first = orchestrator.solve(xor_task)
+    assert first is not None and first.key == key and first.metric == 1.0  # never a regression
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "library_hit" and attempt.refine_generations == 8  # the bounded extra compute
+    assert orchestrator.counters["refine_no_gain"] == 1
+    second = orchestrator.solve(xor_task)
+    assert second is not None and second.key == key
+    assert [call["budget"] for call in calls] == [8, 4]  # effective K decayed by 0.5 per failure
+    third = orchestrator.solve(xor_task)  # failures = 2 -> effective 2 < min_generations 4 -> skip
+    assert third is not None and len(calls) == 2
+    assert orchestrator.counters["refine_skipped_decayed"] == 1
+    assert orchestrator.counters["library_hits"] == 3
+
+
+def test_refine_below_accept_threshold_never_admits(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """A robustness win inside the metric-tie band can still sit below the accept bar; it must not shelve."""
+    orchestrator = _orchestrator(tmp_path, table={**_refine_table(), "accept_threshold": 1.0})
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5})
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.996, 0.9, linear_genome, calls))]  # tie on metric, better robustness
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key == key
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert orchestrator.counters["refine_no_gain"] == 1 and orchestrator.counters["refine_improvements"] == 0
+    assert len(orchestrator.library) == 1  # nothing new shelved
+
+
+def test_refine_depth_guard_skips_subsolve_hits(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+
+    def exploding(task, spec, runtime, *, budget, seed_comps=None, seed_entries=None):
+        raise AssertionError("refinement must not fire past refine depth_max")
+
+    orchestrator.strategies = [("direct", exploding)]
+    solution = orchestrator.solve(xor_task, 1)  # a hit inside a decompose recursion
+    assert solution is not None
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert orchestrator.counters["refine_attempts"] == 0
+
+
+def test_refine_composition_hit_seeds_run_task(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.evolution.composition import comp_to_dict
+
+    orchestrator = _orchestrator(tmp_path, table={**_refine_table(), "accept_threshold": 0.0})
+    comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random.Random(1))
+    key = orchestrator.library.add(entry_type=COMPOSITION, payload=comp_to_dict(comp), io=task_io(xor_task), provenance={"accepted_metric": 0.5}, level=2)
+    received: dict = {}
+
+    def fake_run_task(spec, state, *, budget, stop=None, seed_comps=None, on_generation=None):
+        received["seed_comps"] = seed_comps
+        received["budget"] = budget
+        out = seed_comps[0] if seed_comps else minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, state.comp_innovations, state.rng)
+        return AssessedComposition(comp=out, metrics={"query_accuracy": 0.0, "query_loss": 0.1, "support_accuracy": 0.0, "support_loss": 0.1}, fitness=0.0, net=None)
+
+    _patch_run_task(orchestrator, fake_run_task)
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key == key  # no gain: the original hit comes back
+    assert received["seed_comps"] is not None and comp_to_dict(received["seed_comps"][0]) == comp_to_dict(comp)
+    assert received["budget"] == 8
+
+
+def test_refine_admission_rejected_returns_unshelved_and_counts_failure(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table(), config_extra={"library": {"admission": "default", "min_metric": 2.0}})
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5})
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(1.0, 0.5, linear_genome, calls))]
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key is None and solution.metric == 1.0  # solved, not shelved
+    assert orchestrator.attempts[-1].outcome == "refined"
+    assert not orchestrator.library.is_retired(key)  # nothing replaced it on the shelf
+    assert orchestrator.counters["admission_rejected"] == 1 and orchestrator.counters["refine_improvements"] == 1
+    stats = orchestrator.library.load(key).stats
+    assert stats["refine_failures_since_gain"] == 1  # unshelvable gains must not re-spend full K
+
+
+def test_refined_attempt_round_trips_checkpoint() -> None:
+    refined = Attempt(task="t", depth=0, outcome="refined", metric=0.99, generations=6, library_key="m1_abc", strategy="direct", refine_generations=6)
+    hit_after_failed_refine = Attempt(task="t", depth=0, outcome="library_hit", metric=1.0, generations=0, refine_generations=4)
+    restored = attempts_from_dicts(json.loads(json.dumps(attempts_to_dicts([refined, hit_after_failed_refine]))))
+    assert restored[0].refine_generations == 6 and restored[0].outcome == "refined"
+    assert restored[1].refine_generations == 4
+    legacy = {"task": "t", "depth": 0, "outcome": "library_hit", "metric": 1.0, "generations": 0}
+    assert Attempt.from_dict(legacy).refine_generations == 0  # pre-feature checkpoints resume cleanly
+    plain = Attempt(task="t", depth=0, outcome="library_hit", metric=1.0, generations=0)
+    assert "refine_generations" not in plain.to_dict()  # live-mode summaries stay byte-identical
+
+
+def test_refine_skipped_when_matching_strategy_not_configured(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())  # default evolve = ["composition"]: no direct
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key == key
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert orchestrator.counters["refine_skipped_no_strategy"] == 1 and orchestrator.counters["refine_attempts"] == 0
+
+
+def test_refine_retrained_clone_never_admits(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    """The clone-factory guard: entry keys hash weights, so a topology-identical champion with
+    retrained weights always gets a fresh key; the structural fingerprint must catch it instead
+    (the 2026-07-03 incident admitted 11 such clones and tombstoned their parents)."""
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    old_key = orchestrator.library.add(
+        entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
+    )
+    reweighted = genome_to_dict(solving_genome)
+    for connection in reweighted["connections"]:
+        connection["weight"] += 0.5
+    calls: list[dict] = []
+    # Metric tie at 1.0, robustness 0.9 vs stored 0.5: the comparator ALONE would admit this.
+    orchestrator.strategies = [("direct", _fake_direct(1.0, 0.9, genome_from_dict(reweighted), calls))]
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key == old_key  # the original hit, not a clone
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert len(orchestrator.library) == 1 and not orchestrator.library.is_retired(old_key)
+    assert orchestrator.counters["refine_no_gain"] == 1 and orchestrator.counters["refine_improvements"] == 0
+    assert orchestrator.library.load(old_key).stats["refine_failures_since_gain"] == 1  # decay bites
+
+
+def test_refine_seed_metric_is_the_incumbent_baseline(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """A candidate must beat the incumbent GIVEN THE SAME TRAINING: when the strategy reports the
+    seed's own trained standing, that (not the untrained quick metric) is the bar to clear."""
+    table = _refine_table()
+    for seed_metric, should_admit in ((1.03, False), (None, True)):
+        base = tmp_path / ("with_seed" if seed_metric else "without_seed")
+        orchestrator = _orchestrator(base, table=table)
+        old_key = orchestrator.library.add(
+            entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
+        )
+        calls: list[dict] = []
+        # Candidate at 1.02 beats the quick metric (1.0 + 0.005) but NOT the trained seed (1.03 - 0.005).
+        orchestrator.strategies = [("direct", _fake_direct(1.02, 0.5, linear_genome, calls, seed_metric=seed_metric))]
+        solution = orchestrator.solve(xor_task)
+        assert solution is not None
+        if should_admit:
+            assert solution.key is not None and solution.key != old_key
+            assert orchestrator.attempts[-1].outcome == "refined"
+        else:
+            assert solution.key == old_key
+            assert orchestrator.attempts[-1].outcome == "library_hit"
+            assert orchestrator.counters["refine_no_gain"] == 1
+
+
+def test_retire_guard_requires_strict_margin(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    """Weak dominance alone must not tombstone: an incumbent with degenerate stored robustness 0.0
+    (every temporal module) would otherwise die to any same-metric clone."""
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    library = orchestrator.library
+    incumbent = RefinementRank(metric=1.0, robustness=0.0, complexity=10, entry_type=MODULE)
+    plants = iter(range(1, 10))
+
+    def planted() -> str:
+        payload = genome_to_dict(solving_genome)
+        payload["connections"][0]["weight"] += next(plants)  # tombstones are permanent; each plant needs a fresh key
+        key = library.add(entry_type=MODULE, payload=payload, io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.0})
+        assert not library.is_retired(key)
+        return key
+
+    key = planted()
+    tie = RefinementRank(metric=1.0, robustness=0.005, complexity=10, entry_type=MODULE)  # inside both epsilons, same size
+    orchestrator._retire_if_dominated(key, tie, incumbent)
+    assert not library.is_retired(key)
+
+    robustness_win = RefinementRank(metric=1.0, robustness=0.5, complexity=10, entry_type=MODULE)
+    orchestrator._retire_if_dominated(key, robustness_win, incumbent)
+    assert library.is_retired(key)
+
+    key = planted()
+    simpler_at_parity = RefinementRank(metric=1.0, robustness=0.005, complexity=4, entry_type=MODULE)
+    orchestrator._retire_if_dominated(key, simpler_at_parity, incumbent)
+    assert library.is_retired(key)
+
+    key = planted()
+    simpler_other_type = RefinementRank(metric=1.0, robustness=0.005, complexity=4, entry_type=COMPOSITION)
+    orchestrator._retire_if_dominated(key, simpler_other_type, incumbent)
+    assert not library.is_retired(key)  # cross-type size comparison stays meaningless
+
+
+def test_refine_capability_gain_recharges_lineage_cooldown(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """A metric/robustness win is new capability: the replacement entry starts a fresh cooldown."""
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    old_key = orchestrator.library.add(
+        entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.4}
+    )
+    orchestrator.strategies = [("direct", _fake_direct(1.0, 0.6, linear_genome, []))]  # robustness tier win
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key is not None and solution.key != old_key
+    entry = orchestrator.library.load(solution.key)
+    assert entry.provenance["refined_from"] == old_key  # lineage is traceable
+    assert entry.stats["refine_attempts"] == 1 and entry.stats["refine_failures_since_gain"] == 0
+
+
+def test_refine_compression_gain_spends_lineage_cooldown(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """A complexity-only win is polish, not capability: the replacement inherits the chain's decay
+    plus one failure, so one capability epoch funds only a few compression passes (24->12->6->skip),
+    never an endless per-variant treadmill of near-identical entries."""
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    old_key = orchestrator.library.add(
+        entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
+    )
+    assert genome_from_dict(genome_to_dict(linear_genome)).complexity() < solving_genome.complexity()
+    orchestrator.strategies = [("direct", _fake_direct(1.0, 0.5, linear_genome, []))]  # metric/robustness ties, smaller
+    solution = orchestrator.solve(xor_task)
+    assert solution is not None and solution.key is not None and solution.key != old_key
+    head = orchestrator.library.load(solution.key)
+    assert head.provenance["refined_from"] == old_key
+    assert head.stats["refine_attempts"] == 1 and head.stats["refine_failures_since_gain"] == 1  # spent, not recharged
+    assert orchestrator._effective_refine_budget(head) == 4  # 8 * 0.5^1: one more pass at most
+    orchestrator.library.seed_refine_stats(solution.key, attempts=2, failures=2)  # after a second compression
+    assert orchestrator._effective_refine_budget(orchestrator.library.load(solution.key)) == 2  # < min_generations: skips
+    improved, generations = orchestrator._refine_hit(
+        __import__("ardevo.orchestrator", fromlist=["Solution"]).Solution(key=solution.key, entry_type=MODULE, metric=1.0), xor_task, comp_task_spec(xor_task), 0
+    )
+    assert improved is None and generations == 0
+    assert orchestrator.counters["refine_skipped_decayed"] == 1
+
+
+def _wall_table(**overrides) -> dict:
+    return {"wall": {"ledger": True, "min_metric": 0.4, "seed_top_k": 1, **overrides}, "max_depth": 0, "decompose": []}
+
+
+def test_wall_ledger_shelves_seeds_and_replaces(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    """Failure leaves a trace: the best champion shelves as a below-bar dependency stone, the next
+    attempt on the signature warm-starts from it, and the stone only upgrades on a strict win."""
+    orchestrator = _orchestrator(tmp_path, table=_wall_table())
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, calls))]
+
+    assert orchestrator.solve(xor_task) is None  # below the 0.95 accept bar
+    stone_key = orchestrator.attempts[-1].library_key
+    assert stone_key is not None
+    stone = orchestrator.library.load(stone_key)
+    assert stone.provenance["stepping_stone"] is True and stone.provenance["accepted_metric"] == 0.6
+    stone_summary = orchestrator.library.summary(stone_key)
+    assert stone_summary is not None and stone_summary["dependency"] is True  # out of caps, out of signature_group
+    assert orchestrator.counters["wall_stones_admitted"] == 1
+    assert calls[0]["seed_entries"] is None  # nothing to seed from on the first assault
+
+    assert orchestrator.solve(xor_task) is None  # lookup misses (a stone never clears quick-eval)
+    assert calls[1]["seed_entries"] is not None and calls[1]["seed_entries"][0].key == stone_key
+    assert orchestrator.counters["wall_seeded_attempts"] == 1
+    # The identical champion (same fingerprint) must NOT mint a second stone.
+    assert orchestrator.counters["wall_stones_admitted"] == 1 and orchestrator.counters["wall_stones_improved"] == 0
+
+    better = genome_to_dict(solving_genome)
+    orchestrator.strategies = [("direct", _fake_direct(0.7, 0.2, genome_from_dict(better), calls))]  # strict metric win, new topology
+    assert orchestrator.solve(xor_task) is None
+    new_stone_key = orchestrator.attempts[-1].library_key
+    assert new_stone_key is not None and new_stone_key != stone_key
+    assert orchestrator.library.is_retired(stone_key)  # one stone per lineage
+    assert orchestrator.library.load(new_stone_key).provenance["refined_from"] == stone_key
+    assert orchestrator.counters["wall_stones_improved"] == 1
+
+
+def test_wall_ledger_below_min_metric_shelves_nothing(tmp_path: Path, xor_task: Task, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_wall_table(min_metric=0.65))
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, []))]
+    assert orchestrator.solve(xor_task) is None
+    assert orchestrator.attempts[-1].library_key is None
+    assert len(orchestrator.library) == 0 and orchestrator.counters["wall_stones_admitted"] == 0
+
+
+def test_wall_ledger_off_is_byte_identical(tmp_path: Path, xor_task: Task, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"max_depth": 0, "decompose": []})
+    orchestrator.strategies = [("direct", _fake_direct(0.6, 0.2, linear_genome, []))]
+    assert orchestrator.solve(xor_task) is None
+    assert not any(name.startswith("wall") for name in orchestrator.counters)
+    assert len(orchestrator.library) == 0

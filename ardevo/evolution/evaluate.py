@@ -82,21 +82,29 @@ def _stacked_sample_metrics(net: "GraphNet", columns: torch.Tensor | None, adapt
     return per_sample
 
 
-def _sample_metrics(module: SubstrateModule, adapter: "Adapter", samples: Sequence[float], batched_samples: bool = False) -> tuple[dict[str, float], list[dict[str, float]], int]:
+# The stacked path's break-even node count on the compact-column substrate (T2, 2026-07-04:
+# 0.56x/0.68x/0.83x/1.04x/1.14x at widths 16/64/256/784/3072). "auto" turns it on from here up.
+STACKED_AUTO_MIN_NODES = 768
+
+
+def _sample_metrics(
+    module: SubstrateModule, adapter: "Adapter", samples: Sequence[float], batched_samples: bool | str = False
+) -> tuple[dict[str, float], list[dict[str, float]], int]:
     """Evaluate with all TRAINABLE weights filled to each shared sample value; restore after.
 
     Frozen parameters (macro inners, library entries inside compositions) are deliberately
     excluded: robustness measures exactly the surface evolution and training control. The stacked
-    fast path exists but DEFAULTS OFF: `uv run benchmark` measured it 0.2-0.4x at widths
-    16-256 because the batched forward does full-width level math (D times the FLOPs of the
-    serial path's per-level column slicing); enable it only if the bench shows a win for your
-    population shape. Non-batchable modules (recurrent, product, composed) always use the serial
-    fill/restore loop. The restore is mandatory on that path: in hybrid
-    mode the module holds gradient-trained weights the trial later exports and saves.
-    Returns (robustness metrics, per-sample metrics, best index).
+    fast path DEFAULTS OFF: on the compact-column substrate `uv run benchmark` measured it below
+    break-even until ~768 nodes (0.56x-0.83x at widths 16-256) and only 1.04x-1.14x at image
+    widths. `batched_samples = "auto"` enables it exactly where it measured a win (node count >=
+    STACKED_AUTO_MIN_NODES); `true` forces it everywhere. Non-batchable modules (recurrent,
+    product, composed) always use the serial fill/restore loop. The restore is mandatory on that
+    path: in hybrid mode the module holds gradient-trained weights the trial later exports and
+    saves. Returns (robustness metrics, per-sample metrics, best index).
     """
     core_net, columns = module.core()
-    if batched_samples and core_net is not None and getattr(adapter, "encoder", None) is not None and getattr(adapter, "encoded", None) is not None:
+    stacked = batched_samples is True or (batched_samples == "auto" and core_net is not None and core_net.n >= STACKED_AUTO_MIN_NODES)
+    if stacked and core_net is not None and getattr(adapter, "encoder", None) is not None and getattr(adapter, "encoded", None) is not None:
         per_sample = _stacked_sample_metrics(core_net, columns, adapter, samples)
     else:
         trainable = [parameter for parameter in module.parameters() if parameter.requires_grad]
@@ -136,12 +144,95 @@ def weight_samples(
     adapter: "Adapter",
     *,
     samples: Sequence[float] = DEFAULT_WEIGHT_SAMPLES,
-    batched_samples: bool = False,
+    batched_samples: bool | str = False,
     **_params: object,
 ) -> dict[str, float]:
     """Pure weight-agnostic scoring: standard metric keys come from the BEST shared-weight sample."""
     robustness, per_sample, best_index = _sample_metrics(module, adapter, samples, batched_samples)
     return {**per_sample[best_index], **robustness}
+
+
+def _d4_index_maps(shape: tuple[int, ...]) -> list[torch.Tensor]:
+    """Flat-index permutations for the dihedral views a grid supports: 8 for a square spatial
+    shape, the 4 shape-preserving ones (identity, both flips, 180 rotation) otherwise. Trailing
+    axes (channels) ride along untouched. Entry j of a map is the ORIGINAL flat index whose value
+    lands at position j of the transformed layout, so `x.index_select(1, map)` IS the view."""
+    height, width = int(shape[0]), int(shape[1])
+    trailing = 1
+    for dim in shape[2:]:
+        trailing *= int(dim)
+    base = torch.arange(height * width * trailing).reshape(height, width, trailing)
+    views = [base, torch.flip(base, dims=[0]), torch.flip(base, dims=[1]), torch.flip(base, dims=[0, 1])]
+    if height == width:
+        quarter = torch.rot90(base, 1, dims=(0, 1))
+        views += [quarter, torch.flip(quarter, dims=[0]), torch.flip(quarter, dims=[1]), torch.flip(quarter, dims=[0, 1])]
+    return [view.reshape(-1) for view in views]
+
+
+def _voted_raw(module: SubstrateModule, x: torch.Tensor, input_maps: list[torch.Tensor], output_maps: "list[torch.Tensor] | None", n_outputs: int) -> torch.Tensor:
+    """Mean raw output over the augmented views, accumulated back in ORIGINAL layout (grid outputs
+    are inverse-permuted via index_add, a bijection), so targets and masks apply unchanged."""
+    accumulated = torch.zeros(x.shape[0], n_outputs, dtype=x.dtype)
+    with torch.no_grad():
+        for index, input_map in enumerate(input_maps):
+            out = module(x.index_select(1, input_map))
+            if output_maps is None:
+                accumulated += out
+            else:
+                accumulated.index_add_(1, output_maps[index], out)
+    return accumulated / len(input_maps)
+
+
+@EVALUATE.register("augmented_vote")
+def augmented_vote(
+    genome: Genome,
+    module: SubstrateModule,
+    adapter: "Adapter",
+    *,
+    samples: Sequence[float] = DEFAULT_WEIGHT_SAMPLES,
+    batched_samples: bool | str = False,
+    **_params: object,
+) -> dict[str, float]:
+    """Test-time augmentation voting (the TRM-on-ARC finding: a large share of abstraction-rung
+    accuracy lives in augmented-view ensembling, not deeper recursion). Dispatches purely on the
+    adapter's structural facts, never on rung identity: a 2-D grid input gets its dihedral views
+    (D4 when square), outputs are averaged in raw space; an output whose width is a whole multiple
+    of the grid's cell count is treated as a grid and votes are inverse-permuted back to the
+    original layout first (the grid-to-grid case), so targets and masks apply unchanged. Non-grid
+    adapters fall back to `hybrid` (this op is a drop-in for it: robustness metrics included, and
+    the un-voted trained metrics stay visible under `unvoted_*`)."""
+    grid = getattr(adapter, "grid_shape", None)
+    encoder = getattr(adapter, "encoder", None)
+    encoded = getattr(adapter, "encoded", None)
+    baseline = hybrid(genome, module, adapter, samples=samples, batched_samples=batched_samples)
+    if grid is None or len(grid) < 2 or encoder is None or encoded is None:
+        return baseline
+    input_maps = _d4_index_maps(tuple(int(dim) for dim in grid))
+    if int(input_maps[0].numel()) != int(adapter.n_inputs):
+        return baseline  # encoder padded or truncated; the permutation would misalign
+
+    from ardevo.dataset.icarus import as_logits, target_positions
+    from ardevo.evaluation import split_metrics_from_raw
+
+    cells = int(grid[0]) * int(grid[1])
+    output_maps = None
+    if adapter.n_outputs % cells == 0:
+        output_maps = _d4_index_maps((int(grid[0]), int(grid[1]), adapter.n_outputs // cells))
+
+    def voted_pair(encoded_input: tuple, encoded_target: tuple) -> tuple[float, float]:
+        x, _input_descriptor = encoded_input
+        target, mask, descriptor = encoded_target
+        votes = _voted_raw(module, x, input_maps, output_maps, adapter.n_outputs)
+        raw = as_logits(votes, descriptor, target_positions(target))
+        return split_metrics_from_raw(raw, target, mask, descriptor, encoder)
+
+    support_accuracy, support_loss = voted_pair(encoded.support_input, encoded.support_target)
+    voted = {"support_accuracy": support_accuracy, "support_loss": support_loss, "query_accuracy": 0.0, "query_loss": float("inf")}
+    if encoded.query_input is not None and encoded.query_target is not None:
+        query_accuracy, query_loss = voted_pair(encoded.query_input, encoded.query_target)
+        voted.update({"query_accuracy": query_accuracy, "query_loss": query_loss})
+    unvoted = {f"unvoted_{key}": baseline[key] for key in ("support_accuracy", "support_loss", "query_accuracy", "query_loss") if key in baseline}
+    return {**baseline, **unvoted, **voted, "vote_views": float(len(input_maps))}
 
 
 @EVALUATE.register("hybrid")
@@ -151,7 +242,7 @@ def hybrid(
     adapter: "Adapter",
     *,
     samples: Sequence[float] = DEFAULT_WEIGHT_SAMPLES,
-    batched_samples: bool = False,
+    batched_samples: bool | str = False,
     **_params: object,
 ) -> dict[str, float]:
     """Trained-weight metrics under the standard keys, plus the robustness metrics merged in."""

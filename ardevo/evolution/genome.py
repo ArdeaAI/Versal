@@ -43,6 +43,14 @@ class ConnectionGene:
     # Recurrent edges are TIME-DELAYED: they read the previous step's value, so they are exempt from
     # the acyclicity rules (the forward graph stays a DAG) and are inert under the plain GraphNet.
     recurrent: bool = False
+    # HARD WEIGHT SHARING (the WeightGroup lever): edges carrying the same tie_group share ONE
+    # trainable parameter at decode (gradient accumulates across every stamped copy), which is how
+    # convolution-like structure becomes trainable at wide widths without being hand-inserted:
+    # add_shared_motif(tied=true) assigns groups at stamp time, untie_motif_weights dissolves them.
+    # Group ids come from InnovationTracker.new_marker (run-unique, crossover-stable). None (the
+    # default) is the ordinary independent weight: untied genomes are byte-identical everywhere,
+    # on disk and in the substrate. Forward edges only; recurrent genes ignore the field.
+    tie_group: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,10 +81,26 @@ class Genome:
     # feedforward pass (the default decode path is byte-identical). Evolved by `tweak_refine_steps`;
     # only meaningful once the genome also carries recurrent edges to thread state between passes.
     refine_steps: int = 1
+    # Self-adaptive mutation rates (lever F): per-operator probabilities carried as strategy genes and
+    # perturbed by `AdaptiveMutationPipeline` (ES perturb-and-inherit). Empty = the fixed-rate default,
+    # so a genome that never met the adaptive pipeline is byte-identical (the key is absent on disk too).
+    operator_rates: dict[str, float] = field(default_factory=dict)
+    # Gradient-proposed growth signals (NeST/GradMax scores from ardevo/evolution/growth.py), read
+    # by the hinted mutation operators. IN-MEMORY ONLY: never serialized (genome_to_dict ignores it),
+    # so library payloads, fingerprints, and checkpoints are byte-identical whether scoring ran or
+    # not. Regenerated every trained generation; crossover children start without hints.
+    growth_hints: dict[str, dict[int, float]] | None = None
 
     def clone(self) -> "Genome":
         # Gene dataclasses are frozen, so shallow copies of the containers are deep copies.
-        return Genome(nodes=dict(self.nodes), connections=list(self.connections), macros=list(self.macros), refine_steps=self.refine_steps)
+        return Genome(
+            nodes=dict(self.nodes),
+            connections=list(self.connections),
+            macros=list(self.macros),
+            refine_steps=self.refine_steps,
+            operator_rates=dict(self.operator_rates),
+            growth_hints=self.growth_hints,
+        )
 
     def ids_of(self, kind: NodeKind) -> list[int]:
         return sorted(node.id for node in self.nodes.values() if node.kind is kind)
@@ -123,12 +147,56 @@ class Genome:
         return max(self.nodes) if self.nodes else -1
 
 
+class ForwardReachability:
+    """Cycle checks for a BATCH of candidate edges against one genome snapshot.
+
+    `would_create_cycle` rebuilds the forward adjacency and BFSes per call, which is fine for a
+    single check but quadratic death inside the geometry mutators' source x target enumeration
+    (measured: ONE `add_local_connection` at width 3072 took 4.9s and pegged the run's main thread
+    for hours on image rungs). This builds the adjacency ONCE and memoizes the full reach-set per
+    queried target, so a whole pair sweep pays at most |distinct targets| BFS walks. Answers are
+    exactly `would_create_cycle`'s: a forward edge in -> out closes a cycle iff out already
+    reaches in, or they are equal. The snapshot goes stale if the genome gains forward edges;
+    build a fresh instance after structural appends."""
+
+    def __init__(self, genome: Genome) -> None:
+        self._adjacency: dict[int, list[int]] = {}
+        for conn in genome.forward_connections():
+            self._adjacency.setdefault(conn.in_id, []).append(conn.out_id)
+        for source, target in macro_implied_edges(genome):
+            self._adjacency.setdefault(source, []).append(target)
+        self._reach: dict[int, set[int]] = {}
+
+    def creates_cycle(self, in_id: int, out_id: int) -> bool:
+        if in_id == out_id:
+            return True
+        reach = self._reach.get(out_id)
+        if reach is None:
+            reach = self._reach_from(out_id)
+            self._reach[out_id] = reach
+        return in_id in reach
+
+    def _reach_from(self, start: int) -> set[int]:
+        queue = deque([start])
+        seen = {start}
+        while queue:
+            current = queue.popleft()
+            for nxt in self._adjacency.get(current, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return seen
+
+
 def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
     """True if adding a FORWARD edge `in_id -> out_id` would make the forward graph cyclic.
 
     A cycle appears iff `out_id` can already reach `in_id` along enabled forward edges (or they are
-    equal). Recurrent edges are time-delayed and never participate.
-    """
+    equal). Recurrent edges are time-delayed and never participate. Single-shot form with an
+    early-exit BFS; batch callers (the geometry mutators) use `ForwardReachability`, and
+    `make_acyclic` maintains its own incremental adjacency: wrapping this around a per-call
+    `ForwardReachability` was measured as a constructor/GC storm on the module-pool advance
+    (2026-07-05, the second parity wedge)."""
     if in_id == out_id:
         return True
     adjacency: dict[int, list[int]] = {}
@@ -281,24 +349,57 @@ def make_acyclic(genome: Genome) -> Genome:
     Recombination (innovation-aligned crossover) and re-enabling edges can introduce cycles into an
     otherwise feedforward genome; this repair keeps the substrate decodable. Edges are considered in
     order, so earlier (typically older) genes are preferred when a conflict arises.
+
+    Two performance shapes, identical decisions (the module pool runs this per child per
+    generation, so it must stay O(V+E) in the common case):
+    - FAST PATH: already-acyclic genomes (the overwhelming majority) are detected with one
+      `topological_order` pass over the exact same edge set the repair checks (enabled forward +
+      macro-implied); the repair would disable nothing, so an unmodified copy is returned.
+    - REPAIR: one incrementally-grown adjacency + an early-exit BFS per candidate edge, instead of
+      rebuilding the adjacency per edge (the old per-edge `would_create_cycle` calls).
     """
-    kept = Genome(nodes=dict(genome.nodes), connections=[], macros=list(genome.macros))
+    try:
+        topological_order(genome)
+    except ValueError:
+        pass  # a cycle exists somewhere: run the ordered repair below
+    else:
+        return Genome(
+            nodes=dict(genome.nodes), connections=list(genome.connections), macros=list(genome.macros), refine_steps=genome.refine_steps, operator_rates=dict(genome.operator_rates)
+        )
+
+    adjacency: dict[int, list[int]] = {}
+    for source, target in macro_implied_edges(genome):
+        adjacency.setdefault(source, []).append(target)
+
+    def reaches(start: int, goal: int) -> bool:
+        queue = deque([start])
+        seen = {start}
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                return True
+            for nxt in adjacency.get(current, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    queue.append(nxt)
+        return False
+
     repaired: list[ConnectionGene] = []
     for conn in genome.connections:
         if not conn.enabled or conn.recurrent:
             # Recurrent edges are time-delayed: cycles through them are legal, so they pass through.
             repaired.append(conn)
-        elif conn.in_id == conn.out_id or would_create_cycle(kept, conn.in_id, conn.out_id):
+        elif conn.in_id == conn.out_id or reaches(conn.out_id, conn.in_id):
             repaired.append(replace(conn, enabled=False))
         else:
-            kept.connections.append(conn)
+            adjacency.setdefault(conn.in_id, []).append(conn.out_id)
             repaired.append(conn)
-    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps)
+    return Genome(nodes=dict(genome.nodes), connections=repaired, macros=list(genome.macros), refine_steps=genome.refine_steps, operator_rates=dict(genome.operator_rates))
 
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
-    return {
+    payload: dict[str, Any] = {
         "nodes": [
             {
                 "id": node.id,
@@ -311,6 +412,7 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
         ],
         "connections": [
             {"in": conn.in_id, "out": conn.out_id, "weight": conn.weight, "enabled": conn.enabled, "innovation": conn.innovation, "recurrent": conn.recurrent}
+            | ({"tie": conn.tie_group} if conn.tie_group is not None else {})  # absent when untied: old payloads stay byte-identical
             for conn in genome.connections
         ],
         "macros": [
@@ -319,6 +421,9 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
         ],
         "refine_steps": genome.refine_steps,
     }
+    if genome.operator_rates:  # absent when off, so fixed-rate genomes serialize byte-identically
+        payload["operator_rates"] = dict(genome.operator_rates)
+    return payload
 
 
 def genome_from_dict(data: dict[str, Any]) -> Genome:
@@ -329,7 +434,15 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         coordinate = tuple(node["coordinate"]) if node.get("coordinate") is not None else None
         nodes[node_id] = NodeGene(node_id, NodeKind(node["kind"]), node["activation"], coordinate, node.get("aggregation", "sum"))
     connections = [
-        ConnectionGene(int(conn["in"]), int(conn["out"]), float(conn["weight"]), bool(conn["enabled"]), int(conn["innovation"]), bool(conn.get("recurrent", False)))
+        ConnectionGene(
+            int(conn["in"]),
+            int(conn["out"]),
+            float(conn["weight"]),
+            bool(conn["enabled"]),
+            int(conn["innovation"]),
+            bool(conn.get("recurrent", False)),
+            int(conn["tie"]) if conn.get("tie") is not None else None,
+        )
         for conn in data["connections"]
     ]
     macros = [
@@ -342,4 +455,5 @@ def genome_from_dict(data: dict[str, Any]) -> Genome:
         )
         for item in data.get("macros", [])
     ]
-    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)))
+    operator_rates = {str(name): float(rate) for name, rate in data.get("operator_rates", {}).items()}
+    return Genome(nodes=nodes, connections=connections, macros=macros, refine_steps=int(data.get("refine_steps", 1)), operator_rates=operator_rates)

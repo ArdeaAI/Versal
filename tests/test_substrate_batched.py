@@ -32,6 +32,39 @@ def _mixed_activation_genome() -> Genome:
     return Genome(nodes=nodes, connections=connections)
 
 
+def _single_activation_genome(activation: str) -> Genome:
+    """Depth-2 genome with two hidden nodes of ONE activation, including a hidden->hidden edge."""
+    nodes = {
+        0: NodeGene(0, NodeKind.INPUT, "identity"),
+        1: NodeGene(1, NodeKind.INPUT, "identity"),
+        2: NodeGene(2, NodeKind.BIAS, "identity"),
+        3: NodeGene(3, NodeKind.HIDDEN, activation),
+        4: NodeGene(4, NodeKind.HIDDEN, activation),
+        5: NodeGene(5, NodeKind.OUTPUT, "identity"),
+    }
+    connections = [
+        ConnectionGene(0, 3, 0.7, True, 0),
+        ConnectionGene(1, 3, -0.4, True, 1),
+        ConnectionGene(2, 3, 0.3, True, 2),
+        ConnectionGene(3, 4, 0.9, True, 3),
+        ConnectionGene(1, 4, 1.1, True, 4),
+        ConnectionGene(4, 5, 1.5, True, 5),
+        ConnectionGene(3, 5, 0.25, True, 6),
+    ]
+    return Genome(nodes=nodes, connections=connections)
+
+
+def test_batched_forward_matches_plain_for_new_activations() -> None:
+    # A sin net batched against a gaussian net exercises the masked activation grouping across
+    # candidates with disjoint palettes, the actual risk surface of a palette addition.
+    nets = [decode(_single_activation_genome("sin"), 2, 1), decode(_single_activation_genome("gaussian"), 2, 1)]
+    batched = BatchedGraphNet(nets)
+    x = torch.tensor([[0.0, 0.0], [1.0, -1.0], [2.5, 3.0], [-2.0, 0.5]])
+    out = batched(x)
+    for index, net in enumerate(nets):
+        assert torch.allclose(out[index], net(x), atol=1e-6), f"candidate {index} diverged"
+
+
 def test_batched_forward_matches_each_candidate(linear_genome: Genome, solving_genome: Genome) -> None:
     nets = [decode(linear_genome, 2, 1), decode(solving_genome, 2, 1), decode(_mixed_activation_genome(), 2, 1)]
     batched = BatchedGraphNet(nets)

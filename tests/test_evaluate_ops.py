@@ -60,6 +60,24 @@ def test_batched_samples_parity_with_serial(xor_adapter: TaskAdapter, solving_ge
         assert abs(fast[key] - slow[key]) < 1e-6, key
 
 
+def test_batched_samples_auto_gates_on_node_count(xor_adapter: TaskAdapter, solving_genome: Genome, monkeypatch) -> None:
+    """`"auto"` uses the stacked path only at the measured break-even node count and above."""
+    from ardevo.evolution import evaluate as evaluate_module
+
+    stacked_calls: list[int] = []
+    original = evaluate_module._stacked_sample_metrics
+    monkeypatch.setattr(evaluate_module, "_stacked_sample_metrics", lambda *args, **kwargs: stacked_calls.append(1) or original(*args, **kwargs))
+
+    module = xor_adapter.decode(solving_genome)
+    serial = weight_samples(solving_genome, module, xor_adapter, batched_samples="auto")
+    assert not stacked_calls  # tiny net: below the threshold, exact serial path
+    assert serial == weight_samples(solving_genome, xor_adapter.decode(solving_genome), xor_adapter, batched_samples=False)
+
+    monkeypatch.setattr(evaluate_module, "STACKED_AUTO_MIN_NODES", 1)
+    weight_samples(solving_genome, module, xor_adapter, batched_samples="auto")
+    assert stacked_calls  # threshold crossed: stacked path engaged
+
+
 def test_batched_samples_leave_module_weights_untouched(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
     module = xor_adapter.decode(solving_genome)
     before = module.export_weights()
@@ -68,7 +86,8 @@ def test_batched_samples_leave_module_weights_untouched(xor_adapter: TaskAdapter
 
 
 def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
-    """The HeadSlicedNet (multitask) path: column selection must survive the stacked forward."""
+    """The column-sliced-head path (`module.core()` returning columns, evaluate.py/train.py's
+    generic seam): column selection must survive the stacked forward."""
     from dataclasses import dataclass
 
     import torch
@@ -76,8 +95,30 @@ def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_gen
     from ardevo.dataset.icarus import EncodedTask, Level0Encoder
     from ardevo.evaluation import evaluate
     from ardevo.evolution.genome import ConnectionGene, NodeGene, NodeKind
-    from ardevo.evolution.multitask import HeadSlicedNet
-    from ardevo.substrate import decode
+    from ardevo.substrate import GraphNet, SubstrateModule, decode
+
+    class _ColumnSlicedNet(SubstrateModule):
+        """Minimal head wrapper: the inner net is a normal trainable submodule, this only selects
+        output columns, so `core()` reports (inner, columns) to the stacked fast path."""
+
+        def __init__(self, inner: GraphNet, columns: torch.Tensor) -> None:
+            super().__init__()
+            self.inner = inner
+            self.columns: torch.Tensor = columns
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.inner(x).index_select(1, self.columns)
+
+        @property
+        def has_edges(self) -> bool:
+            return self.inner.has_edges
+
+        def export_weights(self) -> dict[tuple[int, int, bool], float]:
+            return self.inner.export_weights()
+
+        def core(self) -> tuple[GraphNet | None, torch.Tensor | None]:
+            inner, _columns = self.inner.core()
+            return (inner, self.columns) if inner is not None else (None, None)
 
     two_headed = solving_genome.clone()
     two_headed.nodes[6] = NodeGene(6, NodeKind.OUTPUT, "identity")
@@ -92,8 +133,8 @@ def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_gen
             return evaluate(module, self.encoded, self.encoder)
 
     adapter = _HeadAdapter(xor_adapter.encoded, xor_adapter.encoder)
-    fast_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
-    slow_module = HeadSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    fast_module = _ColumnSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
+    slow_module = _ColumnSlicedNet(decode(two_headed, 2, 2), torch.tensor([0]))
     fast = weight_samples(two_headed, fast_module, adapter, batched_samples=True)
     slow = weight_samples(two_headed, slow_module, adapter, batched_samples=False)
     for key in ("mean_sample_accuracy", "max_sample_accuracy", "best_sample_weight"):
@@ -129,7 +170,8 @@ def test_frozen_parameters_are_never_filled_during_sampling(tmp_path, xor_adapte
     inner = net.inner_modules[f"library:{key}"]
 
     observed: list[float] = []
-    inner.register_forward_pre_hook(lambda module, args: observed.append(float(module.weights.detach()[0, 3])))
+    first_conn = solving_genome.connections[0]
+    inner.register_forward_pre_hook(lambda module, args: observed.append(module.export_weights()[(first_conn.in_id, first_conn.out_id, False)]))
     weight_samples(comp, net, xor_adapter, batched_samples=True)  # ComposedNet falls back to serial
     original = float(solving_genome.connections[0].weight)
     assert observed and all(value == original for value in observed)  # inner never filled mid-sampling
@@ -171,3 +213,20 @@ def test_robustness_fitness_components_read_metrics(solving_genome: Genome) -> N
     assert FITNESS.get("weight_robustness")(solving_genome, metrics) == 0.55
     assert FITNESS.get("negative_mean_sample_loss")(solving_genome, metrics) == -0.4
     assert FITNESS.get("weight_robustness")(solving_genome, {}) == 0.0
+
+
+def test_hybrid_stamps_weight_robustness_through_temporal_adapter(temporal_task) -> None:
+    """The refine comparator and retire guard consume weight_robustness for temporal modules too;
+    this pins that the stepped path really stamps it. NOTE the field CAN be exactly 0.0 in the
+    wild (a constant-weight pole controller fails identically at every sample: mean 0, variance 0),
+    which is why the retire guard demands a strict margin instead of weak dominance."""
+    import math
+
+    from ardevo.temporal import temporal_adapter
+    from tests.test_recurrence import _running_parity_genome
+
+    adapter = temporal_adapter(temporal_task)
+    genome = _running_parity_genome()
+    metrics = hybrid(genome, adapter.decode(genome), adapter, samples=[-1.0, 1.0])
+    assert _ROBUSTNESS_KEYS <= set(metrics)
+    assert math.isfinite(metrics["weight_robustness"])

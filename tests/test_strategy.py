@@ -100,6 +100,11 @@ def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Pa
     assert first is not None
     attempt = orchestrator.attempts[-1]
     assert attempt.outcome == "evolved" and attempt.strategy == "direct"
+    # The size readout rides every direct result: champion scalars plus final-population stats.
+    sizes = attempt.size_metrics
+    assert sizes["champion_nodes"] > 0.0 and sizes["champion_connections"] > 0.0
+    assert sizes["pop_max_nodes"] >= sizes["pop_median_nodes"] > 0.0
+    assert sizes["pop_max_connections"] >= sizes["pop_median_connections"]
     assert first.key is not None
     entry = orchestrator.library.load(first.key)
     assert entry.entry_type == MODULE
@@ -139,6 +144,59 @@ def test_stamp_input_coordinates_unravels_row_major(linear_genome) -> None:
     assert stamped.nodes[stamped.bias_ids[0]].coordinate is None  # only inputs carry geometry
     with pytest.raises(ValueError, match="cells"):
         stamp_input_coordinates(linear_genome, (3, 3))
+
+
+def test_seed_state_seeded_front_injects_grafted_genome(tmp_path: Path, xor_task: Task, xor_adapter, solving_genome) -> None:
+    from ardevo.evolution.registry import build_evolver
+    from ardevo.library import ModuleLibrary, graft
+
+    library = ModuleLibrary(tmp_path / "lib")
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={})
+    entry = library.load(key)
+
+    def run_once():
+        evolver = build_evolver(_loop_config())
+        return evolver.seed_state(xor_adapter, random.Random(0), seeded_front=lambda tracker: [graft(entry, tracker)])
+
+    state = run_once()
+    seeded = state.population[0]
+    assert len(seeded.genome.nodes) == len(solving_genome.nodes)
+    assert len(seeded.genome.connections) == len(solving_genome.connections)
+    assert seeded.metrics["support_accuracy"] == 1.0  # the graft flows through assess_many like everyone
+    again = run_once()
+    assert genome_to_dict(again.population[0].genome) == genome_to_dict(seeded.genome)  # deterministic
+
+
+def test_seed_state_without_seeded_front_is_unchanged(xor_adapter) -> None:
+    from ardevo.evolution.registry import build_evolver
+
+    baseline = build_evolver(_loop_config()).seed_state(xor_adapter, random.Random(0))
+    explicit_none = build_evolver(_loop_config()).seed_state(xor_adapter, random.Random(0), seeded_front=None)
+    assert [genome_to_dict(item.genome) for item in baseline.population] == [genome_to_dict(item.genome) for item in explicit_none.population]
+
+
+def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from ardevo.orchestrator import comp_task_spec
+
+    orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct", "composition"], "direct": {"pop_size": 8, "elitism": 2}})
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    entry = orchestrator.library.load(key)
+    strategy = dict(orchestrator.strategies)["direct"]
+    runtime = orchestrator._refine_runtime(0.99)
+    result = strategy(xor_task, comp_task_spec(xor_task), runtime, budget=2, seed_entries=[entry])
+    assert result.metric >= 0.99  # the grafted incumbent already clears the bar; the early exit fires
+    assert result.champion_genome is not None
+    # Refine fairness: the seed's own trained standing is stamped as the incumbent baseline.
+    assert result.seed_metric is not None and result.seed_metric >= 0.99
+
+
+def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.orchestrator import comp_task_spec
+
+    orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct", "composition"], "direct": {"pop_size": 4, "elitism": 1}})
+    strategy = dict(orchestrator.strategies)["direct"]
+    result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
+    assert result.seed_metric is None
 
 
 def test_lookup_quick_evaluates_temporal_modules(tmp_path: Path, temporal_task: Task) -> None:

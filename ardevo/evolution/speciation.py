@@ -12,6 +12,7 @@ crossover / mutation operators within each group. NEAT speciation is stateful (i
 representative genome per species across generations), so the registry returns configured instances.
 """
 
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -199,7 +200,12 @@ class NeatSpeciation:
             total_share = sum(shares)
 
             offspring_budget = pop_size - len(groups)  # one champion reserved per species
-            offspring = [int(round(offspring_budget * share / total_share)) for share in shares]
+            if not math.isfinite(total_share) or total_share <= 0.0:
+                # Degenerate shares (a non-finite fitness slipped past upstream floors): split the
+                # budget evenly rather than crash the run; _reconcile absorbs the remainder.
+                offspring = [offspring_budget // len(groups)] * len(groups)
+            else:
+                offspring = [int(round(offspring_budget * share / total_share)) for share in shares]
             self._reconcile(offspring, offspring_budget)
             plans = [SpeciesPlan(species_id=s.id, members=s.members, n_elites=1, n_offspring=count) for s, count in zip(groups, offspring)]
 

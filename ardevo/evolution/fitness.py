@@ -5,7 +5,8 @@ Each component is a registered `(genome, metrics) -> float`. `FitnessAggregator`
 purely from config.
 """
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ardevo.evolution.genome import Genome
@@ -98,11 +99,61 @@ def negative_mean_sample_loss(genome: Genome, metrics: dict[str, float]) -> floa
     return -float(metrics.get("mean_sample_loss", 0.0))
 
 
+@FITNESS.register("novelty")
+def novelty(genome: Genome, metrics: dict[str, float]) -> float:
+    # Population-relative k-NN behavioral novelty, injected by the Evolver's post-assess hook
+    # ([evolution.novelty]). Absent key degrades to 0.0 like every evaluate-derived signal; the
+    # score never reaches library admission (verification re-scores through evaluate_only).
+    return float(metrics.get("novelty", 0.0))
+
+
+@FITNESS.register("connection_cost")
+def connection_cost(genome: Genome, metrics: dict[str, float]) -> float:
+    # Squared wiring length (Clune/Mouret/Lipson): the cost under which modularity, then hierarchy,
+    # EMERGE rather than being imposed. An edge is measurable only when both endpoint coordinates
+    # exist and share a length (the coordinate_distance incomparability rule); unmeasurable edges
+    # cost 1.0, so a coordinate-free genome degrades to exactly -edge_count and mixed genomes stay
+    # smooth as geometry appears. getattr keeps CompositionGenome (no coordinate field) safe.
+    total = 0.0
+    for connection in genome.enabled_connections():
+        source = getattr(genome.nodes[connection.in_id], "coordinate", None)
+        target = getattr(genome.nodes[connection.out_id], "coordinate", None)
+        if source is None or target is None or len(source) != len(target):
+            total += 1.0
+        else:
+            total += sum((a - b) ** 2 for a, b in zip(source, target))
+    return -total
+
+
 @dataclass
 class FitnessAggregator:
     """Weighted sum of fitness components."""
 
     components: list[tuple[FitnessComponent, float]]
+    # Named subset forming the Pareto objective vector (`[fitness] objectives`); empty = scalar-only
+    # run, byte-identical to the pre-vector behavior. Kept separate from `components` so the scalar
+    # sum (speciation budgets, champion tracking) and the selection geometry are tuned independently.
+    objective_components: list[tuple[str, FitnessComponent]] = field(default_factory=list)
+
+    def objectives(self, genome: Any, metrics: dict[str, float]) -> list[float] | None:
+        """Raw (unweighted) objective values, maximization sense; None when unconfigured.
+
+        Unweighted because a positive monotone rescale can never change Pareto dominance and
+        crowding normalizes per objective, so a weight here would be a knob that cannot matter.
+        A non-finite slot floors to -1e9 (per slot, mirroring __call__'s corpse floor) so one
+        exploded objective buries the candidate on that axis without poisoning the others."""
+        if not self.objective_components:
+            return None
+        values: list[float] = []
+        for _name, component in self.objective_components:
+            value = component(genome, metrics)
+            values.append(value if math.isfinite(value) else -1e9)
+        return values
 
     def __call__(self, genome: Any, metrics: dict[str, float]) -> float:
-        return sum(weight * component(genome, metrics) for component, weight in self.components)
+        total = sum(weight * component(genome, metrics) for component, weight in self.components)
+        # A candidate whose forward exploded (NaN/inf loss, e.g. a deep recurrent unroll on a
+        # TIME-axis task) is a nonviable phenotype, exactly like an undecodable genome: it scores
+        # the floor and selection buries it. Letting NaN through poisoned speciation's share
+        # arithmetic and crashed the run (rung 8 ecg, 2026-07-05).
+        return total if math.isfinite(total) else -1e9

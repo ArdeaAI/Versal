@@ -1,0 +1,429 @@
+# THE main orchestrated ladder (configs/orchestrated_overmind.toml) with the WHOLE phase-9 /
+# gate-E feature stack switched ON at once, MERGED (2026-07-12) with the wall-survival levers
+# proven by configs/smoke_all_rungs.toml, for full-ladder overnight campaigns.
+#
+# The gate-E search stack (unchanged):
+#   1. sin/gaussian activation palette          (already on in the base config)
+#   2. NSGA-II + novelty + connection_cost      Pareto multi-objective (the G1 flip)
+#   3. gradient_scheduled on the direct path     warmup + cosine that defeats the training-time valley
+#   4. cppn generative init                      per-member pair-query generators, structural diversity from gen 0
+#   5. self-adaptive per-genome mutation rates   ES perturb-and-inherit; rates adapt per problem
+#
+# The smoke wall levers (merged in, marked MERGE below):
+#   6. decompose_first_above                     oversize tasks decompose BEFORE any flat attempt
+#   7. max_init_genes + max_flat_outputs         direct declines wedge-class tasks (the recon-wedge net)
+#   8. prune_and_regrow                          SET rewiring at constant density
+#   9. add_library_module DROPPED                the one uncapped library-grafting mutator (the 25-min
+#                                                BPTT blowup channel, 2026-07-07); add_macro_node STAYS
+#                                                because its k/m node-count filter already excludes wide
+#                                                entries. Restore add_library_module once a size budget
+#                                                on library-reading mutators exists.
+#  10. pool sized for an 18-rung load            tasks_per_rung/tasks/n_samples cut so startup can hold
+#                                                rungs 12-14 in memory (100x400 was never loaded; the
+#                                                arrow 2 GB chunk limit + require_all_rungs would abort)
+#
+# Deliberately NOT taken from smoke (the smoke value was probe economics, not a feature):
+#   init stays cppn (not factored), direct train stays gradient_scheduled at 160 steps (not
+#   gradient_refine at 20), pop_size stays 64, budgets stay 240/120/80, floor 0.35, max_depth 2,
+#   refine budget_k 24 (learn mode), decompose_solvability_floor 0.6, shared persistent library.
+#
+# CAVEATS worth reading before a long run:
+#   - cppn init trades grow-from-minimal for generative diversity: every fresh module/direct seed
+#     starts with hidden nodes, so easy rungs (1-2) pay a complexity/hidden penalty they did not
+#     before. Its DESIGNED payoff is the wide-rung init wall (and it is the reason the 2026-07-11
+#     ARC run survived init at 900->9000). Revert with [evolution.init] kind = "minimal" if
+#     low-rung solve rates drop.
+#   - gradient_scheduled REPLACES gradient_refine on the direct path, so refine_steps>1 genomes lose
+#     per-pass deep supervision there (they still train, just with a final-pass loss).
+#   - NSGA-II mildens the hierarchical module pool's selection to a deterministic binary tournament
+#     (the scalar-degradation path), since the loop never enters the Pareto block.
+#   - Wide flat attempts under pop 64 x 160 steps can burn a whole 600 s budget on ONE generation
+#     (measured on rung 18, ai/arc_report.md); the merge relies on decompose-first + the decline
+#     guards to route those rungs away from flat evolution instead.
+#
+#   uv run app --config configs/orchestrated_overmind_all_features.toml
+#   uv run app --resume results/<ts>_orchestrated     # continue after a Ctrl-C
+
+[run]
+project = "ardevo"
+experiment = "orchestrated_overmind_all_features"
+clearml = true
+machine = "MonadMetal"        # also picks the population-batched compute device: MonadMetal -> mps,
+                              # LatticeCUDA -> cuda ([run] compute = "cpu"|"mps"|"cuda" overrides)
+seed = 0
+log_level = "INFO"
+output_uri = false
+repo = "https://github.com/ArdeaAI/ardevo.git"
+render_async = true           # admission/overmind PNGs draw on a background thread instead of
+                              # blocking the run loop (flushed before uploads, GC, and run end)
+tf32 = false                  # opt-in TF32 CUDA matmuls: faster on Ampere+, changes numerics
+live_status = true            # pinned Rich footer with the live task/generation/budget state
+                              # (auto-off when stdout is not a terminal)
+  [run.duration]
+  generations = 1000          # informational; the orchestrated run is bounded by [orchestrator] tasks
+
+[dataset]
+source = "Ardea/Icarus-dataset"
+n_samples = 128               # MERGE: the whole pool loads into memory at startup and rung 14
+                              # (psicov, per-task up to 5.1M inputs) scales as samples x width;
+                              # 400 x 100-per-rung was never loaded and risks the arrow 2 GB chunk
+                              # limit aborting under require_all_rungs. 128 keeps low-rung fits
+                              # honest (support 102 / query 26) while bounding the heavy rungs.
+                              # Smoke ran the ladder at 48; the flagship rungs 1-6 anchor used 400.
+support_fraction = 0.8
+
+[schedule]
+kind = "interleave_rungs"
+rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
+require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
+tasks_per_rung = 8            # MERGE: 8 x 18 rungs = 144 pool tasks; at the 600 s cap plus
+                              # decompose recursion an overnight covers a few full interleave
+                              # cycles, and the run resumes from its checkpoint for the rest
+shuffle = true
+
+[orchestrator]
+tasks = 144                   # how many scheduled tasks this run attempts (= the whole pool)
+accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
+accept_threshold = 0.95
+floor = 0.35                  # below this at half budget = early stall
+stall_generations = 28
+stall_epsilon = 0.005
+max_task_seconds = 600        # per-attempt wall-clock budget: past it the running stage finishes its
+                              # current generation, later ladder stages are skipped, and the attempt
+                              # fails with its best champion (the wall ledger still shelves it).
+                              # The guard against free-growth blowups (the 2026-07-05 diag_g2 run hit
+                              # 3532s on one task). 0 = off, byte-identical.
+max_depth = 2                 # recursion cap for decomposition
+quick_eval_top_k = 5
+library_dir = "library"       # persistent across runs: delete it to start the search space cold
+decompose_first_above = 2000000   # MERGE: a task whose dense-init gene estimate exceeds this runs
+                              # DECOMPOSE before any flat attempt (rungs 11-14, 17, 18), the route
+                              # that produced smoke's first production decomposition (cosmic 0.986)
+evolve = ["routed", "direct", "composition"]   # routed goes FIRST: a zero-shot clear costs 0 generations
+                                     # and a miss charges only generation_cost before direct takes over
+                                     # (config order, first success wins, unspent budget rolls on).
+decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
+output_slices_n_groups = 2
+input_subsets_n_subsets = 2
+time_windows_n_windows = 2
+spatial_patches_n_patches = 2    # grid->grid: tile a band of the spatial axis (the ARC-portable split)
+decompose_solvability_floor = 0.6   # skip a decompose op whose probed subtasks cannot fit support this far
+decompose_probe_generations = 6     # short evolve to probe each subtask before committing the budget
+  [orchestrator.budgets]      # evolve generations per recursion depth (shared across strategies)
+  depth0 = 240
+  depth1 = 120
+  depth2 = 80
+  [orchestrator.evolve_budget]  # relative budget shares within one depth allocation (direct leads;
+  routed = 0.2                  # routed's slice is small because it bills generation_cost, not real gens)
+  direct = 0.5
+  composition = 0.3
+  [orchestrator.routed]       # the learned routed substrate: a sparse MoE over FROZEN library entries.
+                              # Router training stays on CPU deliberately: d_model 64 kernels are far
+                              # below the measured GPU break-even (T4/T5 showed even the pop-64 batch
+                              # program loses to CPU at these sizes), so a device knob here would only
+                              # invite a slower configuration.
+  d_model = 64                # the shared bus width; growth is an append, never a resize
+  top_k = 2
+  max_steps = 4               # bounded unroll: the no-stuck-loop guarantee (cycles are legal)
+  train_steps = 200
+  lr = 0.003
+  weight_decay = 0.0001
+  adapter_rank = 4            # > 0 = rank-bottlenecked adapters, forcing routing to earn its keep
+                              # (the anti-bypass lever; raise if expert utilization collapses)
+  load_balance_weight = 0.01
+  zero_shot_accept = true     # a zero-shot clear returns at 0 generations: the router's library hit
+  generation_cost = 10        # budget charged when per-task training actually runs
+  distill = true              # THE DSL CONTRACT: a win must distill into a verified composition to
+                              # count (admitted as a new vertex); adapter-only wins report as misses
+                              # and escalate. false = solved-but-not-shelved, for A/B only
+  distill_usage_floor = 0.1   # mean gate weight an expert needs at some step to make the pathway
+  distill_max_nodes = 6       # size cap on the distilled composition
+  replay_tasks = 8            # in-memory anti-forgetting: replay a recent task every replay_every steps
+  replay_every = 4
+  include_compositions = true
+  exclude_temporal = true     # TIME-axis entries are out of routing scope for the prototype
+  persist = true              # router state survives across tasks AND runs under <library_dir>/router
+  persist_strict = false      # true = hard-error on config/state mismatch instead of starting fresh
+  halting = true              # Stage C: ACT-style geometric halting (only ever SHORTENS the unroll)
+  ponder_epsilon = 0.01
+  ponder_cost = 0.001         # loss penalty per expected step, so halting learns to stop early
+  edge_bias = true            # Stage C: factorized expert-to-expert pathway prior (fired experts
+                              # bias the next step's gate); append-only, unlike a raw V x V matrix
+  [orchestrator.refine]       # LEARN MODE: on a library hit, spend up to budget_k generations seeded
+                              # from the stored solution trying to beat it (lexicographic: metric,
+                              # then robustness, then LOWER complexity), admit only strict wins, and
+                              # fall back to the known topology otherwise. budget_k = 0 is LIVE mode:
+                              # hits stay zero-cost, byte-identical to the pre-refine behavior.
+  budget_k = 24               # 10 percent of depth0; a per-hit CAP, not a fixed cost (stall stops early)
+  depth_max = 0               # refine top-level hits only; raising it refines sub-solve hits too, whose
+                              # improvements admit UNCONDITIONALLY via the dependency rail (unbounded)
+  metric_epsilon = 0.005
+  robustness_epsilon = 0.01
+  decay = 0.5                 # effective-K multiplier per consecutive no-gain (24->12->6->skip). The cooldown
+                              # rides the LINEAGE: a capability gain (metric/robustness) recharges it, a
+                              # compression-only gain spends it, so one capability epoch funds a few polish
+                              # passes and then the family sleeps (DreamCoder compress-then-stop)
+  min_generations = 4         # decayed budgets below this skip refinement entirely
+  stall_generations = 8       # refine-local flatline window (the global 28 would exceed typical budgets)
+  retire_superseded = true    # tombstone the old entry when the shelved improvement weakly dominates
+                              # its stored (robustness, metric) ranking; mixed trade-offs stay live
+  [orchestrator.wall]         # THE WALL LEDGER: a depth-0 failure shelves its best champion as a
+                              # below-bar stepping stone (dependency entry, never a false lookup hit),
+                              # and later attempts on that signature warm-start from it. Assaults on a
+                              # hard family (two_spirals) accumulate training + structure instead of
+                              # restarting; one stone per lineage, replaced only on a strict win.
+  ledger = true
+  min_metric = 0.45           # a stone must carry SOME signal before it is worth keeping
+  seed_top_k = 1              # stones grafted into the next attempt's starting population
+  [orchestrator.direct]       # the phase-1 flat recipe on the task's REAL I/O: the structure-growing
+                              # fallback (two-spirals class) and the source of task-shaped modules.
+                              # TIME-axis tasks run through the stepped recurrent substrate here.
+  pop_size = 64
+  elitism = 2
+  assess_workers = 12         # process-pool the per-genome decode+train+evaluate across cores (M4 Max
+                              # has 12 performance cores); 0/1 = sequential. Bit-identical to serial
+                              # (independent genomes, rng-free training); the dominant run cost.
+  max_flat_outputs = 4096     # MERGE: the [n, h] dense-column guard; wider outputs decline direct
+                              # and escalate to composition, whose glue is already rank-factored
+  max_init_genes = 2000000    # MERGE: decline any direct attempt above the dense-init gene cap
+                              # (the recon-wedge net: rung 17 wedged two runs inside init where no
+                              # deadline check exists; a task that slips decompose-first stops here)
+    [orchestrator.direct.train]  # gradient_scheduled (gate-E remedy 1): linear warmup to `lr` then
+                                 # cosine decay to 5% of it. Fixed-lr Adam stalls in the oscillatory
+                                 # loss regions of the two-spirals class; the schedule anneals through
+                                 # them (validated: the same seeded topology survives as champion at
+                                 # 0.651 with all sin nodes intact vs dying at 0.604 under fixed lr).
+                                 # NOTE this REPLACES gradient_refine here, so refine_steps>1 genomes
+                                 # lose per-pass deep supervision on the direct path (they still train
+                                 # on a final-pass loss). It is a plain TRAIN op with no batched form,
+                                 # so it always runs on the assess pool; do NOT add a `batched` key
+                                 # (gradient_scheduled does not accept it). Raise `steps` if a hard
+                                 # task still stalls mid-fit; peak `lr` matches the base direct lr so
+                                 # the only change is the warmup+decay envelope.
+    kind = "gradient_scheduled"
+    steps = 160
+    lr = 0.03
+    writeback = true
+    weight_decay = 0.0002
+
+[library]                     # admission policy: what earns a place on the shelf
+admission = "archive"         # open-ended QD archive: keep BEHAVIORALLY DIVERSE stepping stones, not
+                              # just the top-k by metric ("default" = flat cap; "accept_all" = legacy)
+gc = true                     # run-end sweep of unreferenced tombstones (mark-and-sweep from live
+                              # entries; resumable state protected; dead router vertices pruned)
+min_metric = 0.9              # quality floor on the accept metric
+min_robustness = 0.0          # weight-robustness floor (raise once the library is healthy)
+per_niche_cap = 2             # max entries per (io shape, behavior niche): distinct KINDS of solution
+                              # coexist (small/deep, recurrent/refining, gated, macro) for recombination
+max_per_signature = 12        # total live entries per io shape across all niches; the weakest is
+                              # tombstoned (never deleted) when full, so existing refs keep assembling
+
+[substrate]
+available_activations = ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"]  # sin/gaussian: periodic + radial primitives (Phase 0.2); mutation-only, never seeded
+default_activation = "tanh"
+recurrent = true              # permits recurrent genes (inert under the flat decode; the stepped
+                              # substrate uses them on TIME-axis subtask evolution)
+
+[evolution]
+loop = "hierarchical"
+pop_size = 64                 # module population fallback (overridden by [evolution.modules].pop_size)
+elitism = 1
+  [evolution.init]              # cppn = the generative seed (gate-E fork): per-member random
+                                # pair-query generators f(source_coord, target_coord) ->
+                                # (weight, expression) compile into sparse, spatially patterned
+                                # starting wirings, so the population carries STRUCTURAL DIVERSITY
+                                # from generation zero (minimal seeds every member identically).
+                                # `hidden` is kept small here so the module pool and easy-rung direct
+                                # seeds do not start badly over-complex; the large-`hidden`, sin/
+                                # gaussian-seeded form is the two-spirals lever (see diag_g2). Revert
+                                # to kind = "minimal" for pure grow-from-minimal.
+  kind = "cppn"
+  weight_scale = 1.0
+  hidden = 4                  # hidden nodes per generated seed (density * pairs edges, not n*m)
+  density = 0.3               # exact sparsity dial (quantile over generated pair expressions)
+  generator_hidden = 3        # width of each member's tiny pair-query generator MLP
+  [evolution.selection]       # options: "tournament" (param: tournament_size) | "truncation" (fraction)
+                              # | "nsga2" (Pareto rank + crowding tournament; needs [fitness] objectives,
+                              # degrades to a fitness tournament on the scalar call sites)
+  kind = "nsga2"              # Pareto over [fitness] objectives (no params; tournament_size must stay dropped)
+  parsimony_epsilon = 0.01    # anti-bloat WITHOUT a size cap: fitness quantizes into 0.01 bands and
+                              # within a band the SMALLER genome wins selection, so extra size only
+                              # survives when it buys a real fitness step. On the direct Pareto path
+                              # it sits behind rank + crowding; on the module pool's scalar call it
+                              # ranks by band with complexity as the in-band decider. 0.0 = off.
+  [evolution.crossover]       # options: "none" (asexual; clone the fitter parent) | "neat" (innovation-aligned)
+  kind = "neat"
+  rate = 0.2
+  [evolution.mutation]        # the MODULE population's operators (the proven phase-1 recipe plus
+                              # the new primitives: product gating, recurrence, and library reuse:
+                              # add_library_module inlines a found network as evolvable structure,
+                              # add_macro_node embeds one as a single FROZEN unit, LSTM-cell style).
+                              # With gradient training, evolution searches STRUCTURE and gradient
+                              # owns the WEIGHTS: perturb_weights (registered) is omitted because it
+                              # fights the optimizer; add_node (canonical NEAT single-edge split) is
+                              # registered but slow to become useful next to add_rich_node/add_deep_node.
+                              #
+                              # SELF-ADAPTIVE RATES (lever F): each genome carries its own per-operator
+                              # probabilities as strategy genes; the pipeline perturbs them log-normally
+                              # (ES perturb-and-inherit), applies each operator at its own rate, then
+                              # stamps the perturbed rates onto the child, so the search rate adapts per
+                              # problem. The *_prob values below seed each operator's starting rate.
+                              # This top-level table feeds BOTH the direct per-task population (its
+                              # validated home: a clean per-task fitness gradient) AND the shared
+                              # hierarchical module pool. On the module pool the rate-gene selection
+                              # signal is weak (module fitness is attributed from referencing
+                              # compositions), so rates mostly DRIFT there rather than adapt; credit or
+                              # blame the adaptive lever to the direct path. Move this whole table under
+                              # [orchestrator.direct.mutation] to make lever F direct-path-only.
+  self_adaptive = true
+  self_adaptive_learning_rate = 0.1   # log-normal step size on the rates
+  self_adaptive_min = 0.001           # rate clamp floor
+  self_adaptive_max = 1.0             # rate clamp ceiling
+  # remove_connection / remove_hidden_node: the structural SHRINK moves (true gene deletion, not
+  # toggle-disable), so a lineage can climb back down in size. Self-adaptive seeds like every
+  # other rate: they rise where pruning pays and sink to the floor where it hurts.
+  # MERGE: add_library_module is DROPPED on the mixed-width ladder. It inlines a random library
+  # entry with NO size filter, and this shared library already holds 9,905-node ARC stones: grafted
+  # into a small temporal genome, one candidate becomes a 25-minute, tens-of-GB BPTT backward the
+  # between-generations deadline cannot reach (observed twice, 2026-07-07). add_macro_node STAYS:
+  # its candidate filter (inner input nodes <= host sources, output nodes <= max_outputs, macro
+  # depth cap) already excludes wide entries. prune_and_regrow joins (SET rewiring at constant
+  # density, the partner to the sparse cppn seeds).
+  operators = [
+    "add_rich_node", 
+    "add_deep_node", 
+    "add_connection", 
+    "toggle_connection", 
+    "mutate_activation", 
+    "mutate_aggregation", 
+    "add_recurrent_connection", 
+    "add_macro_node", 
+    "tweak_refine_steps", 
+    "add_local_node", 
+    "add_local_connection", 
+    "add_shared_motif", 
+    "remove_connection", 
+    "remove_hidden_node", 
+    "prune_and_regrow"
+  ]
+  add_rich_node_prob = 0.12
+  add_rich_node_fan_in = 4
+  add_deep_node_prob = 0.12
+  add_deep_node_fan_in = 4
+  add_deep_node_fan_out = 2
+  add_connection_prob = 0.12
+  toggle_connection_prob = 0.05
+  mutate_activation_prob = 0.06
+  mutate_aggregation_prob = 0.05
+  mutate_aggregation_max_fan_in = 4
+  add_recurrent_connection_prob = 0.04
+  add_macro_node_prob = 0.05
+  add_macro_node_max_outputs = 16
+  tweak_refine_steps_prob = 0.06   # TRM lever: nudge per-genome refinement depth (paired with recurrence)
+  tweak_refine_steps_max_steps = 6
+  # Geometry operators: no-ops without coordinates (the flat/module path), but on grid tasks the
+  # direct strategy stamps axis coordinates, so these grow LOCAL receptive fields and repeated
+  # motifs (a structural convolution prior, untied weights) -- the lever for the high-dim image wall.
+  add_local_node_prob = 0.1
+  add_local_node_fan_in = 4
+  add_local_connection_prob = 0.1
+  add_local_connection_radius = 1.5
+  add_shared_motif_prob = 0.05
+  add_shared_motif_copies = 2
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
+  prune_and_regrow_prob = 0.1       # MERGE: magnitude-prune the weakest fraction, regrow the same
+  prune_and_regrow_fraction = 0.05  # count elsewhere (strictly forward in one topo order = acyclic)
+  [evolution.train]           # trains assembled compositions: glue + unfrozen live module copies.
+                              # steps must tune a freshly-grown candidate enough for its capacity to
+                              # show BEFORE it competes (champions are never re-trained); weight_decay
+                              # is what makes fits GENERALIZE (closes the support->query gap). Left as
+                              # plain gradient: the scheduled trainer's validated home is the direct
+                              # path, and a 40-step schedule buys little.
+  kind = "gradient"
+  steps = 40
+  lr = 0.03
+  writeback = true            # Lamarckian: tuned weights copy back into the genome (the hierarchical
+                              # loop routes champion-only module writeback itself)
+  weight_decay = 0.0002
+  [evolution.evaluate]        # hybrid = trained metrics PLUS weight-robustness (library admission currency)
+  kind = "hybrid"
+  samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+  batched_samples = "auto"    # stack the 6 sample fills into one batched forward, but only where it
+                              # measured a win (nodes >= 768: 1.04x at 784, 1.14x at 3072; a LOSS
+                              # below that, T2 2026-07-04). false = always serial, true = always stacked.
+  [evolution.novelty]         # DIVERGENT SELECTION: k-NN behavioral novelty over a per-task archive,
+                              # computed by the direct path's post-assess hook and read by the
+                              # "novelty" fitness component / Pareto objective. Direct-path only by
+                              # construction (the module pool never enters the novelty hook).
+  k = 15
+  archive_cap = 256               # 0 = archive-free (population-only) ablation
+  probe_rows = 64
+  [evolution.speciation]      # module species are the blueprint targets the compositions reference.
+                              # "neat" = compatibility-distance niching + fitness sharing, one champion
+                              # per species; the threshold AUTO-ADJUSTS toward target_species each
+                              # generation (a fixed threshold lets the population fracture into
+                              # singletons; target_species = 0 disables the auto-adjust)
+  kind = "neat"
+  threshold = 1.5             # initial compatibility distance; auto-tuned from here
+  target_species = 6
+  threshold_adjust = 0.3      # step size for the auto-adjustment
+  min_threshold = 0.3         # floor so the threshold never collapses to zero
+  c_excess = 1.0              # weight on excess genes in the distance
+  c_disjoint = 1.0            # weight on disjoint genes
+  c_weight = 0.5              # weight on mean matching-connection weight difference
+
+  [evolution.composition]     # the per-task composition population (level 2+)
+  pop_size = 48
+  elitism = 2
+  max_inline_depth = 4
+  glue_rank = 8               # NEW glue factorizes to rank 8 when in*out exceeds the threshold
+  glue_rank_threshold = 4096  # (a width-784 dense edge is 614k floats; rank 8 is 12.5k)
+  catalog_width_tolerance = -1  # -1 = expose every library entry to comp mutations (glue adapts)
+    [evolution.composition.selection]
+    kind = "tournament"
+    tournament_size = 2
+    [evolution.composition.crossover]
+    kind = "comp_neat"
+    rate = 0.3
+    [evolution.composition.mutation]
+    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
+    add_module_node_prob = 0.3
+    switch_ref_prob = 0.12
+    add_comp_edge_prob = 0.15
+    toggle_comp_edge_prob = 0.05
+    perturb_glue_prob = 0.6
+    perturb_glue_sigma = 0.3
+
+  [evolution.modules]         # the shared live module population (level 1)
+  pop_size = 64
+  elitism = 1
+  in_ports = 4
+  out_ports = 2
+  advance_every = 3           # module generations per composition generation
+  writeback = "champion"      # only the best composition writes module weights back
+  attribution = "max"         # a module is as good as the BEST composition using it
+  decay = 0.95
+  offspring_discount = 0.9
+  seed_fraction = 0.25        # fraction of the module pool grafted from the library at run start
+  absorb_top_k = 2            # at each lookup miss, graft up to this many NEW library entries over
+                              # the worst non-champions: found structures join the soup mid-run
+
+[fitness]
+# Weighted sum of registered components, higher is better (the full menu lives in
+# ardevo/evolution/fitness.py; weights bind as w_<name>). Bounded loss (0,1] instead of raw
+# (-inf,0] so it no longer swamps accuracy and robustness; robustness weight raised because it is
+# the library admission currency and the cross-task transfer signal. All components live on a
+# comparable scale, so selection actually balances them.
+components = ["bounded_negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
+w_bounded_negative_support_loss = 2.0
+w_support_accuracy = 1.0
+w_weight_robustness = 0.5
+w_hidden_penalty = 0.05
+w_complexity_penalty = 0.01
+# PARETO MODE (ai/two_spirals_modified_plan.md Phase 1): `objectives` names the vector NSGA-II
+# selects on (raw component values; the weights above shape only the scalar sum, which keeps driving
+# speciation budgets and champion tracking). connection_cost rewards sparser wiring (squared
+# coordinate distance where measurable, edge-count fallback otherwise), a counter-pressure to the
+# denser cppn seeds; novelty rewards behavioral divergence.
+objectives = ["support_accuracy", "novelty", "connection_cost"]

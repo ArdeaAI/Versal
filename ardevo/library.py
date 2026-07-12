@@ -19,10 +19,10 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, support_loader
-from ardevo.evaluation import output_features
+from ardevo.evaluation import fit_query_target, output_features
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, genome_from_dict
 from ardevo.evolution.registry import Registry
 from ardevo.utils.logging import Logger
@@ -136,7 +136,7 @@ def task_io(task: Task) -> dict[str, Any]:
     input_width = 1
     for dim in support_input.data.shape[1:]:
         input_width *= int(dim)
-    encoded = encode_task(task, Level0Encoder(input_width))
+    encoded = fit_query_target(encode_task(task, Level0Encoder(input_width)))
     return {
         "inputs": [
             {
@@ -195,6 +195,45 @@ def _canonical_key(entry_type: str, level: int, payload: dict[str, Any]) -> str:
     return f"{entry_type[0]}{level}_{digest}"
 
 
+def payload_refs(entry_type: str, payload: dict[str, Any]) -> set[str]:
+    """Every library key this payload names: composition node refs and module macro refs (both use
+    the literal "library:" prefix). The GC's edge function, and the natural motif-census hook."""
+    refs: set[str] = set()
+    if entry_type == COMPOSITION:
+        candidates = (node.get("ref", "") for node in payload.get("nodes", []))
+    else:
+        candidates = (macro.get("ref", "") for macro in payload.get("macros", []))
+    for ref in candidates:
+        if ref.startswith("library:"):
+            refs.add(ref.removeprefix("library:"))
+    return refs
+
+
+def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
+    """Weight-agnostic topology hash: two payloads share a fingerprint iff they are the same
+    STRUCTURE (nodes, wiring, macro refs, refine depth), regardless of trained weights, glue
+    values, or innovation numbering. Entry keys hash the full payload, so a retrained clone
+    always gets a fresh key; this is the identity refinement must compare against instead
+    (a weight-only "improvement" is not a new solution). Also the natural basis for a future
+    motif census over discovered substructures."""
+    if entry_type == MODULE:
+        skeleton: dict[str, Any] = {
+            "nodes": sorted(
+                (int(node["id"]), node["kind"], node["activation"], list(node["coordinate"]) if node.get("coordinate") is not None else None, node.get("aggregation", "sum"))
+                for node in payload["nodes"]
+            ),
+            "connections": sorted((int(conn["in"]), int(conn["out"]), bool(conn["enabled"]), bool(conn.get("recurrent", False))) for conn in payload["connections"]),
+            "macros": sorted((macro["ref"], list(macro["inputs"]), list(macro["outputs"]), bool(macro.get("trainable", False))) for macro in payload.get("macros", [])),
+            "refine_steps": int(payload.get("refine_steps", 1)),
+        }
+    else:
+        skeleton = {
+            "nodes": sorted((int(node["id"]), node["kind"], node["ref"], node.get("aggregation", "sum"), bool(node.get("trainable", True))) for node in payload["nodes"]),
+            "edges": sorted((int(edge["in"]), int(edge["out"]), bool(edge["enabled"]), int(edge.get("glue_rank", 0))) for edge in payload["edges"]),
+        }
+    return hashlib.sha1(json.dumps(skeleton, sort_keys=True).encode()).hexdigest()[:16]
+
+
 class ModuleLibrary:
     """File-backed store. The index holds query-able summaries; payloads load on demand."""
 
@@ -203,6 +242,13 @@ class ModuleLibrary:
         self._entries_dir = self.root / "entries"
         self._index_path = self.root / "index.json"
         self._index: dict[str, dict[str, Any]] = {}
+        self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
+        # Parsed-entry cache: payloads are immutable and every mutation (dedupe provenance, stats)
+        # goes through this object, so the cached instance IS the coherent one. Unbounded is fine at
+        # hundreds of entries; revisit alongside the _write_index watchpoint when it reaches thousands.
+        self._entry_cache: dict[str, LibraryEntry] = {}
+        # Keys whose stats mutated in memory but not yet on disk (bump_stats defers; flush_stats writes).
+        self._dirty_stats: set[str] = set()
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
 
@@ -224,6 +270,8 @@ class ModuleLibrary:
         return rows
 
     def _write_index(self) -> None:
+        # Scale watchpoint: a full index rewrite per admission is O(entries); fine at hundreds,
+        # revisit (append-log or sqlite) when the library reaches thousands.
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path.write_text(json.dumps(sorted(self._index.values(), key=lambda item: item["key"]), indent=2))
 
@@ -313,10 +361,75 @@ class ModuleLibrary:
         ]
 
     def load(self, key: str) -> LibraryEntry:
+        cached = self._entry_cache.get(key)
+        if cached is not None:
+            return cached
         path = self._entries_dir / f"{key}.json"
         if not path.exists():
             raise KeyError(f"no library entry {key!r} under {self.root}")
-        return LibraryEntry.from_dict(json.loads(path.read_text()))
+        entry = LibraryEntry.from_dict(json.loads(path.read_text()))
+        summary = self._index.get(key)
+        if summary is not None:
+            # Share the index row's stats dict so deferred bump_stats mutations stay visible through
+            # every loaded handle without a per-bump disk write.
+            entry.stats = summary.setdefault("stats", entry.stats)
+        self._entry_cache[key] = entry
+        return entry
+
+    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Depth of the macro-reference chain under `key`: 0 = no macros, 1 + deepest target
+        otherwise. This is what the decode cap (`substrate._MAX_MACRO_DEPTH`) actually limits, so
+        macro-adding mutations consult it to never manufacture a genome that cannot decode (the
+        wall-ledger lesson: repeated seed-then-embed cycles deepen the chain one level per attempt).
+        A missing or cyclic ref reads as unboundedly deep: never a safe macro target."""
+        cached = self._macro_depth_cache.get(key)
+        if cached is not None:
+            return cached
+        if key in _visiting:
+            return 999  # defensive: immutable append-only entries cannot cycle, but never recurse forever
+        try:
+            entry = self.load(key)
+        except KeyError:
+            return 999
+        refs = payload_refs(entry.entry_type, entry.payload)
+        depth = 0 if not refs else 1 + max(self.macro_subtree_depth(ref, _visiting | {key}) for ref in refs)
+        self._macro_depth_cache[key] = depth
+        return depth
+
+    def collect_garbage(self, *, protect: Iterable[str] = (), dry_run: bool = False) -> list[str]:
+        """Physically delete retired entries nothing retained still references. Mark-and-sweep:
+        roots are every LIVE entry plus `protect` (router vertices, resumable checkpoint macro
+        refs); marking follows `payload_refs` through RETAINED entries to fixpoint, so a retired
+        dependency named by a live composition survives, and a whole retired chain falls together.
+        Sweeping removes the entry file, the index row, and the entry's render image. This is the
+        one exception to "entries are never deleted": the tombstone contract (refs never dangle)
+        is preserved because only provably-unreferenced tombstones go."""
+        marked = {key for key, summary in self._index.items() if not summary.get("retired", False)}
+        marked.update(key for key in protect if key in self._index)
+        frontier = list(marked)
+        while frontier:
+            key = frontier.pop()
+            try:
+                entry = self.load(key)
+            except KeyError:
+                continue
+            for ref in payload_refs(entry.entry_type, entry.payload):
+                if ref in self._index and ref not in marked:
+                    marked.add(ref)
+                    frontier.append(ref)
+        swept = sorted(key for key in self._index if key not in marked)
+        if dry_run or not swept:
+            return swept
+        for key in swept:
+            del self._index[key]
+            self._macro_depth_cache.pop(key, None)
+            self._entry_cache.pop(key, None)
+            self._dirty_stats.discard(key)
+            (self._entries_dir / f"{key}.json").unlink(missing_ok=True)
+            (self.root / "images" / f"{key}.png").unlink(missing_ok=True)
+        self._write_index()
+        logger.info("garbage-collected %d unreferenced tombstones", len(swept))
+        return swept
 
     def query(
         self,
@@ -362,13 +475,67 @@ class ModuleLibrary:
         return [self.load(summary["key"]) for summary in matches]
 
     def bump_stats(self, key: str, attributed_fitness: float) -> None:
-        """Record a use of `key` in an assembled network (provenance for future ranking)."""
+        """Record a use of `key` in an assembled network (provenance for future ranking).
+
+        The HOT stats writer (once per attributed ref per composition generation), so it defers all
+        I/O: the index row mutates in place (shared with loaded handles via the `load` overlay) and
+        `flush_stats` persists dirty rows at task boundaries. Structural writers (add/retire/refine)
+        stay immediate."""
         summary = self._index.get(key)
         if summary is None:
             return
         stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
         stats["use_count"] = int(stats.get("use_count", 0)) + 1
         stats["max_attributed_fitness"] = max(float(stats.get("max_attributed_fitness", 0.0)), attributed_fitness)
+        self._dirty_stats.add(key)
+
+    def flush_stats(self) -> None:
+        """Persist deferred `bump_stats` mutations: rewrite each dirty entry's file, then the index
+        ONCE. The orchestrated trial calls this after every task (and from its crash handler), which
+        is the durability granularity the observability contract promises. No-op when clean."""
+        if not self._dirty_stats:
+            return
+        for key in sorted(self._dirty_stats):
+            summary = self._index.get(key)
+            if summary is None:
+                continue  # swept while dirty; nothing durable to update
+            entry = self.load(key)
+            entry.stats = summary.setdefault("stats", entry.stats)
+            (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._dirty_stats.clear()
+        self._write_index()
+
+    def summary(self, key: str) -> dict[str, Any] | None:
+        """A copy of the index row for `key` (ranking fields + stats), or None if unknown."""
+        summary = self._index.get(key)
+        return dict(summary) if summary is not None else None
+
+    def record_refinement(self, key: str, *, improved: bool) -> None:
+        """Record a learn-mode refinement attempt against `key`. The refine keys appear LAZILY on
+        first call (never in the stats defaults or `add`), so libraries untouched by refinement
+        stay byte-identical on disk."""
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["refine_attempts"] = int(stats.get("refine_attempts", 0)) + 1
+        stats["refine_failures_since_gain"] = 0 if improved else int(stats.get("refine_failures_since_gain", 0)) + 1
+        entry = self.load(key)
+        entry.stats = stats
+        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_index()
+
+    def seed_refine_stats(self, key: str, *, attempts: int, failures: int) -> None:
+        """Start `key`'s refine ledger from its lineage instead of zero: a refined replacement is
+        the SAME solution continuing under a new key, so the family's cooldown must ride the chain
+        (a fresh account per polish pass is the treadmill that filled the library with lineage
+        variants of one solver). Lazy keys, like `record_refinement`."""
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["refine_attempts"] = int(attempts)
+        stats["refine_failures_since_gain"] = int(failures)
         entry = self.load(key)
         entry.stats = stats
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))

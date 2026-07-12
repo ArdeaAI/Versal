@@ -1,64 +1,70 @@
 import argparse
 from typing import Any
 
-from ardevo.trials.continuous_trial import ContinuousTrial
 from ardevo.trials.orchestrated_trial import OrchestratedTrial
-from ardevo.trials.xor_trial import EvolutionTrial
 from ardevo.utils.config import Config
 from ardevo.utils.logging import Logger
 from ardevo.utils.pipelines import Pipeline
 
 
-def configure_torch_threads(config: dict[str, Any]) -> None:
-    """When candidates are assessed on a thread pool, pin torch to one intra-op thread: the
-    per-candidate kernels are tiny (widths 2-128), intra-op threading gains nothing there, and
-    N workers x torch's default thread count would oversubscribe the cores. Process-global, so
-    it lives at the single entry point, not in trial constructors."""
-    if int(config.get("evolution", {}).get("parallel_assess", 0)) > 1:
+def require_orchestrator(config: dict[str, Any]) -> None:
+    """The orchestrated trial is the only run mode; fail fast on a config that cannot drive it."""
+    if not config.get("orchestrator"):
+        raise SystemExit("config has no [orchestrator] table; the supported run config is configs/orchestrated_overmind.toml")
+
+
+def configure_assess_pool(config: dict[str, Any]) -> None:
+    """Create the direct strategy's process pool HERE, before the Pipeline builds the ClearML task.
+    clearml.Task.init unconditionally patches os.fork/multiprocessing, and workers spawned afterward
+    inherit CLEARML_PROC_MASTER_ID and stall attaching to the task instead of computing. Spawning the
+    persistent workers first (clearml not yet imported) keeps them clean for the whole run."""
+    from ardevo.utils.device import resolve_worker_count
+
+    orchestrator = config.get("orchestrator", {})
+    workers = resolve_worker_count(orchestrator.get("direct", {}).get("assess_workers", 0))
+    if orchestrator and workers > 1:
         import torch
 
-        torch.set_num_threads(1)
+        from ardevo.evolution.evolver import create_assess_pool
+
+        create_assess_pool(workers, orchestrator.get("library_dir", "library"))
+        Logger.get_logger().info("assess pool: %d workers (1 torch thread each); main process torch threads: %d", workers, torch.get_num_threads())
 
 
-def configure_macro_resolver(config: dict[str, Any]) -> None:
-    """Macro genes resolve frozen inner networks from the library at decode time. The orchestrated
-    trial installs its live instance; flat runs that enable library-reading mutators point at the
-    on-disk dir here."""
-    from pathlib import Path
+def configure_precision(config: dict[str, Any]) -> None:
+    """Opt-in TF32 for CUDA matmuls (`[run] tf32 = true`). TF32 truncates the mantissa during
+    accumulation, so it changes numerics materially; the default stays full fp32."""
+    if bool(config.get("tf32", False)):
+        import torch
 
-    library_dir = config.get("orchestrator", {}).get("library_dir") or config.get("library", {}).get("dir")
-    if library_dir and Path(library_dir).exists():
-        from ardevo.library import ModuleLibrary, macro_resolver
-        from ardevo.substrate import set_macro_resolver
-
-        set_macro_resolver(macro_resolver(ModuleLibrary(library_dir)))
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        Logger.get_logger().info("TF32 enabled for CUDA matmuls ([run] tf32 = true)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ArdEVO: evolve network topologies on the Icarus ladder.")
-    parser.add_argument("--config", type=str, default=None, help="Path to a config.toml (defaults to repo root).")
-    parser.add_argument("--resume", type=str, default=None, help="Resume a continuous run from its run directory (e.g. results/<ts>_continuous).")
+    parser = argparse.ArgumentParser(description="ArdEVO: the orchestrated overmind evolver on the Icarus ladder.")
+    parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/orchestrated_overmind.toml).")
+    parser.add_argument("--resume", type=str, default=None, help="Resume a run from its directory (e.g. results/<ts>_orchestrated).")
+    parser.add_argument("--seed", type=int, default=None, help="Override [run] seed (the multi-seed matrix driver's seam; the config file stays frozen).")
+    parser.add_argument("--library-dir", type=str, default=None, help="Override [orchestrator] library_dir (cold/warm arms without editing the config).")
     args = parser.parse_args()
 
     config = Config(conf_path=args.config)
+    require_orchestrator(config.current)
     if args.resume:
         config.current["resume"] = args.resume
-    configure_torch_threads(config.current)
-    configure_macro_resolver(config.current)
+    if args.seed is not None:
+        config.current["seed"] = args.seed
+    if args.library_dir is not None:
+        config.current["orchestrator"]["library_dir"] = args.library_dir
+    configure_precision(config.current)
+    configure_assess_pool(config.current)
     logger = Logger.get_logger()
 
     pipe = Pipeline(config.current, load_data=False)
     logger.info("pipeline: %s", pipe.get_pipeline_info())
-
-    # A populated [orchestrator] table selects the orchestrated recursive trial; [schedule] alone
-    # selects the continuous multi-rung trial; otherwise a single-rung run.
-    if config.current.get("orchestrator"):
-        trial = OrchestratedTrial
-    elif config.current.get("schedule"):
-        trial = ContinuousTrial
-    else:
-        trial = EvolutionTrial
-    pipe.add_trial(trial)
+    pipe.add_trial(OrchestratedTrial)
     pipe.run_task()
 
 

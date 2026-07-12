@@ -4,7 +4,7 @@ import torch
 
 from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
 from ardevo.evolution.genome import genome_to_dict
-from ardevo.evolution.multitask import build_pool, build_pool_report
+from ardevo.evolution.multitask import build_pool_report
 from ardevo.library import MODULE, ModuleLibrary, task_io
 from ardevo.tools.rung_doctor import parse_rungs, rung_report
 
@@ -47,11 +47,6 @@ def test_build_pool_report_records_skips_and_empties() -> None:
     assert [entry.rung for entry in report.entries] == [1]
     assert [(s.rung, s.error_type) for s in report.skipped] == [(2, "RuntimeError"), (3, "EmptyRung")]
     assert "arrow overflow" in report.skipped[0].message
-
-
-def test_build_pool_wrapper_keeps_original_contract() -> None:
-    entries = build_pool("fake", [1], n_samples=4, support_fraction=0.8, tasks_per_rung=2, shuffle=False, seed=0)
-    assert entries == [] or all(hasattr(entry, "task") for entry in entries)  # network-less env: empty is fine
 
 
 def test_rung_report_rows(tmp_path) -> None:

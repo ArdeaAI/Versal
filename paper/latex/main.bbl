@@ -1,0 +1,594 @@
+\begin{thebibliography}{89}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Alet et~al.(2018)Alet, Lozano-Perez, and Kaelbling]{alet2018}
+Ferran Alet, Tomas Lozano-Perez, and Leslie~P. Kaelbling.
+\newblock {Modular meta-learning}.
+\newblock In \emph{Conference on Robot Learning (CoRL)}, 2018.
+\newblock arXiv:1806.10166.
+
+\bibitem[Andreas et~al.(2016)Andreas, Rohrbach, Darrell, and
+  Klein]{andreas2016}
+Jacob Andreas, Marcus Rohrbach, Trevor Darrell, and Dan Klein.
+\newblock {Neural module networks}.
+\newblock In \emph{CVPR 2016}, 2016.
+\newblock arXiv:1511.02799.
+
+\bibitem[{ARC Prize Foundation}(2026)]{arcprize2026}
+{ARC Prize Foundation}.
+\newblock {ARC-AGI-3: A new challenge for frontier agentic intelligence}, 2026.
+\newblock arXiv:2603.24621.
+
+\bibitem[Bai et~al.(2019)Bai, Kolter, and Koltun]{bai2019}
+Shaojie Bai, J.~Zico Kolter, and Vladlen Koltun.
+\newblock {Deep equilibrium models}.
+\newblock In \emph{NeurIPS 2019}, 2019.
+\newblock arXiv:1909.01377.
+
+\bibitem[Banino et~al.(2021)Banino, Balaguer, and Blundell]{banino2021}
+Andrea Banino, Jan Balaguer, and Charles Blundell.
+\newblock {PonderNet: Learning to ponder}, 2021.
+\newblock arXiv:2107.05407.
+
+\bibitem[Barrett et~al.(2018)Barrett, Hill, Santoro, Morcos, and
+  Lillicrap]{barrett2018}
+David G.~T. Barrett, Felix Hill, Adam Santoro, Ari~S. Morcos, and Timothy
+  Lillicrap.
+\newblock {Measuring abstract reasoning in neural networks}.
+\newblock In \emph{ICML 2018}, 2018.
+\newblock arXiv:1807.04225.
+
+\bibitem[Bengio et~al.(2009)Bengio, Louradour, Collobert, and
+  Weston]{bengio2009}
+Yoshua Bengio, Jerome Louradour, Ronan Collobert, and Jason Weston.
+\newblock {Curriculum learning}.
+\newblock In \emph{ICML 2009}, 2009.
+\newblock doi:10.1145/1553374.1553380.
+
+\bibitem[Beyer and Schwefel(2002)]{beyer2002}
+Hans-Georg Beyer and Hans-Paul Schwefel.
+\newblock {Evolution strategies: A comprehensive introduction}.
+\newblock \emph{Natural Computing}, 1\penalty0 (1):\penalty0 3--52, 2002.
+
+\bibitem[Bowers et~al.(2023)Bowers, Olausson, Wong, Grand, Tenenbaum, Ellis,
+  and Solar-Lezama]{bowers2023}
+Matthew Bowers, Theo~X. Olausson, Lionel Wong, Gabriel Grand, Joshua~B.
+  Tenenbaum, Kevin Ellis, and Armando Solar-Lezama.
+\newblock {Top-down synthesis for library learning}.
+\newblock In \emph{POPL 2023}, 2023.
+\newblock arXiv:2211.16605.
+
+\bibitem[Brant and Stanley(2017)]{brant2017}
+Jonathan~C. Brant and Kenneth~O. Stanley.
+\newblock {Minimal criterion coevolution: A new approach to open-ended search}.
+\newblock In \emph{GECCO 2017}, 2017.
+\newblock doi:10.1145/3071178.3071186.
+
+\bibitem[Chollet(2019)]{chollet2019}
+Francois Chollet.
+\newblock {On the measure of intelligence}, 2019.
+\newblock arXiv:1911.01547.
+
+\bibitem[Chollet et~al.(2025)Chollet, Knoop, Kamradt, Landers, and
+  Pinkard]{chollet2025}
+Francois Chollet, Mike Knoop, Gregory Kamradt, Bryan Landers, and Henry
+  Pinkard.
+\newblock {ARC-AGI-2: A new challenge for frontier AI reasoning systems}, 2025.
+\newblock arXiv:2505.11831.
+
+\bibitem[Clune(2019)]{clune2019}
+Jeff Clune.
+\newblock {AI-GAs: AI-generating algorithms, an alternate paradigm for
+  producing general artificial intelligence}, 2019.
+\newblock arXiv:1905.10985.
+
+\bibitem[Clune et~al.(2013)Clune, Mouret, and Lipson]{clune2013}
+Jeff Clune, Jean-Baptiste Mouret, and Hod Lipson.
+\newblock {The evolutionary origins of modularity}.
+\newblock \emph{Proceedings of the Royal Society B}, 280\penalty0 (1755), 2013.
+\newblock arXiv:1207.2743.
+
+\bibitem[Deb et~al.(2002)Deb, Pratap, Agarwal, and Meyarivan]{deb2002}
+Kalyanmoy Deb, Amrit Pratap, Sameer Agarwal, and T.~Meyarivan.
+\newblock {A fast and elitist multiobjective genetic algorithm: NSGA-II}.
+\newblock \emph{IEEE Transactions on Evolutionary Computation}, 6\penalty0
+  (2):\penalty0 182--197, 2002.
+
+\bibitem[Dehghani et~al.(2019)Dehghani, Gouws, Vinyals, Uszkoreit, and
+  Kaiser]{dehghani2019}
+Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszkoreit, and Lukasz
+  Kaiser.
+\newblock {Universal Transformers}.
+\newblock In \emph{ICLR 2019}, 2019.
+\newblock arXiv:1807.03819.
+
+\bibitem[Ecoffet et~al.(2021)Ecoffet, Huizinga, Lehman, Stanley, and
+  Clune]{ecoffet2021}
+Adrien Ecoffet, Joost Huizinga, Joel Lehman, Kenneth~O. Stanley, and Jeff
+  Clune.
+\newblock {First return, then explore}.
+\newblock \emph{Nature}, 590:\penalty0 580--586, 2021.
+
+\bibitem[Ellis et~al.(2021)Ellis, Wong, Nye, Sable-Meyer, Cary, Morales,
+  Hewitt, Solar-Lezama, and Tenenbaum]{ellis2021}
+Kevin Ellis, Catherine Wong, Maxwell Nye, Mathias Sable-Meyer, Luc Cary, Lucas
+  Morales, Luke Hewitt, Armando Solar-Lezama, and Joshua~B. Tenenbaum.
+\newblock {DreamCoder: Bootstrapping inductive program synthesis with
+  wake-sleep library learning}.
+\newblock In \emph{PLDI 2021}, 2021.
+\newblock arXiv:2006.08381.
+
+\bibitem[Elsken et~al.(2019{\natexlab{a}})Elsken, Metzen, and
+  Hutter]{elsken2019a}
+Thomas Elsken, Jan~Hendrik Metzen, and Frank Hutter.
+\newblock {Efficient multi-objective neural architecture search via Lamarckian
+  evolution}.
+\newblock In \emph{ICLR 2019}, 2019{\natexlab{a}}.
+\newblock arXiv:1804.09081.
+
+\bibitem[Elsken et~al.(2019{\natexlab{b}})Elsken, Metzen, and
+  Hutter]{elsken2019b}
+Thomas Elsken, Jan~Hendrik Metzen, and Frank Hutter.
+\newblock {Neural architecture search: A survey}.
+\newblock \emph{Journal of Machine Learning Research}, 20\penalty0
+  (55):\penalty0 1--21, 2019{\natexlab{b}}.
+\newblock arXiv:1808.05377.
+
+\bibitem[Fahlman and Lebiere(1990)]{fahlman1990}
+Scott~E. Fahlman and Christian Lebiere.
+\newblock {The cascade-correlation learning architecture}.
+\newblock In \emph{NIPS 2 (1989)}, pages 524--532, 1990.
+
+\bibitem[Faldor et~al.(2024)Faldor, Zhang, Cully, and Clune]{faldor2024}
+Maxence Faldor, Jenny Zhang, Antoine Cully, and Jeff Clune.
+\newblock {OMNI-EPIC: Open-endedness via models of human notions of
+  interestingness with environments programmed in code}, 2024.
+\newblock arXiv:2405.15568.
+
+\bibitem[Fedus et~al.(2022)Fedus, Zoph, and Shazeer]{fedus2022}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\newblock {Switch Transformers: Scaling to trillion parameter models with
+  simple and efficient sparsity}.
+\newblock \emph{Journal of Machine Learning Research}, 23\penalty0 (120), 2022.
+\newblock arXiv:2101.03961.
+
+\bibitem[Fernando et~al.(2017)Fernando, Banarse, Blundell, Zwols, Ha, Rusu,
+  Pritzel, and Wierstra]{fernando2017}
+Chrisantha Fernando, Dylan Banarse, Charles Blundell, Yori Zwols, David Ha,
+  Andrei~A. Rusu, Alexander Pritzel, and Daan Wierstra.
+\newblock {PathNet: Evolution channels gradient descent in super neural
+  networks}, 2017.
+\newblock arXiv:1701.08734.
+
+\bibitem[French(1999)]{french1999}
+Robert~M. French.
+\newblock {Catastrophic forgetting in connectionist networks}.
+\newblock \emph{Trends in Cognitive Sciences}, 3\penalty0 (4):\penalty0
+  128--135, 1999.
+
+\bibitem[Gaier and Ha(2019)]{gaier2019}
+Adam Gaier and David Ha.
+\newblock {Weight agnostic neural networks}.
+\newblock In \emph{NeurIPS 2019}, 2019.
+\newblock arXiv:1906.04358.
+
+\bibitem[Gomez and Miikkulainen(1997)]{gomez1997}
+Faustino Gomez and Risto Miikkulainen.
+\newblock {Incremental evolution of complex general behavior}.
+\newblock \emph{Adaptive Behavior}, 5\penalty0 (3-4):\penalty0 317--342, 1997.
+
+\bibitem[Gomez et~al.(2008)Gomez, Schmidhuber, and Miikkulainen]{gomez2008}
+Faustino Gomez, Jurgen Schmidhuber, and Risto Miikkulainen.
+\newblock {Accelerated neural evolution through cooperatively coevolved
+  synapses}.
+\newblock \emph{Journal of Machine Learning Research}, 9:\penalty0 937--965,
+  2008.
+
+\bibitem[Grand et~al.(2024)Grand, Wong, Bowers, Olausson, Liu, Tenenbaum, and
+  Andreas]{grand2024}
+Gabriel Grand, Lionel Wong, Matthew Bowers, Theo~X. Olausson, Muxin Liu,
+  Joshua~B. Tenenbaum, and Jacob Andreas.
+\newblock {LILO: Learning interpretable libraries by compressing and
+  documenting code}.
+\newblock In \emph{ICLR 2024}, 2024.
+\newblock arXiv:2310.19791.
+
+\bibitem[Graves(2016)]{graves2016}
+Alex Graves.
+\newblock {Adaptive computation time for recurrent neural networks}, 2016.
+\newblock arXiv:1603.08983.
+
+\bibitem[Hansen and Ostermeier(2001)]{hansen2001}
+Nikolaus Hansen and Andreas Ostermeier.
+\newblock {Completely derandomized self-adaptation in evolution strategies}.
+\newblock \emph{Evolutionary Computation}, 9\penalty0 (2):\penalty0 159--195,
+  2001.
+
+\bibitem[Hinton and Nowlan(1987)]{hinton1987}
+Geoffrey~E. Hinton and Steven~J. Nowlan.
+\newblock {How learning can guide evolution}.
+\newblock \emph{Complex Systems}, 1\penalty0 (3):\penalty0 495--502, 1987.
+
+\bibitem[Hu et~al.(2025)Hu, Lu, and Clune]{hu2025}
+Shengran Hu, Cong Lu, and Jeff Clune.
+\newblock {Automated design of agentic systems}.
+\newblock In \emph{ICLR 2025}, 2025.
+\newblock arXiv:2408.08435.
+
+\bibitem[Huang et~al.(2024)Huang, Cheng, Li, Jin, and Tan]{huang2024}
+Beichen Huang, Ran Cheng, Zhuozhao Li, Yaochu Jin, and Kay~Chen Tan.
+\newblock {EvoX: A distributed GPU-accelerated framework for scalable
+  evolutionary computation}.
+\newblock \emph{IEEE Transactions on Evolutionary Computation}, 2024.
+\newblock arXiv:2301.12457.
+
+\bibitem[Jacobs et~al.(1991)Jacobs, Jordan, Nowlan, and Hinton]{jacobs1991}
+Robert~A. Jacobs, Michael~I. Jordan, Steven~J. Nowlan, and Geoffrey~E. Hinton.
+\newblock {Adaptive mixtures of local experts}.
+\newblock \emph{Neural Computation}, 3\penalty0 (1):\penalty0 79--87, 1991.
+
+\bibitem[Jolicoeur-Martineau(2025)]{jolicoeurmartineau2025}
+Alexia Jolicoeur-Martineau.
+\newblock {Less is more: Recursive reasoning with tiny networks}, 2025.
+\newblock arXiv:2510.04871.
+
+\bibitem[Kashtan and Alon(2005)]{kashtan2005}
+Nadav Kashtan and Uri Alon.
+\newblock {Spontaneous evolution of modularity and network motifs}.
+\newblock \emph{PNAS}, 102\penalty0 (39):\penalty0 13773--13778, 2005.
+
+\bibitem[Kingma and Ba(2015)]{kingma2015}
+Diederik~P. Kingma and Jimmy Ba.
+\newblock {Adam: A method for stochastic optimization}.
+\newblock In \emph{ICLR 2015}, 2015.
+\newblock arXiv:1412.6980.
+
+\bibitem[Kirkpatrick et~al.(2017)Kirkpatrick, Pascanu, Rabinowitz, Veness,
+  Desjardins, Rusu, Milan, Quan, Ramalho, Grabska-Barwinska, Hassabis, Clopath,
+  Kumaran, and Hadsell]{kirkpatrick2017}
+James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume
+  Desjardins, Andrei~A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka
+  Grabska-Barwinska, Demis Hassabis, Claudia Clopath, Dharshan Kumaran, and
+  Raia Hadsell.
+\newblock {Overcoming catastrophic forgetting in neural networks}.
+\newblock \emph{PNAS}, 114\penalty0 (13):\penalty0 3521--3526, 2017.
+
+\bibitem[Krizhevsky(2009)]{krizhevsky2009}
+Alex Krizhevsky.
+\newblock {Learning multiple layers of features from tiny images}.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Lang and Witbrock(1988)]{lang1988}
+Kevin~J. Lang and Michael~J. Witbrock.
+\newblock {Learning to tell two spirals apart}.
+\newblock In \emph{Proceedings of the 1988 Connectionist Models Summer School},
+  pages 52--59, 1988.
+
+\bibitem[Lange(2023)]{lange2023}
+Robert~T. Lange.
+\newblock {evosax: JAX-based evolution strategies}.
+\newblock In \emph{GECCO 2023 Companion}, 2023.
+\newblock arXiv:2212.04180.
+
+\bibitem[LeCun et~al.(1998)LeCun, Bottou, Bengio, and Haffner]{lecun1998}
+Yann LeCun, Leon Bottou, Yoshua Bengio, and Patrick Haffner.
+\newblock {Gradient-based learning applied to document recognition}.
+\newblock \emph{Proceedings of the IEEE}, 86\penalty0 (11):\penalty0
+  2278--2324, 1998.
+
+\bibitem[Lehman and Stanley(2011)]{lehman2011}
+Joel Lehman and Kenneth~O. Stanley.
+\newblock {Abandoning objectives: Evolution through the search for novelty
+  alone}.
+\newblock \emph{Evolutionary Computation}, 19\penalty0 (2):\penalty0 189--223,
+  2011.
+
+\bibitem[Li et~al.(2019)Li, Zhou, Wu, Socher, and Xiong]{li2019}
+Xilai Li, Yingbo Zhou, Tianfu Wu, Richard Socher, and Caiming Xiong.
+\newblock {Learn to grow: A continual structure learning framework for
+  overcoming catastrophic forgetting}.
+\newblock In \emph{ICML 2019}, 2019.
+\newblock arXiv:1904.00310.
+
+\bibitem[Liu et~al.(2019)Liu, Simonyan, and Yang]{liu2019}
+Hanxiao Liu, Karen Simonyan, and Yiming Yang.
+\newblock {DARTS: Differentiable architecture search}.
+\newblock In \emph{ICLR 2019}, 2019.
+\newblock arXiv:1806.09055.
+
+\bibitem[McCloskey and Cohen(1989)]{mccloskey1989}
+Michael McCloskey and Neal~J. Cohen.
+\newblock {Catastrophic interference in connectionist networks: The sequential
+  learning problem}.
+\newblock \emph{Psychology of Learning and Motivation}, 24:\penalty0 109--165,
+  1989.
+
+\bibitem[Mendez and Eaton(2021)]{mendez2021}
+Jorge~A. Mendez and Eric Eaton.
+\newblock {Lifelong learning of compositional structures}.
+\newblock In \emph{ICLR 2021}, 2021.
+\newblock arXiv:2007.07732.
+
+\bibitem[Merry et~al.(2024)Merry, Riddle, and Warren]{merry2024}
+Michael Merry, Patricia Riddle, and Jim Warren.
+\newblock {PropNEAT: Efficient GPU-compatible backpropagation over
+  neuroevolutionary augmenting topology networks}, 2024.
+\newblock arXiv:2411.03726.
+
+\bibitem[Meyerson and Miikkulainen(2018)]{meyerson2018}
+Elliot Meyerson and Risto Miikkulainen.
+\newblock {Beyond shared hierarchies: Deep multitask learning through soft
+  layer ordering}.
+\newblock In \emph{ICLR 2018}, 2018.
+\newblock arXiv:1711.00108.
+
+\bibitem[Miikkulainen et~al.(2017)Miikkulainen, Liang, Meyerson, Rawal, Fink,
+  Francon, Raju, Shahrzad, Navruzyan, Duffy, and Hodjat]{miikkulainen2017}
+Risto Miikkulainen, Jason Liang, Elliot Meyerson, Aditya Rawal, Dan Fink,
+  Olivier Francon, Bala Raju, Hormoz Shahrzad, Arshak Navruzyan, Nigel Duffy,
+  and Babak Hodjat.
+\newblock {Evolving deep neural networks}, 2017.
+\newblock arXiv:1703.00548.
+
+\bibitem[Milo et~al.(2002)Milo, Shen-Orr, Itzkovitz, Kashtan, Chklovskii, and
+  Alon]{milo2002}
+Ron Milo, Shai Shen-Orr, Shalev Itzkovitz, Nadav Kashtan, Dmitri Chklovskii,
+  and Uri Alon.
+\newblock {Network motifs: Simple building blocks of complex networks}.
+\newblock \emph{Science}, 298\penalty0 (5594):\penalty0 824--827, 2002.
+
+\bibitem[Mouret and Clune(2015)]{mouret2015}
+Jean-Baptiste Mouret and Jeff Clune.
+\newblock {Illuminating search spaces by mapping elites}, 2015.
+\newblock arXiv:1504.04909.
+
+\bibitem[Novikov et~al.(2025)Novikov, Vu, Eisenberger, Dupont, Huang, Wagner,
+  et~al.]{novikov2025}
+Alexander Novikov, Ngan Vu, Marvin Eisenberger, Emilien Dupont, Po-Sen Huang,
+  Adam~Zsolt Wagner, et~al.
+\newblock {AlphaEvolve: A coding agent for scientific and algorithmic
+  discovery}, 2025.
+\newblock arXiv:2506.13131.
+
+\bibitem[Ororbia et~al.(2019)Ororbia, ElSaid, and Desell]{ororbia2019}
+Alexander Ororbia, AbdElRahman ElSaid, and Travis Desell.
+\newblock {Investigating recurrent neural network memory structures using
+  neuro-evolution}.
+\newblock In \emph{GECCO 2019}, 2019.
+\newblock doi:10.1145/3321707.3321795.
+
+\bibitem[Parisi et~al.(2019)Parisi, Kemker, Part, Kanan, and
+  Wermter]{parisi2019}
+German~I. Parisi, Ronald Kemker, Jose~L. Part, Christopher Kanan, and Stefan
+  Wermter.
+\newblock {Continual lifelong learning with neural networks: A review}.
+\newblock \emph{Neural Networks}, 113:\penalty0 54--71, 2019.
+
+\bibitem[Pham et~al.(2018)Pham, Guan, Zoph, Le, and Dean]{pham2018}
+Hieu Pham, Melody~Y. Guan, Barret Zoph, Quoc~V. Le, and Jeff Dean.
+\newblock {Efficient neural architecture search via parameter sharing}.
+\newblock In \emph{ICML 2018}, 2018.
+\newblock arXiv:1802.03268.
+
+\bibitem[Pourcel et~al.(2025)Pourcel, Colas, and Oudeyer]{pourcel2025}
+Julien Pourcel, Cedric Colas, and Pierre-Yves Oudeyer.
+\newblock {Self-improving language models for evolutionary program synthesis: A
+  case study on ARC-AGI}.
+\newblock In \emph{ICML 2025}, 2025.
+\newblock arXiv:2507.14172.
+
+\bibitem[Pugh et~al.(2016)Pugh, Soros, and Stanley]{pugh2016}
+Justin~K. Pugh, Lisa~B. Soros, and Kenneth~O. Stanley.
+\newblock {Quality diversity: A new frontier for evolutionary computation}.
+\newblock \emph{Frontiers in Robotics and AI}, 3:\penalty0 40, 2016.
+
+\bibitem[Real et~al.(2017)Real, Moore, Selle, Saxena, Suematsu, Tan, Le, and
+  Kurakin]{real2017}
+Esteban Real, Sherry Moore, Andrew Selle, Saurabh Saxena, Yutaka~Leon Suematsu,
+  Jie Tan, Quoc Le, and Alexey Kurakin.
+\newblock {Large-scale evolution of image classifiers}.
+\newblock In \emph{ICML 2017}, 2017.
+\newblock arXiv:1703.01041.
+
+\bibitem[Real et~al.(2019)Real, Aggarwal, Huang, and Le]{real2019}
+Esteban Real, Alok Aggarwal, Yanping Huang, and Quoc~V. Le.
+\newblock {Regularized evolution for image classifier architecture search}.
+\newblock In \emph{AAAI 2019}, 2019.
+\newblock arXiv:1802.01548.
+
+\bibitem[Risi and Stanley(2012)]{risi2012}
+Sebastian Risi and Kenneth~O. Stanley.
+\newblock {An enhanced hypercube-based encoding for evolving the placement,
+  density, and connectivity of neurons}.
+\newblock \emph{Artificial Life}, 18\penalty0 (4):\penalty0 331--363, 2012.
+
+\bibitem[Romera-Paredes et~al.(2024)Romera-Paredes, Barekatain, Novikov, Balog,
+  Kumar, Dupont, Ruiz, Ellenberg, Wang, Fawzi, Kohli, and
+  Fawzi]{romeraparedes2024}
+Bernardino Romera-Paredes, Mohammadamin Barekatain, Alexander Novikov, Matej
+  Balog, M.~Pawan Kumar, Emilien Dupont, Francisco J.~R. Ruiz, Jordan~S.
+  Ellenberg, Pengming Wang, Omar Fawzi, Pushmeet Kohli, and Alhussein Fawzi.
+\newblock {Mathematical discoveries from program search with large language
+  models}.
+\newblock \emph{Nature}, 625:\penalty0 468--475, 2024.
+
+\bibitem[Rosenbaum et~al.(2018)Rosenbaum, Klinger, and Riemer]{rosenbaum2018}
+Clemens Rosenbaum, Tim Klinger, and Matthew Riemer.
+\newblock {Routing networks: Adaptive selection of non-linear functions for
+  multi-task learning}.
+\newblock In \emph{ICLR 2018}, 2018.
+\newblock arXiv:1711.01239.
+
+\bibitem[Rusu et~al.(2016)Rusu, Rabinowitz, Desjardins, Soyer, Kirkpatrick,
+  Kavukcuoglu, Pascanu, and Hadsell]{rusu2016}
+Andrei~A. Rusu, Neil~C. Rabinowitz, Guillaume Desjardins, Hubert Soyer, James
+  Kirkpatrick, Koray Kavukcuoglu, Razvan Pascanu, and Raia Hadsell.
+\newblock {Progressive neural networks}, 2016.
+\newblock arXiv:1606.04671.
+
+\bibitem[Shazeer et~al.(2017)Shazeer, Mirhoseini, Maziarz, Davis, Le, Hinton,
+  and Dean]{shazeer2017}
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le,
+  Geoffrey Hinton, and Jeff Dean.
+\newblock {Outrageously large neural networks: The sparsely-gated
+  mixture-of-experts layer}.
+\newblock In \emph{ICLR 2017}, 2017.
+\newblock arXiv:1701.06538.
+
+\bibitem[Stanley(2007)]{stanley2007}
+Kenneth~O. Stanley.
+\newblock {Compositional pattern producing networks: A novel abstraction of
+  development}.
+\newblock \emph{Genetic Programming and Evolvable Machines}, 8\penalty0
+  (2):\penalty0 131--162, 2007.
+
+\bibitem[Stanley and Miikkulainen(2002)]{stanley2002}
+Kenneth~O. Stanley and Risto Miikkulainen.
+\newblock {Evolving neural networks through augmenting topologies}.
+\newblock \emph{Evolutionary Computation}, 10\penalty0 (2):\penalty0 99--127,
+  2002.
+
+\bibitem[Stanley et~al.(2009)Stanley, D'Ambrosio, and Gauci]{stanley2009}
+Kenneth~O. Stanley, David~B. D'Ambrosio, and Jason Gauci.
+\newblock {A hypercube-based encoding for evolving large-scale neural
+  networks}.
+\newblock \emph{Artificial Life}, 15\penalty0 (2):\penalty0 185--212, 2009.
+
+\bibitem[Stanley et~al.(2017)Stanley, Lehman, and Soros]{stanley2017}
+Kenneth~O. Stanley, Joel Lehman, and Lisa Soros.
+\newblock {Open-endedness: The last grand challenge you've never heard of}.
+\newblock O'Reilly Radar, 2017.
+
+\bibitem[Stanley et~al.(2019)Stanley, Clune, Lehman, and
+  Miikkulainen]{stanley2019}
+Kenneth~O. Stanley, Jeff Clune, Joel Lehman, and Risto Miikkulainen.
+\newblock {Designing neural networks through neuroevolution}.
+\newblock \emph{Nature Machine Intelligence}, 1:\penalty0 24--35, 2019.
+
+\bibitem[Stengel-Eskin et~al.(2024)Stengel-Eskin, Prasad, and
+  Bansal]{stengeleskin2024}
+Elias Stengel-Eskin, Archiki Prasad, and Mohit Bansal.
+\newblock {ReGAL: Refactoring programs to discover generalizable abstractions}.
+\newblock In \emph{ICML 2024}, 2024.
+\newblock arXiv:2401.16467.
+
+\bibitem[Tang et~al.(2022)Tang, Tian, and Ha]{tang2022}
+Yujin Tang, Yingtao Tian, and David Ha.
+\newblock {EvoJAX: Hardware-accelerated neuroevolution}.
+\newblock In \emph{GECCO 2022 Companion}, 2022.
+\newblock arXiv:2202.05008.
+
+\bibitem[Tu et~al.(2022)Tu, Roberts, Khodak, Shen, Sala, and Talwalkar]{tu2022}
+Renbo Tu, Nicholas Roberts, Mikhail Khodak, Junhong Shen, Frederic Sala, and
+  Ameet Talwalkar.
+\newblock {NAS-Bench-360: Benchmarking neural architecture search on diverse
+  tasks}.
+\newblock In \emph{NeurIPS 2022 Datasets and Benchmarks}, 2022.
+\newblock arXiv:2110.05668.
+
+\bibitem[Veniat et~al.(2021)Veniat, Denoyer, and Ranzato]{veniat2021}
+Tom Veniat, Ludovic Denoyer, and Marc'Aurelio Ranzato.
+\newblock {Efficient continual learning with modular networks and task-driven
+  priors}.
+\newblock In \emph{ICLR 2021}, 2021.
+\newblock arXiv:2012.12631.
+
+\bibitem[Wang et~al.(2025)Wang, Li, Sun, Chen, Liu, Wu, Lu, Song, and
+  Abbasi~Yadkori]{wang2025hrm}
+Guan Wang, Jin Li, Yuhao Sun, Xing Chen, Changling Liu, Yue Wu, Meng Lu, Sen
+  Song, and Yasin Abbasi~Yadkori.
+\newblock {Hierarchical reasoning model}, 2025.
+\newblock arXiv:2506.21734.
+
+\bibitem[Wang et~al.(2023)Wang, Xie, Jiang, Mandlekar, Xiao, Zhu, Fan, and
+  Anandkumar]{wang2023voyager}
+Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu,
+  Linxi Fan, and Anima Anandkumar.
+\newblock {Voyager: An open-ended embodied agent with large language models},
+  2023.
+\newblock arXiv:2305.16291.
+
+\bibitem[Wang et~al.(2024)Wang, Zhao, Liu, Sun, and Cheng]{wang2024tensorneat}
+Lishuang Wang, Mengfei Zhao, Enyu Liu, Kebin Sun, and Ran Cheng.
+\newblock {Tensorized neuroevolution of augmenting topologies for GPU
+  acceleration}.
+\newblock In \emph{GECCO 2024}, 2024.
+\newblock arXiv:2404.01817.
+
+\bibitem[Wang et~al.(2019)Wang, Lehman, Clune, and Stanley]{wang2019poet}
+Rui Wang, Joel Lehman, Jeff Clune, and Kenneth~O. Stanley.
+\newblock {Paired open-ended trailblazer (POET): Endlessly generating
+  increasingly complex and diverse learning environments and their solutions},
+  2019.
+\newblock arXiv:1901.01753.
+
+\bibitem[Wang et~al.(2020)Wang, Lehman, Rawal, Zhi, Li, Clune, and
+  Stanley]{wang2020poet}
+Rui Wang, Joel Lehman, Aditya Rawal, Jiale Zhi, Yulun Li, Jeff Clune, and
+  Kenneth~O. Stanley.
+\newblock {Enhanced POET: Open-ended reinforcement learning through unbounded
+  invention of learning challenges and their solutions}.
+\newblock In \emph{ICML 2020}, 2020.
+\newblock arXiv:2003.08536.
+
+\bibitem[Wernicke(2006)]{wernicke2006}
+Sebastian Wernicke.
+\newblock {Efficient detection of network motifs}.
+\newblock \emph{IEEE/ACM Transactions on Computational Biology and
+  Bioinformatics}, 3\penalty0 (4):\penalty0 347--359, 2006.
+
+\bibitem[Whitley et~al.(1994)Whitley, Gordon, and Mathias]{whitley1994}
+Darrell Whitley, V.~Scott Gordon, and Keith Mathias.
+\newblock {Lamarckian evolution, the Baldwin effect and function optimization}.
+\newblock In \emph{PPSN III, LNCS 866}, pages 6--15, 1994.
+
+\bibitem[Woolley and Stanley(2011)]{woolley2011}
+Brian~G. Woolley and Kenneth~O. Stanley.
+\newblock {On the deleterious effects of a priori objectives on evolution and
+  representation}.
+\newblock In \emph{GECCO 2011}, 2011.
+\newblock doi:10.1145/2001576.2001707.
+
+\bibitem[Xiao et~al.(2017)Xiao, Rasul, and Vollgraf]{xiao2017}
+Han Xiao, Kashif Rasul, and Roland Vollgraf.
+\newblock {Fashion-MNIST: A novel image dataset for benchmarking machine
+  learning algorithms}, 2017.
+\newblock arXiv:1708.07747.
+
+\bibitem[Ying et~al.(2019)Ying, Klein, Real, Christiansen, Murphy, and
+  Hutter]{ying2019}
+Chris Ying, Aaron Klein, Esteban Real, Eric Christiansen, Kevin Murphy, and
+  Frank Hutter.
+\newblock {NAS-Bench-101: Towards reproducible neural architecture search}.
+\newblock In \emph{ICML 2019}, 2019.
+\newblock arXiv:1902.09635.
+
+\bibitem[Yoon et~al.(2018)Yoon, Yang, Lee, and Hwang]{yoon2018}
+Jaehong Yoon, Eunho Yang, Jeongtae Lee, and Sung~Ju Hwang.
+\newblock {Lifelong learning with dynamically expandable networks}.
+\newblock In \emph{ICLR 2018}, 2018.
+\newblock arXiv:1708.01547.
+
+\bibitem[Zhang et~al.(2019)Zhang, Gao, Jia, Zhu, and Zhu]{zhang2019raven}
+Chi Zhang, Feng Gao, Baoxiong Jia, Yixin Zhu, and Song-Chun Zhu.
+\newblock {RAVEN: A dataset for relational and analogical visual reasoning}.
+\newblock In \emph{CVPR 2019}, 2019.
+\newblock arXiv:1903.02741.
+
+\bibitem[Zhang et~al.(2025)Zhang, Hu, Lu, Lange, and Clune]{zhang2025dgm}
+Jenny Zhang, Shengran Hu, Cong Lu, Robert Lange, and Jeff Clune.
+\newblock {Darwin Godel Machine: Open-ended evolution of self-improving
+  agents}, 2025.
+\newblock arXiv:2505.22954.
+
+\bibitem[Zoph and Le(2017)]{zoph2017}
+Barret Zoph and Quoc~V. Le.
+\newblock {Neural architecture search with reinforcement learning}.
+\newblock In \emph{ICLR 2017}, 2017.
+\newblock arXiv:1611.01578.
+
+\end{thebibliography}

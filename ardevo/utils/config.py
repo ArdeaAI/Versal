@@ -1,11 +1,13 @@
 """Configuration for ArdEVO.
 
-`config.toml` is the single source of truth. `Config` parses it and produces `current`,
-a flat dict that the `Pipeline`/`Proctor` infra reads (scalar run settings plus a
-`hyperparameters` dict for ClearML), while preserving the nested `evolution`/`substrate`/
-`fitness` tables verbatim so the evolver factory can resolve operators from them.
+`configs/orchestrated_overmind.toml` is the single source of truth (and the default when
+`uv run app` gets no --config). `Config` parses it and produces `current`, a flat dict that
+the `Pipeline`/`Proctor` infra reads (scalar run settings plus a `hyperparameters` dict for
+ClearML), while preserving the nested `evolution`/`substrate`/`fitness` tables verbatim so
+the evolver factory can resolve operators from them.
 """
 
+import hashlib
 import json
 import tomllib
 from pathlib import Path
@@ -19,7 +21,7 @@ class Config:
 
     PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
     TOML_FILE: ClassVar[Path] = PROJECT_ROOT / "pyproject.toml"
-    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "config.toml"
+    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "configs" / "orchestrated_overmind.toml"
 
     def __init__(self, conf_path: Path | str | None = None) -> None:
         self.toml = self._load_toml()
@@ -38,9 +40,14 @@ class Config:
     def _load_config(cls, conf_path: Path) -> dict[str, Any]:
         if not conf_path.exists():
             raise FileNotFoundError(f"Configuration file '{conf_path}' not found.")
-        with open(conf_path, "rb") as handle:
-            raw = tomllib.load(handle)
-        return cls._normalize_config(raw)
+        raw_bytes = conf_path.read_bytes()
+        raw = tomllib.loads(raw_bytes.decode("utf-8"))
+        normalized = cls._normalize_config(raw)
+        # Run provenance: which exact config bytes produced a run. Rides into run_summary.json so a
+        # results directory is self-identifying instead of being matched to a config by schedule shape.
+        normalized["config_path"] = str(conf_path)
+        normalized["config_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+        return normalized
 
     @classmethod
     def _normalize_config(cls, raw: dict[str, Any]) -> dict[str, Any]:
@@ -62,6 +69,9 @@ class Config:
             "experiment_name": run.get("experiment", "experiment"),
             "clearml_run": run.get("clearml", False),
             "machine_env": run.get("machine", "local"),
+            "compute": run.get("compute", "auto"),
+            "tf32": run.get("tf32", False),
+            "render_async": run.get("render_async", False),
             "seed": run.get("seed", 0),
             "log_level": run.get("log_level", "INFO"),
             "ml_lib": "torch",
@@ -78,9 +88,9 @@ class Config:
             "substrate": substrate,
             "evolution": evolution,
             "fitness": fitness,
-            # Present only for a continuous multi-rung run; selects ContinuousTrial in main.
+            # The orchestrated trial's task pool and interleave order.
             "schedule": schedule,
-            # Present only for an orchestrated run; selects OrchestratedTrial in main.
+            # The orchestrated run's strategy ladder, budgets, and library wiring.
             "orchestrator": raw.get("orchestrator", {}),
             # Library admission policy knobs (quality gate + per-signature caps).
             "library": raw.get("library", {}),
