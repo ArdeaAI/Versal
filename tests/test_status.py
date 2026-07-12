@@ -39,13 +39,15 @@ def test_enabled_board_tracks_state_and_renders() -> None:
         board.clock(600.0)
         board.stage("routed", "starting (budget 10 gens)")
         board.generation("direct", 3, 0.412, 0.63, 0.35)
+        board.generation("direct", 4, 0.398, 0.51, 0.36)  # a worse generation must not lower the best
         board.event("stone shelved")
         probe = _terminal_console()  # render through a second console so the Live region is untouched
         with probe.capture() as capture:
             probe.print(_Footer(board))
         text = capture.get()
         assert "task 2/18" in text and "arc.train.31aa019c" in text
-        assert "direct  gen 3" in text and "0.412" in text
+        assert "direct  gen 4" in text and "0.398" in text
+        assert "best acc 0.630" in text  # the running per-task maximum, not the current generation's
         assert "stone shelved" in text
         assert "/600s" in text  # the armed budget clock renders a bar
     finally:
@@ -60,8 +62,10 @@ def test_task_reset_clears_stage_and_clock() -> None:
     try:
         board.clock(60.0)
         board.stage("direct")
+        board.generation("direct", 1, 0.2, 0.9, 0.1)
         board.task(5, 10, 6, "mnist")
         assert board.stage_line == "" and board.clock_started is None and board.clock_budget is None
+        assert board.best_metric is None  # the best-accuracy readout is per task
     finally:
         board.close()
 

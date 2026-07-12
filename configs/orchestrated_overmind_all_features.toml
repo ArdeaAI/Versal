@@ -76,13 +76,13 @@ support_fraction = 0.8
 kind = "interleave_rungs"
 rungs = "all"       #  [1, 2, 3, 4, 5] [6, 7, 8, 9, 10] [11, 12, 13, 14, 15] "all"
 require_all_rungs = true      # a rung that fails to LOAD aborts the run loudly (probe: uv run rung_doctor)
-tasks_per_rung = 8            # MERGE: 8 x 18 rungs = 144 pool tasks; at the 600 s cap plus
+tasks_per_rung = 20            # MERGE: 8 x 18 rungs = 144 pool tasks; at the 600 s cap plus
                               # decompose recursion an overnight covers a few full interleave
                               # cycles, and the run resumes from its checkpoint for the rest
 shuffle = true
 
 [orchestrator]
-tasks = 144                   # how many scheduled tasks this run attempts (= the whole pool)
+tasks = 360                   # how many scheduled tasks this run attempts (= the whole pool)
 accept_metric = "query_accuracy"   # falls back to support_accuracy on degenerate query-less tasks
 accept_threshold = 0.95
 floor = 0.35                  # below this at half budget = early stall

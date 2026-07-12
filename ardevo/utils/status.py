@@ -39,7 +39,8 @@ class _Footer:
                 clock = f"  {elapsed:.0f}s"
         yield Text.from_markup(f"[bold cyan]{board.task_line}[/bold cyan]{clock}" if board.task_line else "[dim]waiting for first task[/dim]")
         if board.stage_line:
-            yield Text.from_markup(f"  [magenta]{board.stage_line}[/magenta]")
+            best = f"  [bold green]best acc {board.best_metric:.3f}[/bold green]" if board.best_metric is not None else ""
+            yield Text.from_markup(f"  [magenta]{board.stage_line}[/magenta]{best}")
         if board.event_line:
             yield Text.from_markup(f"  [dim]{board.event_line}[/dim]")
 
@@ -54,6 +55,7 @@ class StatusBoard:
         self.event_line = ""
         self.clock_started: float | None = None
         self.clock_budget: float | None = None
+        self.best_metric: float | None = None  # running best accept-metric across THIS task's attempt
 
     @property
     def enabled(self) -> bool:
@@ -88,6 +90,7 @@ class StatusBoard:
         self.stage_line = ""
         self.clock_started = None
         self.clock_budget = None
+        self.best_metric = None  # per-task: max over every strategy and depth within the solve
 
     def clock(self, budget_seconds: float | None) -> None:
         """Arm the per-attempt clock/bar; called at every solve() entry, so recursion re-arms it."""
@@ -104,7 +107,8 @@ class StatusBoard:
     def generation(self, strategy: str, generation: int, best_fitness: float, best_metric: float, mean_fitness: float) -> None:
         if self._live is None:
             return
-        self.stage_line = f"{strategy}  gen {generation}  best fitness {best_fitness:.3f}  metric {best_metric:.3f}  mean {mean_fitness:.3f}"
+        self.best_metric = best_metric if self.best_metric is None else max(self.best_metric, best_metric)
+        self.stage_line = f"{strategy}  gen {generation}  fitness {best_fitness:.3f}  acc {best_metric:.3f}  mean {mean_fitness:.3f}"
 
     def event(self, text: str) -> None:
         if self._live is None:

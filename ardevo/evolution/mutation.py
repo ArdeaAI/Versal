@@ -364,7 +364,13 @@ def prune_and_regrow(genome: Genome, ctx: MutationContext, *, rng: random.Random
     doomed = {id(conn) for conn in heapq.nsmallest(count, prunable, key=lambda conn: abs(conn.weight))}
     child.connections = [conn for conn in child.connections if id(conn) not in doomed]
 
-    order_position = {node_id: index for index, node_id in enumerate(topological_order(child))}
+    try:
+        order_position = {node_id: index for index, node_id in enumerate(topological_order(child))}
+    except ValueError:
+        # A cyclic crossover artifact has no forward order to regrow against. Mutators run BEFORE
+        # the pipeline's make_acyclic repair (loop.advance_modules mutates then repairs), so pass
+        # the genome through untouched instead of killing the run; the repair owns the cycle.
+        return genome
     existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
     sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]

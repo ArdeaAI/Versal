@@ -116,6 +116,24 @@ def test_prune_and_regrow_regrown_edges_share_innovations_across_members() -> No
     assert first == second  # the memo keeps regrown edges crossover-aligned within a run
 
 
+def test_prune_and_regrow_passes_cyclic_genomes_through() -> None:
+    # NEAT crossover can hand the mutation pipeline a cyclic child; the pipeline repairs cycles
+    # AFTER mutation (loop.advance_modules mutates then make_acyclic-s), so every operator must
+    # tolerate one. The 2026-07-12 overnight run died here: topological_order raised mid-pipeline.
+    from dataclasses import replace
+
+    from ardevo.evolution.genome import ConnectionGene
+
+    genome = sparse(20, 4, rng=random.Random(0), density=0.1, threshold=64)
+    hidden_a, hidden_b = genome.max_node_id() + 1, genome.max_node_id() + 2
+    genome.nodes[hidden_a] = replace(genome.nodes[genome.output_ids[0]], id=hidden_a, kind=NodeKind.HIDDEN)
+    genome.nodes[hidden_b] = replace(genome.nodes[genome.output_ids[0]], id=hidden_b, kind=NodeKind.HIDDEN)
+    genome.connections.append(ConnectionGene(hidden_a, hidden_b, 1.0, True, 900))
+    genome.connections.append(ConnectionGene(hidden_b, hidden_a, 1.0, True, 901))  # the cycle
+    child = prune_and_regrow(genome, _ctx(genome), rng=random.Random(3), prob=1.0, fraction=0.2)
+    assert child is genome  # untouched pass-through; the downstream make_acyclic repair owns it
+
+
 def test_prune_and_regrow_never_targets_macro_stubs() -> None:
     from dataclasses import replace
 
