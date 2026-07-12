@@ -26,6 +26,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from ardevo.evolution.composition import (
     assemble,
     comp_from_dict,
     comp_to_dict,
+    glue_value_count,
     minimal_composition,
 )
 from ardevo.evolution.genome import genome_from_dict
@@ -107,13 +109,13 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
             comp = comp_from_dict(entry.payload)
             # Positional bank columns: consecutive ranges per non-bias INPUT node in id order, the
             # exact `_nested_context` convention a referenced composition reads its input by.
-            columns: dict[str, list[int]] = {}
+            columns: dict[str, Sequence[int]] = {}
             cursor = 0
             for node_id in comp.input_ids:
                 node = comp.nodes[node_id]
                 if node.ref == BIAS_REF:
                     continue
-                columns[node.ref] = list(range(cursor, cursor + node.out_width))
+                columns[node.ref] = range(cursor, cursor + node.out_width)
                 cursor += node.out_width
             ctx = AssemblyContext(bank_columns=columns, library=library, max_inline_depth=max_inline_depth)
             module = assemble(comp, ctx, in_width)
@@ -984,9 +986,32 @@ class RoutedStrategy:
         the ordinary assess_composition rail. The returned assessment is the admittable artifact."""
         net = self._service(runtime.library).net
         widths = {vertex.original_key: (vertex.in_width, vertex.out_width) for vertex in net._vertices.values()}
+        loop = runtime.loop
+        previous_widths = [width for _signature, width in spec.input_specs]
+        glue_values = spec.output_width + sum(
+            glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for width in previous_widths
+        )
+        for step_keys in pathway:
+            layer_widths: list[int] = []
+            for key in step_keys:
+                in_width, out_width = widths[key]
+                glue_values += sum(
+                    glue_value_count(source_width, in_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for source_width in previous_widths
+                )
+                layer_widths.append(out_width)
+            previous_widths = layer_widths
+        glue_values += sum(glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for width in previous_widths)
+        limit = loop.max_initial_glue_values
+        if limit > 0 and glue_values > limit:
+            logger.warning(
+                "routed distillation declined before allocation: candidate needs %s glue values (limit %s)",
+                f"{glue_values:,}",
+                f"{limit:,}",
+            )
+            return None
+
         tracker = runtime.state.comp_innovations
         rng = runtime.state.rng
-        loop = runtime.loop
         comp = minimal_composition(
             spec.input_specs, spec.output_ref, spec.output_width, tracker, rng, glue_scale=loop.glue_scale, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold
         )

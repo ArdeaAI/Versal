@@ -25,6 +25,7 @@ from ardevo.evolution.composition import (
     comp_neat,
     comp_to_dict,
     comp_topological_order,
+    glue_value_count,
     minimal_composition,
     perturb_glue,
     switch_ref,
@@ -295,6 +296,15 @@ def test_glue_for_auto_select_threshold() -> None:
     bias_edge = next(edge for edge in comp.edges if comp.nodes[edge.in_id].ref == "__bias__")
     assert bank_edge.glue_rank == 2  # 64 > 16: factored
     assert bias_edge.glue_rank == 0  # 8 <= 16: dense
+
+
+def test_glue_value_count_matches_dense_and_factored_representations() -> None:
+    assert glue_value_count(3, 2) == 6
+    assert glue_value_count(3, 2, glue_rank=2, glue_rank_threshold=10) == 6  # below the factoring threshold
+    assert glue_value_count(8, 6, glue_rank=2, glue_rank_threshold=16) == 8 * 2 + 2 * 6
+    assert glue_value_count(2, 2, glue_rank=4, glue_rank_threshold=1) == 4  # an over-wide rank stays dense
+    psicov_seed = 245_025 + glue_value_count(13_966_425, 245_025, glue_rank=8, glue_rank_threshold=4096)
+    assert psicov_seed == 113_936_625
 
 
 def test_comp_neat_never_mixes_glue_ranks() -> None:

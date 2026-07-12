@@ -3,6 +3,8 @@
 import random
 from pathlib import Path
 
+import pytest
+
 from ardevo.evolution.composition import minimal_composition
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, genome_to_dict
 from ardevo.library import MODULE, LibraryEntry, ModuleLibrary
@@ -287,11 +289,16 @@ def test_overmind_grid_bands_and_rows() -> None:
     spec = build_overmind_spec(_grid_view(5), columns=4, legend=False)
     input_nodes = [node for node in spec.nodes if node.color == THEME["node_input"]]
     output_nodes = [node for node in spec.nodes if node.color == THEME["node_output"]]
+    anchors = [node for node in spec.nodes if node.color == THEME["node_anchor"]]
     assert len(input_nodes) == 1 and len(output_nodes) == 1
+    assert len(anchors) == 5
     assert input_nodes[0].y == max(node.y for node in spec.nodes)  # input band at the TOP (y-up frame)
     assert output_nodes[0].y == min(node.y for node in spec.nodes)  # output band at the BOTTOM
     cells = [box for box in spec.containers if box.depth == 1]
     assert len(cells) == 5
+    actual_anchors = sorted((node.x, node.y) for node in anchors)
+    expected_anchors = sorted((box.x0 + 0.3, box.y1 - 0.3) for box in cells)
+    assert all(actual == pytest.approx(expected) for actual, expected in zip(actual_anchors, expected_anchors))
     assert all(box.y1 < input_nodes[0].y and box.y0 > output_nodes[0].y for box in cells)  # grid strictly between the bands
     row_tops = sorted({round(box.y1, 6) for box in cells}, reverse=True)
     assert len(row_tops) == 2  # 5 cells at columns=4 -> a 4-row and a 1-row
@@ -311,6 +318,18 @@ def test_overmind_fresh_library_draws_uniform_feeds() -> None:
     assert all(edge.width == 0.8 for edge in entry_edges + exit_edges)  # uniform thin: the flow story on day one
 
 
+def test_overmind_pathway_targets_card_anchor() -> None:
+    from ardevo.rendering import THEME, build_overmind_spec
+
+    view = _grid_view(2)
+    view.pathways = [(0, 1, 0.75)]
+    spec = build_overmind_spec(view, legend=False)
+    cells = [box for box in spec.containers if box.depth == 1]
+    pathway = next(edge for edge in spec.edges if edge.color == THEME["edge_pathway"])
+    assert (pathway.x0, pathway.y0) == pytest.approx(((cells[0].x0 + cells[0].x1) / 2, (cells[0].y0 + cells[0].y1) / 2))
+    assert (pathway.x1, pathway.y1) == pytest.approx((cells[1].x0 + 0.3, cells[1].y1 - 0.3))
+
+
 def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_genome: Genome) -> None:
     from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
 
@@ -328,6 +347,12 @@ def test_overmind_containment_edge_traces_structure(tmp_path: Path, solving_geno
     spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
     containment = [edge for edge in spec.edges if edge.color == THEME["edge_macro"] and edge.style == "dashed"]
     assert len(containment) == 1  # host cell -> inner cell, dashed: structure, not traffic
+    cells = [box for box in spec.containers if box.depth == 1]
+    host_box = next(box for box in cells if box.label == "host")
+    inner_box = next(box for box in cells if box.label == "inner")
+    edge = containment[0]
+    assert (edge.x0, edge.y0) == pytest.approx(((host_box.x0 + host_box.x1) / 2, (host_box.y0 + host_box.y1) / 2))
+    assert (edge.x1, edge.y1) == pytest.approx((inner_box.x0 + 0.3, inner_box.y1 - 0.3))
 
 
 def test_overmind_legend_populates_texts_and_widens() -> None:
@@ -339,7 +364,7 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     labels = [text.text for text in keyed.texts]
     assert "key" in labels
     expected_labels = ("routing traffic (observed)", "input feed (step-0 gate mass)", "output feed (final-step gate mass)", "recurrent (time-delayed)")
-    for expected in expected_labels + ("built from (structural ref)",):
+    for expected in expected_labels + ("built from (structural ref)", "network ingress anchor"):
         assert expected in labels
 
 

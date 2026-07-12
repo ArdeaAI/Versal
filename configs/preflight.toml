@@ -35,6 +35,8 @@
 #  10. pool sized for an 18-rung load            tasks_per_rung/tasks/n_samples cut so startup can hold
 #                                                rungs 12-14 in memory (100x400 was never loaded; the
 #                                                arrow 2 GB chunk limit + require_all_rungs would abort)
+#  11. max_initial_glue_values                   exact composition sizing declines tuple-backed
+#                                                allocations before population/distillation construction
 #
 # Deliberately NOT taken from smoke (the smoke value was probe economics, not a feature):
 #   init stays cppn (not factored), direct train stays gradient_scheduled at 160 steps (not
@@ -76,7 +78,7 @@ live_status = true            # pinned Rich footer with the live task/generation
 [dataset]
 source = "Ardea/Icarus-dataset"
 n_samples = 128               # MERGE: the whole pool loads into memory at startup and rung 14
-                              # (psicov, per-task up to 5.1M inputs) scales as samples x width;
+                              # (psicov has multi-million-wide tasks) scales as samples x width;
                               # 400 x 100-per-rung was never loaded and risks the arrow 2 GB chunk
                               # limit aborting under require_all_rungs. 128 keeps low-rung fits
                               # honest (support 102 / query 26) while bounding the heavy rungs.
@@ -408,6 +410,8 @@ elitism = 1
   max_inline_depth = 4
   glue_rank = 8               # NEW glue factorizes to rank 8 when in*out exceeds the threshold
   glue_rank_threshold = 4096  # (a width-784 dense edge is 614k floats; rank 8 is 12.5k)
+  max_initial_glue_values = 5000000  # decline any candidate whose exact tuple-backed glue allocation
+                                     # exceeds this cap before population construction or distillation
   catalog_width_tolerance = -1  # -1 = expose every library entry to comp mutations (glue adapts)
     [evolution.composition.selection]
     kind = "tournament"

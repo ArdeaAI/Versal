@@ -66,7 +66,9 @@ end up in it as a reusable entry, and it survives across runs (delete `library/`
      admits TASK-SHAPED modules. `assess_workers` process-pools the per-genome work across cores.
    - **composition**: a per-task population of compositions (small DAGs whose MODULE nodes reference live module
      species or library entries, wired by trainable linear GLUE) co-evolves with ONE shared mini-model
-     population; fitness flows DOWN as attribution, and only the champion writes module weights back.
+     population; fitness flows DOWN as attribution, and only the champion writes module weights back. The
+     shipping `max_initial_glue_values = 5000000` guard declines any initial wiring whose exact dense or
+     rank-factored allocation exceeds that generic representation budget before a population is built.
 3. **DECOMPOSE**: on a stall, registered operators (`output_slices`, `input_subsets`, `time_windows`,
    `spatial_patches` for grid->grid) split the task into valid subtasks and the orchestrator RECURSES on each
    (depth-capped); a solvability gate probes subtasks before committing budget. Accepted parts become frozen
@@ -101,9 +103,11 @@ at zero cost, so evolution populates the vertex set first.
 
 `uv run render --overmind` draws the whole routed model to `library/images/overmind.png` as a top-down flow
 grid: input-adapter band up top, every expert a fully-embedded cell, output heads across the bottom, edges
-widthed by observed lifetime gate traffic. Per-entry renders are recursive and dark: nested networks draw fully
-inside translucent callout boxes green-lined to their footprints, and every render failure degrades to a labeled
-opaque box, never an exception.
+widthed by observed lifetime gate traffic. A gold dot at each cell's top-left is its network ingress anchor:
+cross-network routes and structural references terminate there instead of obscuring the embedded network;
+input/output feeds and internal edges retain their ordinary endpoints. Per-entry renders are recursive and dark:
+nested networks draw fully inside translucent callout boxes green-lined to their footprints, and every render
+failure degrades to a labeled opaque box, never an exception.
 
 ## Motif census
 
@@ -166,6 +170,8 @@ trained-weight drift, and writes a hardware-fingerprinted policy only when an al
 Stale or absent profiles preserve the process-pool path. Population training uses adaptive microbatches and
 falls back to the semantically identical serial operator on recognized allocator failures. Library I/O is cached
 and hot stats writes are deferred to one flush per task; structural admissions stay immediately durable.
+Composition port columns are range-backed, and exact pre-allocation guards cover ordinary composition, routed
+distillation, and dense decomposition skeletons. The cap is representation-generic and zero disables it.
 
 On the prior art: CoDeepNEAT's two-population idea survives here as compositions-referencing-species and fitness
 attribution; WANN's weight-agnostic insight survives as the robustness metric and the `weight_samples`/`hybrid`

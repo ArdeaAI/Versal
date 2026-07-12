@@ -12,7 +12,7 @@
     "configs/wall_ladder.toml"
   ],
   "canonical_config": "configs/orchestrated_overmind_all_features.toml",
-  "canonical_config_sha256": "a5e0094422329c4221c8c535ec040de3d2e60b51a529e47841be2d5ab5a316e6",
+  "canonical_config_sha256": "6ce15a9d770a4470fecc2bc2ec2cfb3227c41e443d4edce6549dc104d811567a",
   "config_keys": [
     "dataset.n_samples",
     "dataset.source",
@@ -23,6 +23,7 @@
     "evolution.composition.elitism",
     "evolution.composition.glue_rank",
     "evolution.composition.glue_rank_threshold",
+    "evolution.composition.max_initial_glue_values",
     "evolution.composition.max_inline_depth",
     "evolution.composition.mutation.add_comp_edge_prob",
     "evolution.composition.mutation.add_module_node_prob",

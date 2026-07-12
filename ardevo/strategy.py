@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output_features, support_loader
 from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
-from ardevo.evolution.composition import CompositionGenome
+from ardevo.evolution.composition import CompositionGenome, glue_value_count
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
@@ -153,6 +153,19 @@ def _build_composition(config: dict[str, Any]) -> "CompositionStrategy":
 class CompositionStrategy:
     name: str = "composition"
 
+    @staticmethod
+    def _initial_glue_values(spec: CompTaskSpec, runtime: StrategyRuntime, seed_comps: list[CompositionGenome] | None) -> int:
+        """Largest candidate gene allocation needed before the first composition assessment."""
+
+        loop = runtime.loop
+        minimal_values = spec.output_width + sum(
+            glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for _signature, width in spec.input_specs
+        )
+        seeded = [sum(len(edge.glue) for edge in comp.edges) for comp in (seed_comps or [])[: loop.comp_pop_size]]
+        if len(seeded) < loop.comp_pop_size:
+            seeded.append(minimal_values)
+        return max(seeded, default=minimal_values)
+
     def __call__(
         self,
         task: Task,
@@ -162,6 +175,20 @@ class CompositionStrategy:
         budget: int,
         seed_comps: list | None = None,
     ) -> StrategyResult:
+        initial_glue_values = self._initial_glue_values(spec, runtime, seed_comps)
+        limit = runtime.loop.max_initial_glue_values
+        if limit > 0 and initial_glue_values > limit:
+            logger.warning(
+                "composition declined before allocation: initial candidate needs %s glue values (limit %s)",
+                f"{initial_glue_values:,}",
+                f"{limit:,}",
+            )
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"declined_composition_glue_values": float(initial_glue_values)},
+            )
         progress = {"generations": 0}
 
         def hook(generation: int, best: AssessedComposition, mean_fitness: float) -> None:

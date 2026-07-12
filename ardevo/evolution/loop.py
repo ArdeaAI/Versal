@@ -14,6 +14,7 @@ silently shredding a module other tasks rely on.
 """
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable, cast
@@ -95,7 +96,7 @@ class CompTaskSpec:
     encoder: Level0Encoder
     n_inputs: int
     input_specs: list[tuple[str, int]]  # (bank signature, width) per INPUT node
-    bank_columns: dict[str, list[int]]
+    bank_columns: dict[str, Sequence[int]]
     output_ref: str
     output_width: int
     # The task's full structural I/O contract (library.task_io), computed once per solve so the
@@ -205,6 +206,9 @@ class HierarchicalLoop:
     decay: float
     offspring_discount: float
     seed_fraction: float
+    # Hard pre-allocation guard for tuple-backed composition genes. Zero disables it. The estimate
+    # uses the exact dense/factored formula and runs before population construction.
+    max_initial_glue_values: int = 0
     # At each lookup miss the orchestrator absorbs up to this many NEW exact-port library entries
     # into the module pool (grafted over the worst non-champion members): found structures become
     # building blocks IN the soup, mid-run, not just at fresh_state.
@@ -644,5 +648,6 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         decay=float(modules_cfg.get("decay", 0.95)),
         offspring_discount=float(modules_cfg.get("offspring_discount", 0.9)),
         seed_fraction=float(modules_cfg.get("seed_fraction", 0.25)),
+        max_initial_glue_values=max(0, int(comp_cfg.get("max_initial_glue_values", 0))),
         absorb_top_k=int(modules_cfg.get("absorb_top_k", 0)),
     )

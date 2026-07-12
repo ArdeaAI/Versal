@@ -16,6 +16,7 @@ composition resolve to the SAME inner module instance, so repetition means liter
 import math
 import random
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable
@@ -183,7 +184,7 @@ class AssemblyContext:
     sibling compositions never share trainable inner copies; the cache inside one context is what
     gives repeated refs literal weight sharing WITHIN a composition."""
 
-    bank_columns: dict[str, list[int]]
+    bank_columns: dict[str, Sequence[int]]
     live_resolver: Callable[[str], Genome] | None = None
     library: ModuleLibrary | None = None
     max_inline_depth: int = 4
@@ -248,13 +249,13 @@ def _resolve_module(node: CompNodeGene, ctx: AssemblyContext) -> SubstrateModule
 def _nested_context(inner_comp: CompositionGenome, outer: AssemblyContext) -> AssemblyContext:
     """A nested composition reads its aggregated input vector positionally: consecutive column
     ranges per INPUT node in id order, matching how its in_width was computed at reference time."""
-    columns: dict[str, list[int]] = {}
+    columns: dict[str, Sequence[int]] = {}
     cursor = 0
     for node_id in inner_comp.input_ids:
         node = inner_comp.nodes[node_id]
         if node.ref == BIAS_REF:
             continue
-        columns[node.ref] = list(range(cursor, cursor + node.out_width))
+        columns[node.ref] = range(cursor, cursor + node.out_width)
         cursor += node.out_width
     return AssemblyContext(
         bank_columns=columns,
@@ -420,15 +421,31 @@ def _glue_init(in_width: int, out_width: int, rng: random.Random, scale: float |
     return tuple(rng.gauss(0.0, sigma) for _ in range(in_width * out_width))
 
 
+def _selected_glue_rank(in_width: int, out_width: int, glue_rank: int, glue_rank_threshold: int) -> int:
+    if glue_rank > 0 and glue_rank_threshold > 0 and in_width * out_width > glue_rank_threshold and glue_rank < min(in_width, out_width):
+        return glue_rank
+    return 0
+
+
+def glue_value_count(in_width: int, out_width: int, *, glue_rank: int = 0, glue_rank_threshold: int = 0) -> int:
+    """Exact gene-value count for the dense/factored representation selected by `_glue_for`."""
+
+    selected_rank = _selected_glue_rank(in_width, out_width, glue_rank, glue_rank_threshold)
+    if selected_rank > 0:
+        return in_width * selected_rank + selected_rank * out_width
+    return in_width * out_width
+
+
 def _glue_for(
     in_width: int, out_width: int, rng: random.Random, *, glue_rank: int = 0, glue_rank_threshold: int = 0, glue_scale: float | None = None
 ) -> tuple[tuple[float, ...], int]:
     """Choose dense or factored glue for a NEW edge. Factored entries draw with sigma chosen so
     var((U @ V)_ij) = rank * sigma^4 matches the dense 1/in_width init variance."""
-    if glue_rank > 0 and glue_rank_threshold > 0 and in_width * out_width > glue_rank_threshold and glue_rank < min(in_width, out_width):
-        sigma = (in_width * glue_rank) ** -0.25
-        values = tuple(rng.gauss(0.0, sigma) for _ in range(in_width * glue_rank + glue_rank * out_width))
-        return values, glue_rank
+    selected_rank = _selected_glue_rank(in_width, out_width, glue_rank, glue_rank_threshold)
+    if selected_rank > 0:
+        sigma = (in_width * selected_rank) ** -0.25
+        values = tuple(rng.gauss(0.0, sigma) for _ in range(glue_value_count(in_width, out_width, glue_rank=selected_rank, glue_rank_threshold=glue_rank_threshold)))
+        return values, selected_rank
     return _glue_init(in_width, out_width, rng, glue_scale), 0
 
 

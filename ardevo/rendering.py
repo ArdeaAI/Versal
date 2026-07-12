@@ -90,6 +90,7 @@ THEME: dict[str, Any] = {
     "node_bias": "#566190",
     "node_output": "#f7768e",
     "node_module": "#6fd08c",
+    "node_anchor": "#f2cc60",
     "cmap": "viridis",
     "cmap_range": (0.25, 1.0),  # truncate the dark low end so layer-0 hidden nodes pop on the dark bg
 }
@@ -894,6 +895,7 @@ _BAND_GAP = 2.5  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
 _LEGEND_ROW_STEP = 1.1
 _LEGEND_WIDTH = 16.0
+_CELL_ANCHOR_INSET = 0.3
 
 
 def _overmind_legend_entries() -> list[tuple[str, dict[str, Any], str]]:
@@ -907,6 +909,7 @@ def _overmind_legend_entries() -> list[tuple[str, dict[str, Any], str]]:
         ("node", {"color": deep, "marker": "o"}, "hidden (deep layer)"),
         ("node", {"color": deep, "marker": "D"}, "product gate"),
         ("node", {"color": THEME["node_module"], "marker": "h"}, "module ref / macro footprint"),
+        ("node", {"color": THEME["node_anchor"], "marker": "o", "size": 0.65}, "network ingress anchor"),
         ("node", {"color": deep, "marker": "o", "alpha": 0.25, "size": 0.5}, "isolated (unused)"),
         ("box", {}, "retired or unexpanded network"),
         ("edge", {"color": THEME["edge_forward"]}, "forward connection"),
@@ -993,6 +996,7 @@ def build_overmind_spec(
     tops: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
     bottoms: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
     centers: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
+    anchors: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
     y_cursor = total_height - _BAND_H - _BAND_GAP  # y-up frame: the top rail of the first row
     for row, row_height, row_width in zip(rows, row_heights, row_widths):
         x_cursor = (grid_width - row_width) / 2
@@ -1001,6 +1005,8 @@ def build_overmind_spec(
             cx, cy = x_cursor + box_w / 2, y_cursor - box_h / 2  # top-aligned: a clean rail for input feeds
             _place_child(spec, children[i], (cx, cy), depth=1)
             tops[i], bottoms[i], centers[i] = (cx, y_cursor), (cx, y_cursor - box_h), (cx, cy)
+            anchors[i] = (cx - box_w / 2 + _CELL_ANCHOR_INSET, y_cursor - _CELL_ANCHOR_INSET)
+            spec.nodes.append(SpecNode(*anchors[i], color=THEME["node_anchor"], size=0.65))
             if not children[i].opaque and box_w < 2.5:
                 # draw_spec skips container labels on narrow boxes; every cell still deserves a name
                 spec.texts.append(SpecText(cx - box_w / 2 + 0.15, y_cursor + 0.08, children[i].label, size=5.0, va="bottom"))
@@ -1043,7 +1049,7 @@ def build_overmind_spec(
             continue
         if view.vertices[source].retired or view.vertices[target].retired:
             continue
-        (x0, y0), (x1, y1) = centers[source], centers[target]
+        (x0, y0), (x1, y1) = centers[source], anchors[target]
         spec.edges.append(SpecEdge(x0, y0, x1, y1, width=_edge_width(weight * 3), color=THEME["edge_pathway"], curve=0.25, alpha=0.25 + 0.6 * min(weight, 1.0)))
 
     # STRUCTURAL CONTAINMENT: dashed refs from an entry to the grid cells it is built from, so a
@@ -1059,7 +1065,7 @@ def build_overmind_spec(
                 child_index = index_by_key.get(ref)
                 if child_index is None or child_index == parent_index:
                     continue
-                (x0, y0), (x1, y1) = centers[parent_index], centers[child_index]
+                (x0, y0), (x1, y1) = centers[parent_index], anchors[child_index]
                 spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.0, color=THEME["edge_macro"], style="dashed", alpha=0.45))
 
     spec.width = grid_width

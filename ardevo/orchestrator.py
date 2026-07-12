@@ -64,7 +64,7 @@ def comp_task_spec(task: Task, *, include_query: bool = True, structured_grid: b
         encoder=encoder,
         n_inputs=width,
         input_specs=[(signature, width)],
-        bank_columns={signature: list(range(width))},
+        bank_columns={signature: range(width)},
         output_ref=task.meta.name,
         output_width=io["output"]["width"],
         io=io,
@@ -1105,11 +1105,36 @@ class Orchestrator:
             logger.info("no skeleton wiring for roles %s; relying on the ref catalog instead", roles)
             return None
 
+        signature, parent_width = spec.input_specs[0]
+        loaded: list[tuple[Subtask, str, LibraryEntry]] = []
+        glue_values = spec.output_width  # bias -> output
+        for subtask, solution in solutions:
+            key = solution.key
+            if key is None:  # unreachable after the guard above; narrows for the type checker
+                return None
+            entry = self.library.load(key)
+            in_width = sum(item["width"] for item in entry.io["inputs"])
+            out_width = entry.io["output"]["width"]
+            if subtask.port.role == "output_slice":
+                glue_values += parent_width * in_width + out_width * spec.output_width
+            else:
+                subset_width = max(subtask.port.offsets[1] - subtask.port.offsets[0], 0)
+                glue_values += parent_width * subset_width + out_width * spec.output_width
+            loaded.append((subtask, key, entry))
+
+        limit = self.loop.max_initial_glue_values
+        if limit > 0 and glue_values > limit:
+            logger.warning(
+                "decomposition skeleton declined before allocation: candidate needs %s glue values (limit %s)",
+                f"{glue_values:,}",
+                f"{limit:,}",
+            )
+            return None
+
         tracker = self.state.comp_innovations
         comp = CompositionGenome()
-        signature, width = spec.input_specs[0]
         input_id = tracker.new_node_id()
-        comp.nodes[input_id] = CompNodeGene(input_id, CompNodeKind.INPUT, signature, 0, width)
+        comp.nodes[input_id] = CompNodeGene(input_id, CompNodeKind.INPUT, signature, 0, parent_width)
         bias_id = tracker.new_node_id()
         comp.nodes[bias_id] = CompNodeGene(bias_id, CompNodeKind.INPUT, BIAS_REF, 0, 1)
         output_id = tracker.new_node_id()
@@ -1119,21 +1144,18 @@ class Orchestrator:
         positions_total = sum(subtask.port.width for subtask, _ in solutions if subtask.port.role == "output_slice")
         per_position = spec.output_width // positions_total if positions_total else 1
 
-        for subtask, solution in solutions:
-            if solution.key is None:  # unreachable after the guard above; narrows for the type checker
-                return None
-            entry = self.library.load(solution.key)
+        for subtask, key, entry in loaded:
             in_width = sum(item["width"] for item in entry.io["inputs"])
             out_width = entry.io["output"]["width"]
             node_id = tracker.new_node_id()
-            comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{solution.key}", in_width, out_width)
+            comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
             port = subtask.port
             if port.role == "output_slice":
-                in_glue = _identity_glue(width, in_width)
+                in_glue = _identity_glue(parent_width, in_width)
                 start = port.offsets[0] * per_position
                 out_glue = _placement_glue(out_width, spec.output_width, start)
             else:  # input_subset
-                in_glue = _selection_glue(width, port.offsets)
+                in_glue = _selection_glue(parent_width, port.offsets)
                 out_glue = _identity_glue(out_width, spec.output_width)
             comp.edges.append(CompEdgeGene(input_id, node_id, True, tracker.innovation(input_id, node_id), in_glue))
             comp.edges.append(CompEdgeGene(node_id, output_id, True, tracker.innovation(node_id, output_id), out_glue))

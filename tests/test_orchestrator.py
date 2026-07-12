@@ -233,6 +233,31 @@ def test_port_wired_skeleton_assembles_and_routes(tmp_path: Path, decomposable_t
     assert out.shape == (3, 2)
 
 
+def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(monkeypatch, tmp_path: Path, decomposable_task: Task) -> None:
+    import ardevo.orchestrator as orchestrator_module
+    from ardevo.decompose import output_slices
+    from ardevo.evolution.composition import comp_to_dict
+    from ardevo.orchestrator import Solution
+
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator.loop.max_initial_glue_values = 100
+    spec = comp_task_spec(decomposable_task)
+    solutions = []
+    for subtask in output_slices(decomposable_task, rng=random.Random(0), n_groups=2):
+        comp = minimal_composition([("BINARY|K", 8)], subtask.task.meta.name, 1, InnovationTracker(_next_node_id=0), random.Random(1))
+        key = orchestrator.library.add(entry_type=COMPOSITION, payload=comp_to_dict(comp), io=task_io(subtask.task), provenance={}, level=2)
+        solutions.append((subtask, Solution(key=key, entry_type=COMPOSITION, metric=1.0)))
+
+    def unexpected_allocation(*_args, **_kwargs):
+        raise AssertionError("the skeleton guard must run before dense glue construction")
+
+    monkeypatch.setattr(orchestrator_module, "_identity_glue", unexpected_allocation)
+    monkeypatch.setattr(orchestrator_module, "_placement_glue", unexpected_allocation)
+    monkeypatch.setattr(orchestrator_module, "_selection_glue", unexpected_allocation)
+
+    assert orchestrator._port_wired_skeleton(spec, solutions) is None
+
+
 def test_real_evolve_admit_then_revisit_is_a_hit(tmp_path: Path, xor_task: Task) -> None:
     """The anti-forgetting regression test, on the REAL loop: accept a (weak) solution, admit it,
     and the same task seen again is answered from the library without evolving."""

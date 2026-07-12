@@ -1,5 +1,6 @@
 import hashlib
 import json
+import tomllib
 
 from ardevo.tools.runtime_inventory import DEFAULT_MANIFEST, RUN_PATHS, build_inventory, check_manifest
 from ardevo.utils.config import Config
@@ -13,6 +14,18 @@ def test_all_features_config_is_the_canonical_default() -> None:
 def test_checked_in_runtime_inventory_is_current() -> None:
     assert check_manifest()
     assert json.loads(DEFAULT_MANIFEST.read_text()) == build_inventory()
+
+
+def test_preflight_only_changes_its_declared_operational_scope() -> None:
+    canonical = tomllib.loads(Config.DEFAULT_CONFIG.read_text())
+    preflight = tomllib.loads((Config.PROJECT_ROOT / "configs" / "preflight.toml").read_text())
+    assert preflight["evolution"]["composition"]["max_initial_glue_values"] == 5_000_000
+
+    preflight["run"]["experiment"] = canonical["run"]["experiment"]
+    preflight["schedule"]["tasks_per_rung"] = canonical["schedule"]["tasks_per_rung"]
+    preflight["orchestrator"]["tasks"] = canonical["orchestrator"]["tasks"]
+    preflight["orchestrator"]["library_dir"] = canonical["orchestrator"]["library_dir"]
+    assert preflight == canonical
 
 
 def test_runtime_inventory_covers_live_surfaces() -> None:

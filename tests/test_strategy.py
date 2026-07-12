@@ -53,6 +53,30 @@ def test_verification_reassembles_against_current_state(xor_task: Task) -> None:
     assert all(abs(fresh_weights[key] - expected[key]) < 1e-6 for key in fresh_weights)
 
 
+def test_composition_declines_oversized_initial_glue_before_run_task(monkeypatch, xor_task: Task) -> None:
+    loop = build_loop(_loop_config())
+    state = loop.fresh_state(random.Random(0))
+    spec = _spec(xor_task)
+    expected_values = spec.output_width + spec.n_inputs * spec.output_width
+    loop.max_initial_glue_values = expected_values - 1
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("the allocation guard must run before loop.run_task")
+
+    monkeypatch.setattr(loop, "run_task", unexpected_run)
+    result = CompositionStrategy()(xor_task, spec, _runtime_for(loop, state, threshold=0.95), budget=10)
+
+    assert result.generations_used == 0
+    assert result.champion_comp is None
+    assert result.champion_metrics == {"declined_composition_glue_values": float(expected_values)}
+
+
+def test_composition_glue_limit_builds_from_config() -> None:
+    config = _loop_config()
+    config["evolution"]["composition"]["max_initial_glue_values"] = 123
+    assert build_loop(config).max_initial_glue_values == 123
+
+
 def test_evolve_runs_strategies_in_order_with_budget_carry(tmp_path: Path, xor_task: Task) -> None:
     calls: list[tuple[str, int]] = []
 

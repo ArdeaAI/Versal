@@ -260,6 +260,28 @@ def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, t
     assert not orchestrator._accepts_result(result)
 
 
+def test_routed_distillation_declines_oversized_glue_before_allocation(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    import ardevo.routing as routing_module
+    from ardevo.routing import RoutedStrategy
+
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.2, "decompose": []})
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    strategy = RoutedStrategy(library_dir=str(tmp_path / "lib"), d_model=16, top_k=1, max_steps=2, train_steps=1, persist=False)
+    strategy._service(orchestrator.library).sync(include_compositions=True, exclude_temporal=True)
+    runtime = orchestrator._runtime()
+    runtime.loop.max_initial_glue_values = 1
+    next_node_id = runtime.state.comp_innovations._next_node_id
+
+    def unexpected_allocation(*_args, **_kwargs):
+        raise AssertionError("the distillation guard must run before composition glue construction")
+
+    monkeypatch.setattr(routing_module, "minimal_composition", unexpected_allocation)
+    monkeypatch.setattr(routing_module, "_glue_for", unexpected_allocation)
+
+    assert strategy._verify_distilled([[key]], comp_task_spec(xor_task), runtime) is None
+    assert runtime.state.comp_innovations._next_node_id == next_node_id
+
+
 def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     """A distilled entry's vertex is born AT the task embedding that produced it (fingerprint-matched
     at sync), not at the mean-of-peers default."""
