@@ -1,0 +1,6 @@
+# P0: remove composition/grammar hierarchy while retaining routing, direct evolution, and the
+# independently tested decomposition rail. This keeps the no-decomposition comparison orthogonal.
+extends = "base.toml"
+
+[orchestrator]
+evolve = ["routed", "direct"]

@@ -6,7 +6,7 @@ only for population-batched tensor programs (the `gradient_batched` family), so 
 consumed at those sites, threaded in by `build_evolver`, plus `Proctor`'s informational device.
 Resolution order: an explicit per-op knob (`device = ...` on the train table) wins, then the
 `[run] compute` override, then the `[run] machine` mapping (MonadMetal -> mps, LatticeCUDA ->
-cuda). Every rung of the ladder falls back to CPU with a warning rather than crashing a queue job
+cuda, ClusterCUDA -> cuda). Every rung of the ladder falls back to CPU with a warning rather than crashing a queue job
 on an agent whose GPU is missing or unconfigured.
 
 Calibration is deliberately separate from device resolution. A caller supplies named execution
@@ -32,7 +32,7 @@ from ardevo.utils.logging import Logger
 
 logger = Logger.get_logger()
 
-_MACHINE_DEVICE = {"MonadMetal": "mps", "LatticeCUDA": "cuda"}
+_MACHINE_DEVICE = {"MonadMetal": "mps", "LatticeCUDA": "cuda", "ClusterCUDA": "cuda"}
 
 SERIAL_MODE = "serial"
 POPULATION_CPU_MODE = "population_cpu"
@@ -403,7 +403,20 @@ def resolve_worker_count(value: int | str) -> int:
     if value == "auto":
         import os
 
-        return max(1, (os.cpu_count() or 8) - 4)
+        counts = [os.cpu_count() or 8]
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                counts.append(len(os.sched_getaffinity(0)))
+            except OSError:
+                pass
+        for name in ("SLURM_CPUS_PER_TASK", "PBS_NP", "NSLOTS"):
+            try:
+                allocated = int(os.environ.get(name, "0"))
+            except ValueError:
+                allocated = 0
+            if allocated > 0:
+                counts.append(allocated)
+        return max(1, min(counts) - 4)
     return int(value)
 
 

@@ -30,6 +30,7 @@ from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_fro
 from ardevo.evolution.multitask import TaskEntry, build_pool_report
 from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
+from ardevo.external_archive import ArchiveManager, ExperimentLock
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
 from ardevo.utils.device import capture_hardware_profile
@@ -113,6 +114,8 @@ class OrchestratedTrial(Proctor):
         self.fresh_per_task = bool(config.get("library", {}).get("fresh_per_task", False))
         self.frozen_library_dir: Path | None = None
         self.gc_removed: list[str] | None = None  # set by the run-end sweep, reported in run_summary
+        self.archive_manager: ArchiveManager | None = None
+        self.experiment_lock: ExperimentLock | None = None
         self.hardware_profile = capture_hardware_profile().to_dict()
 
     def run(self) -> dict[str, Any]:
@@ -132,19 +135,21 @@ class OrchestratedTrial(Proctor):
             self.task_records = []
             console.rule(f"[bold]Orchestrated run: rungs {self.rungs}, {len(self.pool)} tasks, library {self.library.root} -> {self.run_dir}")
 
-        if bool(self.config.get("render_async", False)):
-            rendering.enable_async_rendering()
-        if bool(self.config.get("live_status", True)):
-            BOARD.enable(console)  # quietly refuses off-terminal (pipes, agents, CI)
-
+        self.experiment_lock = ExperimentLock(self.run_dir, self.library.root)
+        self.experiment_lock.acquire()
         # A durable record exists before the first task so a crash during setup or task 0 leaves a
         # diagnosable run_summary.json instead of an empty directory (the silent-failure mode we kill).
         orchestrator: Orchestrator | None = None
         try:
+            if bool(self.config.get("render_async", False)):
+                rendering.enable_async_rendering()
+            if bool(self.config.get("live_status", True)):
+                BOARD.enable(console)  # quietly refuses off-terminal (pipes, agents, CI)
             orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
             orchestrator.attempts = attempts
             if counters:
                 orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
+            self.archive_manager = ArchiveManager.from_config(self.config, self.run_dir, self.library.root)
             self._write_run_summary(orchestrator, state, task_cursor, status="running")
             while task_cursor < self.tasks_to_run:
                 index = self.scheduler.next_index(self.pool, state.rng)
@@ -178,37 +183,53 @@ class OrchestratedTrial(Proctor):
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
                 self._record_task(entry, attempt, new_library_keys, len(self.library), module_pool_sizes)
                 self._write_run_summary(orchestrator, state, task_cursor, status="running")
-                if task_cursor % self.checkpoint_every == 0:
-                    self._persist_resume_state(orchestrator, state, task_cursor)
                 if new_library_keys:
                     self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
+                if self.archive_manager is not None and self.archive_manager.due(task_cursor):
+                    self._archive_boundary(orchestrator, state, task_cursor)
+                elif task_cursor % self.checkpoint_every == 0:
+                    self._persist_resume_state(orchestrator, state, task_cursor)
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
-            BOARD.close()  # release the terminal first so the traceback and summaries print clean
-            self.library.flush_stats()  # a crash still leaves the stats it had
-            rendering.flush_renders()  # pending async renders finish (their own failures only log)
-            self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
-            if orchestrator is not None:
-                self._persist_resume_state(orchestrator, state, task_cursor)
+            try:
+                BOARD.close()  # release the terminal first so the traceback and summaries print clean
+                self.library.flush_stats()  # a crash still leaves the stats it had
+                rendering.flush_renders()  # pending async renders finish (their own failures only log)
+                self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
+                if orchestrator is not None:
+                    self._persist_resume_state(orchestrator, state, task_cursor)
+                self._archive_boundary(orchestrator, state, task_cursor, status=f"crashed-{type(error).__name__}", force=True, best_effort=True)
+            finally:
+                self._release_experiment_lock()
             raise
 
-        BOARD.close()
-        self.library.flush_stats()
-        rendering.flush_renders()  # renders land before GC can delete images and before finalize
-        self._persist_resume_state(orchestrator, state, task_cursor)
-        if self.gc_enabled and not self.fresh_per_task:
-            self._run_gc(state)
-        self._write_run_summary(orchestrator, state, task_cursor, status="done")
-        self.results = {
-            "tasks_attempted": task_cursor,
-            "library_size": len(self.library),
-            "counters": dict(orchestrator.counters),
-            "module_pool": len(state.modules),
-            "generations_run": state.generation,
-            "run_dir": str(self.run_dir),
-        }
-        console.print(f"[bold green]Done[/bold green]: {task_cursor} tasks, library {len(self.library)} entries, counters {orchestrator.counters}")
-        self.finalize()
-        return self.results
+        try:
+            BOARD.close()
+            self.library.flush_stats()
+            rendering.flush_renders()  # renders land before GC can delete images and before finalize
+            self._persist_resume_state(orchestrator, state, task_cursor)
+            if self.gc_enabled and not self.fresh_per_task:
+                self._run_gc(state)
+            self._write_run_summary(orchestrator, state, task_cursor, status="done")
+            self._publish_final_archive(orchestrator, state, task_cursor)
+            self.results = {
+                "tasks_attempted": task_cursor,
+                "library_size": len(self.library),
+                "counters": dict(orchestrator.counters),
+                "module_pool": len(state.modules),
+                "generations_run": state.generation,
+                "run_dir": str(self.run_dir),
+            }
+            console.print(f"[bold green]Done[/bold green]: {task_cursor} tasks, library {len(self.library)} entries, counters {orchestrator.counters}")
+            self.finalize()
+            return self.results
+        finally:
+            self._release_experiment_lock()
+
+    def _release_experiment_lock(self) -> None:
+        lock = getattr(self, "experiment_lock", None)
+        if lock is not None:
+            lock.release()
+            self.experiment_lock = None
 
     def _prepare_frozen_library(self) -> None:
         if not self.fresh_per_task:
@@ -361,6 +382,8 @@ class OrchestratedTrial(Proctor):
             record["report_metric"] = float(attempt.report_metric)
         if attempt is not None and getattr(attempt, "task_metrics", None):
             record["task_metrics"] = dict(attempt.task_metrics)
+        if attempt is not None and getattr(attempt, "resource_metrics", None):
+            record["resource_metrics"] = dict(attempt.resource_metrics)
         if module_pool_sizes:
             record["module_pool"] = dict(module_pool_sizes)
         self.task_records.append(record)
@@ -375,6 +398,8 @@ class OrchestratedTrial(Proctor):
             "status": status,
             "config_path": self.config.get("config_path", ""),
             "config_sha256": self.config.get("config_sha256", ""),
+            "config_effective_sha256": self.config.get("config_effective_sha256", ""),
+            "config_sources": list(self.config.get("config_sources", [])),
             "seed": int(self.config.get("seed", 0)),
             "library_dir": str(self.library.root),
             "rungs": self.rungs,
@@ -447,6 +472,40 @@ class OrchestratedTrial(Proctor):
             ),
         )
 
+    def _archive_boundary(
+        self,
+        orchestrator: Orchestrator | None,
+        state: HierarchicalState,
+        task_cursor: int,
+        *,
+        status: str = "running",
+        force: bool = False,
+        best_effort: bool = False,
+    ) -> dict[str, Any] | None:
+        """Publish only a render-complete, checkpointed between-task state."""
+        manager = getattr(self, "archive_manager", None)
+        if manager is None or (not force and not manager.due(task_cursor)):
+            return None
+        try:
+            rendering.flush_renders()
+            if orchestrator is not None:
+                self._persist_resume_state(orchestrator, state, task_cursor)
+            return manager.snapshot(task_cursor, status=status)
+        except BaseException:
+            if not best_effort:
+                raise
+            logger.exception("best-effort external archive snapshot failed at task %d", task_cursor)
+            return None
+
+    def _publish_final_archive(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
+        """Make a failed authoritative final upload visibly resumable instead of leaving `done`."""
+
+        try:
+            self._archive_boundary(orchestrator, state, task_cursor, status="done", force=True)
+        except BaseException as error:
+            self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: external archive: {type(error).__name__}: {error}")
+            raise
+
     def _log_task(
         self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, task_seconds: float = 0.0, module_pool_sizes: dict[str, float] | None = None
     ) -> None:
@@ -465,6 +524,8 @@ class OrchestratedTrial(Proctor):
         attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
         for series, value in (getattr(attempt, "size_metrics", None) or {}).items():
             self.log_scalar("Size", series, value, task_cursor)
+        for series, value in (getattr(attempt, "resource_metrics", None) or {}).items():
+            self.log_scalar("Resources", series, value, task_cursor)
         # Wall-clock + memory per task: a wedged stage or a leaking process must be visible in
         # the run record, not only via sampling a live process.
         if task_seconds:
@@ -511,9 +572,23 @@ class OrchestratedTrial(Proctor):
         entry = self.library.load(key)
         title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
         if entry.entry_type == MODULE:
-            rendering.submit_render(rendering.render_network, directory, genome_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(
+                rendering.render_network,
+                directory,
+                genome_from_dict(entry.payload),
+                title=title,
+                library=self.library,
+                max_inline_depth=self.loop.max_inline_depth,
+            )
         elif entry.entry_type == COMPOSITION:
-            rendering.submit_render(rendering.render_composition_network, directory, comp_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(
+                rendering.render_composition_network,
+                directory,
+                comp_from_dict(entry.payload),
+                title=title,
+                library=self.library,
+                max_inline_depth=self.loop.max_inline_depth,
+            )
         else:
             raise ValueError(f"unknown library entry type {entry.entry_type!r}")
 

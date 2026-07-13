@@ -1,0 +1,5 @@
+# P0: remove the routed substrate while retaining grammar, direct search, and composition.
+extends = "base.toml"
+
+[orchestrator]
+evolve = ["grammar", "direct", "composition"]

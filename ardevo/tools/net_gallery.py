@@ -15,10 +15,25 @@ from pathlib import Path
 from typing import Any
 
 from ardevo.library import ModuleLibrary
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH, configured_max_inline_depth
 from ardevo.rendering import DEFAULT_NODE_BUDGET, render_entry, render_library_gallery
 from ardevo.utils.logging import Logger
 
 console = Logger.get_console()
+
+
+def _depth_kwargs(max_inline_depth: int) -> dict[str, int]:
+    """Keep legacy/default call seams intact while forwarding non-default configured limits."""
+    return {} if max_inline_depth == DEFAULT_MAX_INLINE_DEPTH else {"max_inline_depth": max_inline_depth}
+
+
+def _router_service(library: ModuleLibrary, *, max_inline_depth: int, **kwargs: Any) -> Any:
+    """Construct through the legacy signature at the default while forwarding configured overrides."""
+    from ardevo.routing import RouterService
+
+    if max_inline_depth == DEFAULT_MAX_INLINE_DEPTH:
+        return RouterService(library, **kwargs)
+    return RouterService(library, max_inline_depth=max_inline_depth, **kwargs)
 
 
 def resolve_library_root(library: str | None, config: str | None) -> tuple[Path, dict[str, Any] | None]:
@@ -39,6 +54,7 @@ def render_all_entries(
     include_retired: bool = False,
     include_dependencies: bool = True,
     node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> list[dict[str, Any]]:
     """One full-size PNG per selected entry into `directory`; one row per entry, never raises."""
     rows: list[dict[str, Any]] = []
@@ -46,7 +62,13 @@ def render_all_entries(
         key = summary["key"]
         row: dict[str, Any] = {"key": key, "entry_type": summary["entry_type"], "level": summary["level"]}
         try:
-            path = render_entry(directory / f"{key}.png", library.load(key), library=library, node_budget=node_budget)
+            path = render_entry(
+                directory / f"{key}.png",
+                library.load(key),
+                library=library,
+                node_budget=node_budget,
+                **_depth_kwargs(max_inline_depth),
+            )
             row.update(status="OK", path=str(path))
         except Exception as error:
             row.update(status=f"FAIL:{type(error).__name__}", path="")
@@ -75,7 +97,13 @@ def _metadata_pathways(ordered_names: list[str], transitions: dict[str, dict[str
     return [edge for edges in by_source.values() for edge in sorted(edges, key=lambda edge: -edge[2])[:per_vertex]]
 
 
-def render_overmind_from_metadata(library: ModuleLibrary, metadata_path: Path, out_path: Path) -> Path:
+def render_overmind_from_metadata(
+    library: ModuleLibrary,
+    metadata_path: Path,
+    out_path: Path,
+    *,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     """Render persisted traffic without loading the router's potentially large tensor state."""
     import json
 
@@ -132,7 +160,7 @@ def render_overmind_from_metadata(library: ModuleLibrary, metadata_path: Path, o
         max_steps=int(meta["max_steps"]),
         pathways=_metadata_pathways(ordered_names, meta.get("transition_totals", {})),
     )
-    return render_overmind(out_path, view, library=library)
+    return render_overmind(out_path, view, library=library, **_depth_kwargs(max_inline_depth))
 
 
 def main() -> None:
@@ -161,18 +189,36 @@ def main() -> None:
         parser.error("--overmind-only cannot be combined with --gallery")
 
     library_root, runtime = resolve_library_root(args.library, args.config)
+    max_inline_depth = configured_max_inline_depth(runtime or {})
     if not library_root.exists():
         console.print(f"[red]no library at {library_root}[/red] (point --library at a library dir)")
         return
     library = ModuleLibrary(library_root)
 
     images_dir = Path(args.images) if args.images else library_root / "images"
-    rows = [] if args.overmind_only else render_all_entries(library, images_dir, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
+    rows = (
+        []
+        if args.overmind_only
+        else render_all_entries(
+            library,
+            images_dir,
+            include_retired=args.include_retired,
+            include_dependencies=args.include_dependencies,
+            **_depth_kwargs(max_inline_depth),
+        )
+    )
 
     gallery_note = ""
     if args.gallery is not None:
         gallery_path = library_root / "gallery.png" if args.gallery == "__default__" else Path(args.gallery)
-        render_library_gallery(library, gallery_path, columns=args.columns, include_retired=args.include_retired, include_dependencies=args.include_dependencies)
+        render_library_gallery(
+            library,
+            gallery_path,
+            columns=args.columns,
+            include_retired=args.include_retired,
+            include_dependencies=args.include_dependencies,
+            **_depth_kwargs(max_inline_depth),
+        )
         gallery_note = f" | gallery -> {gallery_path}"
 
     if args.overmind:
@@ -183,16 +229,15 @@ def main() -> None:
             if not router_meta.exists():
                 console.print(f"[red]no router metadata at {router_meta}[/red] (use --cold-overmind for a structural portrait)")
                 return
-            render_overmind_from_metadata(library, router_meta, images_dir / "overmind.png")
+            render_overmind_from_metadata(library, router_meta, images_dir / "overmind.png", **_depth_kwargs(max_inline_depth))
             gallery_note += f" | overmind (metadata) -> {images_dir / 'overmind.png'}"
         elif not args.cold_overmind and router_meta.exists():
             import json
 
-            from ardevo.routing import RouterService
-
             meta = json.loads(router_meta.read_text())
-            service = RouterService(
+            service = _router_service(
                 library,
+                max_inline_depth=max_inline_depth,
                 d_model=int(meta["d_model"]),
                 top_k=int(meta["top_k"]),
                 max_steps=int(meta["max_steps"]),
@@ -208,12 +253,13 @@ def main() -> None:
         else:
             # A cold portrait reads the current library but never loads or writes router state. Keep
             # image_dir unset during sync so adding experts cannot trigger an implicit first render.
-            from ardevo.routing import RouterService
             from ardevo.utils.config import Config
 
-            routed = (runtime or Config().current).get("orchestrator", {}).get("routed", {})
-            service = RouterService(
+            cold_runtime = runtime or Config().current
+            routed = cold_runtime.get("orchestrator", {}).get("routed", {})
+            service = _router_service(
                 library,
+                max_inline_depth=configured_max_inline_depth(cold_runtime),
                 d_model=int(routed.get("d_model", 64)),
                 top_k=int(routed.get("top_k", 2)),
                 max_steps=int(routed.get("max_steps", 4)),

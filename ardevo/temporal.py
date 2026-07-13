@@ -15,6 +15,7 @@ import torch
 from ardevo.dataset.icarus import Axis, BatchedField, EncodedTask, FieldDescriptor, Level0Encoder, Task, ValueType, model_output_features, query_loader, support_loader
 from ardevo.evaluation import evaluate
 from ardevo.evolution.genome import Genome
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import SubstrateModule, decode_recurrent
 
 _CLASS_TYPES = (ValueType.CATEGORICAL, ValueType.ORDINAL)
@@ -127,15 +128,16 @@ class TemporalTaskAdapter:
     n_inputs: int
     n_outputs: int
     mode: str
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
 
     def decode(self, genome: Genome) -> SubstrateModule:
-        return decode_recurrent(genome, self.n_inputs, self.n_outputs, self.mode)
+        return decode_recurrent(genome, self.n_inputs, self.n_outputs, self.mode, max_inline_depth=self.max_inline_depth)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
         return evaluate(module, self.encoded, self.encoder)
 
 
-def temporal_adapter(task: Task) -> TemporalTaskAdapter:
+def temporal_adapter(task: Task, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> TemporalTaskAdapter:
     """Build the stepped adapter for a TIME-bearing task (natural per-step width, no padding)."""
     support_input_field, support_output_field = support_loader(task)
     width = step_features(support_input_field)
@@ -146,5 +148,5 @@ def temporal_adapter(task: Task) -> TemporalTaskAdapter:
     if has_time_axis(descriptor):
         steps = encoded.support_input[0].shape[1]
         positions_per_step = target.shape[1] // steps
-        return TemporalTaskAdapter(encoded, encoder, width, model_output_features(descriptor, positions_per_step), "all")
-    return TemporalTaskAdapter(encoded, encoder, width, model_output_features(descriptor, target.shape[1]), "last")
+        return TemporalTaskAdapter(encoded, encoder, width, model_output_features(descriptor, positions_per_step), "all", max_inline_depth)
+    return TemporalTaskAdapter(encoded, encoder, width, model_output_features(descriptor, target.shape[1]), "last", max_inline_depth)

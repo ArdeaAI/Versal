@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -246,13 +246,14 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
         return path
 
     monkeypatch.setattr(rendering, "render_overmind", capture_render)
-    library = MetadataLibrarySpy()
+    library_spy = MetadataLibrarySpy()
+    library = cast(ModuleLibrary, library_spy)
 
-    result = net_gallery.render_overmind_from_metadata(library, metadata_path, out_path)  # type: ignore[arg-type]
+    result = net_gallery.render_overmind_from_metadata(library, metadata_path, out_path)
 
     assert result == out_path
     assert captured["path"] == out_path
-    assert captured["library"] is library
+    assert captured["library"] is library_spy
     view = captured["view"]
     assert [vertex.key for vertex in view.vertices] == ["m1_beta", "m1_alpha", "m1_retired"]
     assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.6, 0.2, 0.2])

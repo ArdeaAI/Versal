@@ -39,7 +39,10 @@ from ardevo.evolution.mutation import MutationContext
 from ardevo.evolution.registry import Registry, _bind_prefixed, build_evolver
 from ardevo.evolution.train import _writeback
 from ardevo.library import MODULE, ModuleLibrary
+from ardevo.reference_depth import configured_max_inline_depth
+from ardevo.utils.device import resolve_compute_device
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import ResourceEstimate, ResourcePolicy
 
 logger = Logger.get_logger()
 
@@ -192,6 +195,9 @@ class HierarchicalLoop:
     glue_scale: float | None
     glue_rank: int
     glue_rank_threshold: int
+    glue_storage: str
+    resource_policy: ResourcePolicy
+    resource_device: str
     # -1 exposes every library entry to comp mutations (glue adapts any widths); >= 0 keeps only
     # entries within that many columns of the task's I/O or the module port shape, which focuses
     # the catalog once the library grows large.
@@ -218,6 +224,27 @@ class HierarchicalLoop:
     def attach_library(self, library: ModuleLibrary | None) -> None:
         self.library = library
 
+    def assess_glue_resources(
+        self,
+        glue_values: int,
+        *,
+        stage: str,
+        population_multiplicity: int = 1,
+        concurrent_trainers: int = 1,
+        storage: str | None = None,
+        fixed_limit: int | None = None,
+        device: str | None = None,
+    ) -> ResourceEstimate:
+        return self.resource_policy.assess_glue(
+            glue_values,
+            stage=stage,
+            storage=storage or self.glue_storage,
+            device=device or self.resource_device,
+            fixed_limit=self.max_initial_glue_values if fixed_limit is None else fixed_limit,
+            population_multiplicity=population_multiplicity,
+            concurrent_trainers=concurrent_trainers,
+        )
+
     # --- state ------------------------------------------------------------------------------------
 
     def fresh_state(self, rng: random.Random) -> HierarchicalState:
@@ -229,7 +256,12 @@ class HierarchicalLoop:
             from ardevo.library import graft
 
             wanted = int(self.seed_fraction * self.module_pop_size)
-            for index, entry in enumerate(self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports, limit=wanted)):
+            entries = [
+                entry
+                for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
+                if self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+            ][:wanted]
+            for index, entry in enumerate(entries):
                 genomes[index] = graft(entry, tracker)
         modules = [LiveModule(genome=genome) for genome in genomes]
         state = HierarchicalState(modules=modules, module_innovations=tracker, comp_innovations=InnovationTracker(_next_node_id=0), rng=rng)
@@ -257,6 +289,10 @@ class HierarchicalLoop:
         if self.library is not None:
             tolerance = self.catalog_width_tolerance
             for entry in self.library.query():
+                # Adding this entry as a composition MODULE follows one new library edge, leaving
+                # max_inline_depth - 1 levels for the entry's own mixed module/composition subtree.
+                if self.library.reference_subtree_depth(entry.key) > self.max_inline_depth - 1:
+                    continue
                 in_width = sum(item["width"] for item in entry.io["inputs"])
                 out_width = int(entry.io["output"]["width"])
                 if tolerance >= 0 and spec is not None:
@@ -397,6 +433,7 @@ class HierarchicalLoop:
             activations=self.evolver.activations,
             default_activation=self.evolver.default_activation,
             library=self.library,
+            max_inline_depth=self.max_inline_depth,
         )
 
     def advance_modules(self, state: HierarchicalState) -> None:
@@ -447,7 +484,11 @@ class HierarchicalLoop:
             return 0
         from ardevo.library import graft
 
-        ranked = [entry for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports) if entry.key not in state.absorbed_keys]
+        ranked = [
+            entry
+            for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
+            if entry.key not in state.absorbed_keys and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+        ]
         # Graft BEHAVIORALLY DIVERSE entries first: one per unseen niche by rank, then fill. A pool of
         # varied building blocks recombines into more than a cluster of near-duplicate top-metric ones.
         seen_niches: set[tuple[str, ...]] = set()
@@ -489,7 +530,11 @@ class HierarchicalLoop:
             fitnesses = [item.fitness for item in ordered]
             parents = self.comp_selection_op(comps, fitnesses, rng=state.rng, count=2 * n_offspring)
             comp_ctx = CompMutationContext(
-                innovations=state.comp_innovations, ref_catalog=self.ref_catalog(state), glue_rank=self.glue_rank, glue_rank_threshold=self.glue_rank_threshold
+                innovations=state.comp_innovations,
+                ref_catalog=self.ref_catalog(state),
+                glue_rank=self.glue_rank,
+                glue_rank_threshold=self.glue_rank_threshold,
+                glue_storage=self.glue_storage,
             )
             for k in range(n_offspring):
                 if state.rng.random() < self.comp_crossover_rate:
@@ -525,6 +570,7 @@ class HierarchicalLoop:
                     glue_scale=self.glue_scale,
                     glue_rank=self.glue_rank,
                     glue_rank_threshold=self.glue_rank_threshold,
+                    glue_storage=self.glue_storage,
                 )
             )
         population = [self._repair_refs(comp, state) for comp in population]
@@ -609,6 +655,9 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
     evolution = config.get("evolution", {})
     comp_cfg = evolution.get("composition", {})
     modules_cfg = evolution.get("modules", {})
+    glue_storage = str(comp_cfg.get("glue_storage", "tuple"))
+    if glue_storage not in {"tuple", "f32"}:
+        raise ValueError(f"unknown composition glue_storage {glue_storage!r}; expected 'tuple' or 'f32'")
 
     comp_selection_cfg = comp_cfg.get("selection", {})
     comp_selection_op = partial(
@@ -633,10 +682,13 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         comp_crossover_op=comp_crossover_op,
         comp_crossover_rate=float(comp_crossover_cfg.get("rate", 0.2)),
         comp_mutation=CompMutationPipeline(mutators),
-        max_inline_depth=int(comp_cfg.get("max_inline_depth", 4)),
+        max_inline_depth=configured_max_inline_depth(config),
         glue_scale=float(comp_cfg["glue_scale"]) if "glue_scale" in comp_cfg else None,
         glue_rank=int(comp_cfg.get("glue_rank", 0)),
         glue_rank_threshold=int(comp_cfg.get("glue_rank_threshold", 0)),
+        glue_storage=glue_storage,
+        resource_policy=ResourcePolicy.from_config(config.get("resources")),
+        resource_device=str(resolve_compute_device(config)),
         catalog_width_tolerance=int(comp_cfg.get("catalog_width_tolerance", -1)),
         module_pop_size=int(modules_cfg.get("pop_size", evolution.get("pop_size", 32))),
         module_elitism=int(modules_cfg.get("elitism", evolution.get("elitism", 1))),

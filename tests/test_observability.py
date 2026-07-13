@@ -141,11 +141,21 @@ def test_run_summary_carries_config_provenance(tmp_path: Path, xor_task: Task) -
     matrix driver) never has to match a run to a config by schedule shape again."""
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
-    trial.config = dict(trial.config, config_path="configs/recon_ladder.toml", config_sha256="ab" * 32, seed=3)
+    sources = [{"path": "configs/base.toml", "sha256": "cd" * 32}]
+    trial.config = dict(
+        trial.config,
+        config_path="configs/recon_ladder.toml",
+        config_sha256="ab" * 32,
+        config_effective_sha256="ef" * 32,
+        config_sources=sources,
+        seed=3,
+    )
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
     assert summary["config_path"] == "configs/recon_ladder.toml"
     assert summary["config_sha256"] == "ab" * 32
+    assert summary["config_effective_sha256"] == "ef" * 32
+    assert summary["config_sources"] == sources
     assert summary["seed"] == 3
     assert summary["library_dir"] == str(trial.library.root)
 
@@ -155,7 +165,8 @@ def test_run_summary_tolerates_configs_without_provenance(tmp_path: Path) -> Non
     trial = _trial(tmp_path, orchestrator)  # the stub config has no provenance keys
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
-    assert summary["config_path"] == "" and summary["config_sha256"] == "" and summary["seed"] == 0
+    assert summary["config_path"] == "" and summary["config_sha256"] == "" and summary["config_effective_sha256"] == ""
+    assert summary["config_sources"] == [] and summary["seed"] == 0
 
 
 def test_crash_leaves_a_diagnosable_summary(tmp_path: Path) -> None:

@@ -288,6 +288,58 @@ def test_macro_subtree_depth_walks_the_chain(tmp_path: Path, solving_genome: Gen
     assert library.macro_subtree_depth("m1_missing") == 999  # never a safe macro target
 
 
+def test_configurable_macro_depth_counts_reference_boundaries_from_a_free_root(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)  # top entry has four refs below it
+    host = _macro_host(keys[-1])  # the host-to-top ref is the fifth boundary
+    resolver = macro_resolver(library)
+
+    with pytest.raises(ValueError, match="max_inline_depth=4"):
+        decode(host, 2, 1, macro_resolver=resolver, max_inline_depth=4)
+    assert decode(host, 2, 1, macro_resolver=resolver, max_inline_depth=5)(torch.zeros(1, 2)).shape == (1, 1)
+
+
+def test_adapter_carries_depth_limit_through_main_and_worker_decode(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
+    from dataclasses import replace
+
+    from ardevo.evolution.evolver import _FLOOR_FITNESS, _assess_in_worker
+    from ardevo.evolution.registry import build_evolver
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)
+    host = _macro_host(keys[-1])
+    set_macro_resolver(macro_resolver(library))
+    evolver = build_evolver(_loop_config())
+    shallow = replace(xor_adapter, max_inline_depth=4)
+    deep = replace(xor_adapter, max_inline_depth=5)
+
+    assert evolver.evaluate_only(host, shallow).fitness == _FLOOR_FITNESS
+    assert evolver.evaluate_only(host, deep).module is not None
+    _genome, shallow_metrics, shallow_fitness = _assess_in_worker(
+        host,
+        adapter=shallow,
+        train_op=evolver.train_op,
+        evaluate_op=evolver.evaluate_op,
+        fitness=evolver.fitness,
+    )
+    _genome, deep_metrics, deep_fitness = _assess_in_worker(
+        host,
+        adapter=deep,
+        train_op=evolver.train_op,
+        evaluate_op=evolver.evaluate_op,
+        fitness=evolver.fitness,
+    )
+    assert shallow_fitness == _FLOOR_FITNESS and shallow_metrics["decode_failed"] == 1.0
+    assert deep_fitness > _FLOOR_FITNESS and "decode_failed" not in deep_metrics
+
+
+def test_macro_cycle_detection_is_independent_of_depth_limit() -> None:
+    loop = _macro_host("loop")
+    with pytest.raises(ValueError, match="cycle"):
+        decode(loop, 2, 1, macro_resolver=lambda _key: loop, max_inline_depth=100)
+
+
 def test_add_macro_node_never_nests_past_the_decode_cap(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
     """The wall-ledger lesson: seed-then-embed cycles deepen the macro chain one level per attempt
     until decode dies at _MAX_MACRO_DEPTH. The mutation must refuse targets that would get there."""
@@ -298,6 +350,32 @@ def test_add_macro_node_never_nests_past_the_decode_cap(tmp_path: Path, solving_
         child = add_macro_node(linear_genome, ctx, rng=random.Random(seed), prob=1.0)
         assert child.macros and child.macros[0].ref != f"library:{keys[4]}"  # the depth-4 entry is never chosen
         decode(child, 2, 1, macro_resolver=macro_resolver(library))  # every proposed child DECODES
+
+
+def test_add_macro_node_uses_configured_depth_limit(monkeypatch, tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)
+    top = library.load(keys[-1])
+    assert library.reference_subtree_depth(top.key) == 4
+    monkeypatch.setattr(library, "query", lambda **_kwargs: [top])
+
+    shallow = MutationContext(
+        innovations=InnovationTracker.from_genomes([linear_genome]),
+        activations=["tanh"],
+        default_activation="tanh",
+        library=library,
+        max_inline_depth=4,
+    )
+    deep = MutationContext(
+        innovations=InnovationTracker.from_genomes([linear_genome]),
+        activations=["tanh"],
+        default_activation="tanh",
+        library=library,
+        max_inline_depth=5,
+    )
+    assert add_macro_node(linear_genome, shallow, rng=random.Random(0), prob=1.0).macros == []
+    child = add_macro_node(linear_genome, deep, rng=random.Random(0), prob=1.0)
+    assert [macro.ref for macro in child.macros] == [f"library:{top.key}"]
 
 
 def test_undecodable_genome_floors_instead_of_killing_the_run(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:

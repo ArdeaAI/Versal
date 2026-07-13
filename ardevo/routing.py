@@ -52,8 +52,10 @@ from ardevo.evolution.composition import (
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import AssessedComposition, CompositionGenome, CompTaskSpec
 from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, structural_fingerprint, task_io
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH, configured_max_inline_depth
 from ardevo.substrate import SubstrateModule, decode_module
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import format_bytes
 
 logger = Logger.get_logger()
 
@@ -96,7 +98,7 @@ class RouterVertex:
     module: SubstrateModule
 
 
-def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = 4) -> RouterVertex | None:
+def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> RouterVertex | None:
     """Decode/assemble an entry into a frozen expert, or None when it cannot serve as one here
     (temporal, undecodable): the same tolerance `_quick_metric` extends to library candidates."""
     if _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
@@ -104,7 +106,14 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
     in_width, out_width = _entry_widths(entry)
     try:
         if entry.entry_type == MODULE:
-            module: SubstrateModule = decode_module(genome_from_dict(entry.payload), in_width, out_width, macro_resolver=macro_resolver(library))
+            module: SubstrateModule = decode_module(
+                genome_from_dict(entry.payload),
+                in_width,
+                out_width,
+                macro_resolver=macro_resolver(library),
+                max_inline_depth=max_inline_depth,
+                _reference_stack=(entry.key,),
+            )
         elif entry.entry_type == COMPOSITION:
             comp = comp_from_dict(entry.payload)
             # Positional bank columns: consecutive ranges per non-bias INPUT node in id order, the
@@ -117,7 +126,7 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
                     continue
                 columns[node.ref] = range(cursor, cursor + node.out_width)
                 cursor += node.out_width
-            ctx = AssemblyContext(bank_columns=columns, library=library, max_inline_depth=max_inline_depth)
+            ctx = AssemblyContext(bank_columns=columns, library=library, max_inline_depth=max_inline_depth, expansion_stack=[entry.key])
             module = assemble(comp, ctx, in_width)
         else:
             return None
@@ -217,7 +226,13 @@ class RoutedNet(nn.Module):
         self._vertex_order.append(key)
 
     def sync_with_library(
-        self, library: ModuleLibrary, *, include_compositions: bool = True, exclude_temporal: bool = True, pending_embeddings: dict[str, torch.Tensor] | None = None
+        self,
+        library: ModuleLibrary,
+        *,
+        include_compositions: bool = True,
+        exclude_temporal: bool = True,
+        pending_embeddings: dict[str, torch.Tensor] | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
     ) -> int:
         """Append vertices for library keys not yet in the table; refresh the retired mask. Returns
         the number of new vertices. The vertex set only grows (entries tombstone, never delete).
@@ -240,7 +255,7 @@ class RoutedNet(nn.Module):
                 continue
             if exclude_temporal and _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
                 continue
-            vertex = build_vertex(entry, library)
+            vertex = build_vertex(entry, library, max_inline_depth=max_inline_depth)
             if vertex is None:
                 continue
             embedding = pending_embeddings.pop(structural_fingerprint(entry.entry_type, entry.payload), None) if pending_embeddings else None
@@ -442,12 +457,14 @@ class RouterService:
         persist_dir: Path | None = None,
         persist_strict: bool = False,
         image_dir: Path | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
         self.persist_strict = persist_strict
         self.image_dir = image_dir  # <library_dir>/images; where overmind.png lands
         self.adapter_rank = adapter_rank
+        self.max_inline_depth = max_inline_depth
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
@@ -477,7 +494,13 @@ class RouterService:
             self._load(persist_dir)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
-        added = self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal, pending_embeddings=self.pending_embeddings)
+        added = self.net.sync_with_library(
+            self.library,
+            include_compositions=include_compositions,
+            exclude_temporal=exclude_temporal,
+            pending_embeddings=self.pending_embeddings,
+            max_inline_depth=self.max_inline_depth,
+        )
         if added:
             self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
         return added
@@ -628,7 +651,7 @@ class RouterService:
                 pathways=self._pathways(ordered_names),
             )
             # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
-            submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library)
+            submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library, max_inline_depth=self.max_inline_depth)
             self._rendered_vertex_count = live
         except Exception as error:  # a render must never break a run
             logger.debug("overmind render skipped: %s", error)
@@ -708,7 +731,7 @@ class RouterService:
                 logger.warning("persisted router vertex %s no longer exists (garbage-collected); dropping its rows", key)
                 dropped.add(sanitized)
                 continue
-            vertex = build_vertex(entry, self.library)
+            vertex = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
             if vertex is None:
                 logger.warning("persisted router vertex %s no longer decodes; dropping its rows", key)
                 dropped.add(sanitized)
@@ -735,7 +758,7 @@ class RouterService:
         }
         # Optional key so pre-ledger meta files load clean; no format bump (a bump stales every router dir).
         self.step_usage_totals = {name: [float(value) for value in values] for name, values in (meta.get("step_usage_totals") or {}).items() if name in known}
-        self.net.sync_with_library(self.library)  # append anything admitted since the last save
+        self.net.sync_with_library(self.library, max_inline_depth=self.max_inline_depth)  # append anything admitted since the last save
 
 
 @dataclass
@@ -747,6 +770,7 @@ class RoutedStrategy:
     d_model: int = 64
     top_k: int = 2
     max_steps: int = 4
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
     train_steps: int = 200
     lr: float = 0.003
     weight_decay: float = 0.0001
@@ -774,6 +798,7 @@ class RoutedStrategy:
     name: str = "routed"
     service: RouterService | None = None
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
+    _last_distill_resource_metrics: dict[str, float] = field(default_factory=dict)
 
     def _service(self, library: ModuleLibrary) -> RouterService:
         if self.service is None:
@@ -782,6 +807,7 @@ class RoutedStrategy:
                 d_model=self.d_model,
                 top_k=self.top_k,
                 max_steps=self.max_steps,
+                max_inline_depth=self.max_inline_depth,
                 adapter_rank=self.adapter_rank,
                 expert_ablation=self.expert_ablation,
                 halting=self.halting,
@@ -852,6 +878,8 @@ class RoutedStrategy:
         milestone = max(1, self.train_steps // 4)
         steps_run = 0
         for step in range(self.train_steps):
+            if runtime.should_stop():
+                break
             optimizer.zero_grad()
             loss = support_loss(view, spec.encoded) + self.load_balance_weight * view.net.last_aux_loss
             if not torch.isfinite(loss):
@@ -910,6 +938,7 @@ class RoutedStrategy:
             return self._result(task, service, view, metrics, metric, zero_shot=zero_shot, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
         pathway = self._dominant_pathway(view)
+        self._last_distill_resource_metrics = {}
         assessed = self._verify_distilled(pathway, spec, runtime) if pathway else None
         distilled_metric = runtime.metric_of(assessed) if assessed is not None else 0.0
         if assessed is not None and runtime.accepted(assessed):
@@ -917,6 +946,7 @@ class RoutedStrategy:
             task_embed = view.net.task_embedding(view.support_input, view.input_key, view.head_key)
             service.note_pending_embedding(fingerprint, task_embed)
             stamped = dict(assessed.metrics)
+            stamped.update(self._last_distill_resource_metrics)
             stamped["routed_metric"] = float(metric)
             stamped["routed_zero_shot_metric"] = float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0))
             stamped["routed_steps_used"] = float(steps_used)
@@ -933,6 +963,7 @@ class RoutedStrategy:
                 champion_comp=assessed,
                 champion_metrics=stamped,
                 size_metrics=comp_size_metrics(assessed.comp),
+                resource_metrics=dict(self._last_distill_resource_metrics),
             )
 
         # Adapter bypass or a pathway below the solve bar: what the system can KEEP is the metric
@@ -940,6 +971,7 @@ class RoutedStrategy:
         # retain that real below-bar composition for loser ranking and the wall ledger; never expose
         # the router adapter's winning support metrics as if they belonged to the distilled payload.
         stamped = dict(assessed.metrics) if assessed is not None else {}
+        stamped.update(self._last_distill_resource_metrics)
         stamped["routed_undistillable"] = 1.0
         stamped["routed_metric"] = float(metric)
         stamped["routed_distilled_metric"] = float(distilled_metric)
@@ -956,6 +988,7 @@ class RoutedStrategy:
             champion_comp=assessed,
             champion_metrics=stamped,
             size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
+            resource_metrics=dict(self._last_distill_resource_metrics),
         )
 
     def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
@@ -1001,19 +1034,37 @@ class RoutedStrategy:
                 layer_widths.append(out_width)
             previous_widths = layer_widths
         glue_values += sum(glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for width in previous_widths)
-        limit = loop.max_initial_glue_values
-        if limit > 0 and glue_values > limit:
+        estimate = loop.assess_glue_resources(
+            glue_values,
+            stage="routed_distillation",
+            population_multiplicity=1,
+            concurrent_trainers=1,
+            device="cpu",
+        )
+        self._last_distill_resource_metrics = estimate.metrics("routed_distill_resource")
+        if not estimate.accepted:
             logger.warning(
-                "routed distillation declined before allocation: candidate needs %s glue values (limit %s)",
+                "routed distillation declined before allocation: candidate needs %s glue values (%s host, %s device; limit %s)",
                 f"{glue_values:,}",
-                f"{limit:,}",
+                format_bytes(estimate.host_required_bytes),
+                format_bytes(estimate.device_required_bytes),
+                f"{estimate.limit_values:,}",
             )
+            self._last_distill_resource_metrics["routed_resource_declined"] = 1.0
             return None
 
         tracker = runtime.state.comp_innovations
         rng = runtime.state.rng
         comp = minimal_composition(
-            spec.input_specs, spec.output_ref, spec.output_width, tracker, rng, glue_scale=loop.glue_scale, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold
+            spec.input_specs,
+            spec.output_ref,
+            spec.output_width,
+            tracker,
+            rng,
+            glue_scale=loop.glue_scale,
+            glue_rank=loop.glue_rank,
+            glue_rank_threshold=loop.glue_rank_threshold,
+            glue_storage=loop.glue_storage,
         )
         previous = [node_id for node_id in comp.input_ids if comp.nodes[node_id].ref != BIAS_REF]
         output_id = comp.output_ids[0]
@@ -1025,14 +1076,26 @@ class RoutedStrategy:
                 comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
                 for source in previous:
                     glue, rank = _glue_for(
-                        comp.nodes[source].out_width, in_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+                        comp.nodes[source].out_width,
+                        in_width,
+                        rng,
+                        glue_rank=loop.glue_rank,
+                        glue_rank_threshold=loop.glue_rank_threshold,
+                        glue_scale=loop.glue_scale,
+                        glue_storage=loop.glue_storage,
                     )
                     comp.edges.append(CompEdgeGene(source, node_id, True, tracker.innovation(source, node_id), glue, rank))
                 layer.append(node_id)
             previous = layer
         for source in previous:
             glue, rank = _glue_for(
-                comp.nodes[source].out_width, spec.output_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+                comp.nodes[source].out_width,
+                spec.output_width,
+                rng,
+                glue_rank=loop.glue_rank,
+                glue_rank_threshold=loop.glue_rank_threshold,
+                glue_scale=loop.glue_scale,
+                glue_storage=loop.glue_storage,
             )
             comp.edges.append(CompEdgeGene(source, output_id, True, tracker.innovation(source, output_id), glue, rank))
         assessed = loop.assess_composition(comp, spec, runtime.state, train=True)
@@ -1087,6 +1150,7 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         d_model=int(table.get("d_model", 64)),
         top_k=int(table.get("top_k", 2)),
         max_steps=int(table.get("max_steps", 4)),
+        max_inline_depth=configured_max_inline_depth(config),
         train_steps=int(table.get("train_steps", 200)),
         lr=float(table.get("lr", 0.003)),
         weight_decay=float(table.get("weight_decay", 0.0001)),

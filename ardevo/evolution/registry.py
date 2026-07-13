@@ -59,6 +59,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     # while still triggering their @register side effects.
     from ardevo.evolution import crossover, evaluate, fitness, init, mutation, selection, speciation, train
     from ardevo.evolution.evolver import Evolver
+    from ardevo.reference_depth import configured_max_inline_depth
 
     evolution = config.get("evolution", {})
     substrate = config.get("substrate", {})
@@ -128,6 +129,10 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
             supported_modes=(SERIAL_MODE, *POPULATION_MODES),
         )
     use_population = configured_batched if configured_batched is not None else selected_mode != "serial"
+    if population_supported and configured_batched is True:
+        # An explicit batching request is authoritative; the calibration file only selects the
+        # mode when `batched` is absent. This also keeps execution provenance truthful.
+        selected_mode = population_mode(default_device)
 
     if population_supported and use_population:
         from ardevo.utils.device import POPULATION_MODES, device_for_population_mode, resolve_compute_device
@@ -195,6 +200,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         elitism=int(evolution.get("elitism", 1)),
         assess_workers=resolve_worker_count(evolution.get("assess_workers", 0)),
         library_dir=str(config.get("library_dir", "library")),
+        max_inline_depth=configured_max_inline_depth(config),
         seed=int(config.get("seed", 0)),
         init_op=init_op,
         selection_op=selection_op,

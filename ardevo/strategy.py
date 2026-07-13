@@ -23,13 +23,15 @@ from typing import Any, Callable
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output_features, support_loader
 from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
 from ardevo.evolution.composition import CompositionGenome, glue_value_count
-from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter
+from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter, get_shared_pool
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
 from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, structural_fingerprint
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import format_bytes
 
 logger = Logger.get_logger()
 
@@ -48,9 +50,13 @@ class StrategyRuntime:
     stall_factory: Callable[[int], Callable[[int, Any], bool]]
     on_generation: Callable[[str, int, Any, float], None] | None = None  # (strategy, gen, best, mean)
     accepts: Callable[[Any], bool] | None = None
+    deadline_exceeded: Callable[[], bool] | None = None
 
     def accepted(self, item: Any) -> bool:
         return self.accepts(item) if self.accepts is not None else self.metric_of(item) >= self.accept_threshold
+
+    def should_stop(self) -> bool:
+        return self.deadline_exceeded is not None and self.deadline_exceeded()
 
 
 @dataclass
@@ -75,6 +81,8 @@ class StrategyResult:
     # so growth must be visible in run_summary rows, not only through `seconds` (the diag_g2
     # free-growth arm hit hour-scale tasks with zero size signal in any record).
     size_metrics: dict[str, float] = field(default_factory=dict)
+    # Pre-allocation estimates are operational evidence, kept separate from task/quality metrics.
+    resource_metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def has_admissible_champion(self) -> bool:
@@ -176,18 +184,33 @@ class CompositionStrategy:
         seed_comps: list | None = None,
     ) -> StrategyResult:
         initial_glue_values = self._initial_glue_values(spec, runtime, seed_comps)
-        limit = runtime.loop.max_initial_glue_values
-        if limit > 0 and initial_glue_values > limit:
+        loop = runtime.loop
+        pool = get_shared_pool()
+        concurrent_trainers = int(getattr(pool, "_processes", 0) or loop.evolver.assess_workers or 1)
+        estimate = loop.assess_glue_resources(
+            initial_glue_values,
+            stage="composition_population",
+            population_multiplicity=loop.comp_pop_size,
+            concurrent_trainers=min(loop.comp_pop_size, max(1, concurrent_trainers)),
+            device="cpu",
+        )
+        if not estimate.accepted:
             logger.warning(
-                "composition declined before allocation: initial candidate needs %s glue values (limit %s)",
+                "composition declined before allocation: initial candidate needs %s glue values (%s host, %s device at stage multiplicity; limit %s)",
                 f"{initial_glue_values:,}",
-                f"{limit:,}",
+                format_bytes(estimate.host_required_bytes),
+                format_bytes(estimate.device_required_bytes),
+                f"{estimate.limit_values:,}",
             )
             return StrategyResult(
                 strategy=self.name,
                 metric=0.0,
                 generations_used=0,
-                champion_metrics={"declined_composition_glue_values": float(initial_glue_values)},
+                champion_metrics={
+                    "declined_composition_glue_values": float(initial_glue_values),
+                    **estimate.metrics("composition_resource"),
+                },
+                resource_metrics=estimate.metrics("composition_resource"),
             )
         progress = {"generations": 0}
 
@@ -205,6 +228,7 @@ class CompositionStrategy:
             champion_comp=verified,
             champion_metrics=dict(verified.metrics),
             size_metrics=comp_size_metrics(verified.comp),
+            resource_metrics=estimate.metrics("composition_resource"),
         )
 
     def _verify(self, best: AssessedComposition, spec: CompTaskSpec, runtime: StrategyRuntime) -> AssessedComposition:
@@ -240,10 +264,15 @@ def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
         if overridable in table:
             evolution[overridable] = table[overridable]
     overlay["evolution"] = evolution
+    max_flat_outputs = table.get("max_flat_outputs", 0)
+    max_init_genes = table.get("max_init_genes", 0)
+    for name, value in (("max_flat_outputs", max_flat_outputs), ("max_init_genes", max_init_genes)):
+        if value != "adaptive" and int(value) < 0:
+            raise ValueError(f"[orchestrator.direct] {name} must be non-negative or 'adaptive'")
     return DirectStrategy(
         evolver=build_evolver(overlay),
-        max_flat_outputs=int(table.get("max_flat_outputs", 0)),
-        max_init_genes=int(table.get("max_init_genes", 0)),
+        max_flat_outputs=max_flat_outputs if max_flat_outputs == "adaptive" else int(max_flat_outputs),
+        max_init_genes=max_init_genes if max_init_genes == "adaptive" else int(max_init_genes),
         structured_grid=bool(table.get("structured_grid", False)),
         blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)),
     )
@@ -262,14 +291,14 @@ class DirectStrategy:
     # every output node, so a wide-output task (rungs 12-14, 18 class) would allocate GBs per
     # genome before its first forward. Declining lets the ladder escalate to composition (whose
     # glue is already rank-factored above glue_rank_threshold) and to the decomposers.
-    max_flat_outputs: int = 0
+    max_flat_outputs: int | str = 0
     # Decline tasks whose dense-init gene count (flat_inputs + 1) * flat_outputs exceeds this
     # ([orchestrator.direct] max_init_genes; 0 = off): the input-side twin of max_flat_outputs.
     # The per-task deadline only fires between ladder positions and between generations, so an
     # oversize minimal init plus its first generation (Python object churn, ~0.8 GB genome pickles
     # to the assess pool) runs for HOURS before any check exists; a 409,600 x 8 task wedged two
     # runs on 2026-07-06 exactly this way. The attempt must be refused from arithmetic alone.
-    max_init_genes: int = 0
+    max_init_genes: int | str = 0
     # Structured grids retain dense cell loss for training while reporting predicted output shape,
     # exact-example accuracy, and trivial baselines. Off keeps the historical flat adapter.
     structured_grid: bool = False
@@ -278,9 +307,10 @@ class DirectStrategy:
     blind_query: bool = False
 
     def _adapter(self, task: Task, *, include_query: bool = True) -> TaskAdapter | TemporalTaskAdapter:
+        max_inline_depth = int(getattr(self.evolver, "max_inline_depth", DEFAULT_MAX_INLINE_DEPTH))
         support_input, _support_output = support_loader(task)
         if has_time_axis(support_input.descriptor):
-            adapter = temporal_adapter(task)  # recurrence goes LIVE: decode_recurrent + BPTT
+            adapter = temporal_adapter(task, max_inline_depth=max_inline_depth)  # recurrence goes LIVE: decode_recurrent + BPTT
             if not include_query:
                 adapter.encoded = without_query(adapter.encoded)
             return adapter
@@ -299,7 +329,14 @@ class DirectStrategy:
                 encoded = without_query(encoded)
         elif not include_query:
             encoded = encoded.without_query()
-        return TaskAdapter(encoded, encoder, input_width(encoded), output_features(encoded), grid_shape=self._grid_shape(task))
+        return TaskAdapter(
+            encoded,
+            encoder,
+            input_width(encoded),
+            output_features(encoded),
+            grid_shape=self._grid_shape(task),
+            max_inline_depth=max_inline_depth,
+        )
 
     @staticmethod
     def _grid_shape(task: Task) -> tuple[int, ...] | None:
@@ -318,20 +355,47 @@ class DirectStrategy:
         seed_entries: list[LibraryEntry] | None = None,
         seed_genomes: list[Genome] | None = None,
     ) -> StrategyResult:
-        if self.max_flat_outputs > 0 or self.max_init_genes > 0:
+        resource_metrics: dict[str, float] = {}
+        if self.max_flat_outputs == "adaptive" or self.max_init_genes == "adaptive" or int(self.max_flat_outputs) > 0 or int(self.max_init_genes) > 0:
             support_input, support_output = support_loader(task)
             flat_positions = 1
             for dim in support_output.data.shape[1:]:
                 flat_positions *= int(dim)
             flat_outputs = model_output_features(support_output.descriptor, flat_positions)
-            if 0 < self.max_flat_outputs < flat_outputs:
+            if self.max_flat_outputs != "adaptive" and 0 < int(self.max_flat_outputs) < flat_outputs:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
             flat_inputs = 1
             for dim in support_input.data.shape[1:]:
                 flat_inputs *= int(dim)
             init_genes = (flat_inputs + 1) * flat_outputs
-            if 0 < self.max_init_genes < init_genes:
+            if self.max_init_genes != "adaptive" and 0 < int(self.max_init_genes) < init_genes:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
+            if self.max_init_genes == "adaptive" or self.max_flat_outputs == "adaptive":
+                population_execution = str(getattr(self.evolver, "execution_mode", "serial")).startswith("population_")
+                estimate = runtime.loop.assess_glue_resources(
+                    init_genes,
+                    stage="direct_population",
+                    storage="tuple",
+                    population_multiplicity=self.evolver.pop_size,
+                    concurrent_trainers=self.evolver.pop_size if population_execution else max(1, self.evolver.assess_workers),
+                    fixed_limit=0,
+                )
+                if not estimate.accepted:
+                    logger.warning(
+                        "direct evolution declined before allocation: dense init needs %s genes (%s host, %s device; adaptive limit %s)",
+                        f"{init_genes:,}",
+                        format_bytes(estimate.host_required_bytes),
+                        format_bytes(estimate.device_required_bytes),
+                        f"{estimate.limit_values:,}",
+                    )
+                    return StrategyResult(
+                        strategy=self.name,
+                        metric=0.0,
+                        generations_used=0,
+                        champion_metrics={"declined_init_genes": float(init_genes), **estimate.metrics("direct_resource")},
+                        resource_metrics=estimate.metrics("direct_resource"),
+                    )
+                resource_metrics = estimate.metrics("direct_resource")
         adapter = self._adapter(task, include_query=not self.blind_query)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
@@ -411,6 +475,7 @@ class DirectStrategy:
             report_metrics=dict(reported.metrics) if reported is not None else {},
             seed_metric=seed_metric,
             size_metrics=_module_size_metrics(verified.genome, state.population),
+            resource_metrics=resource_metrics,
         )
 
 

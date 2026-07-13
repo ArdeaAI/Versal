@@ -28,6 +28,7 @@ from ardevo.evolution.composition import CompNodeKind, CompositionGenome, comp_f
 from ardevo.evolution.genome import Genome, NodeKind, genome_from_dict, macro_implied_edges, make_acyclic, topological_order
 from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
 from ardevo.motifs import FORWARD_EDGE, MACRO_EDGE, RECURRENT_EDGE, MotifRecord, NodeLabel
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 
 # --- async rendering ------------------------------------------------------------------------------
 # Every RUNTIME render site (admission net portraits, speciation plots, the overmind portrait)
@@ -96,7 +97,9 @@ THEME: dict[str, Any] = {
     "cmap_range": (0.25, 1.0),  # truncate the dark low end so layer-0 hidden nodes pop on the dark bg
 }
 
-RENDER_MAX_DEPTH = 4  # matches substrate._MAX_MACRO_DEPTH: deeper refs exist only pathologically
+# Compatibility export for callers/tests that named the former renderer-only constant. Runtime
+# render entry points now receive the authoritative composition reference-depth policy explicitly.
+RENDER_MAX_DEPTH = DEFAULT_MAX_INLINE_DEPTH
 DEFAULT_NODE_BUDGET = 1500
 GALLERY_NODE_BUDGET = 400
 
@@ -359,29 +362,75 @@ def _attach_callouts(
     return available, row_base - _V_GAP, centers
 
 
-def _build_ref(ref: str, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
+def _build_entry(
+    entry: LibraryEntry,
+    *,
+    resolve: ResolveFn | None,
+    budget: _Budget,
+    depth: int,
+    reference_depth: int,
+    stack: tuple[str, ...],
+    max_inline_depth: int,
+) -> _Built:
+    label = f"{entry.key}  L{entry.level}"
+    if len(entry.payload["nodes"]) > budget.remaining:
+        return _opaque_built(label)
+    if entry.entry_type == MODULE:
+        built = _build_genome(
+            genome_from_dict(entry.payload),
+            resolve=resolve,
+            budget=budget,
+            depth=depth,
+            reference_depth=reference_depth,
+            stack=stack,
+            max_inline_depth=max_inline_depth,
+        )
+    elif entry.entry_type == COMPOSITION:
+        built = _build_comp(
+            comp_from_dict(entry.payload),
+            resolve=resolve,
+            budget=budget,
+            depth=depth,
+            reference_depth=reference_depth,
+            stack=stack,
+            max_inline_depth=max_inline_depth,
+        )
+    else:
+        return _opaque_built(f"{label}  ?")
+    built.label = label
+    return built
+
+
+def _build_ref(
+    ref: str,
+    *,
+    resolve: ResolveFn | None,
+    budget: _Budget,
+    depth: int,
+    reference_depth: int,
+    stack: tuple[str, ...],
+    max_inline_depth: int,
+) -> _Built:
     if not ref.startswith("library:"):
         return _opaque_built(ref)  # live refs only exist mid-run; renders happen on admitted entries
     key = ref.removeprefix("library:")
-    if key in stack or depth >= RENDER_MAX_DEPTH or resolve is None:
+    if key in stack or reference_depth >= max_inline_depth or resolve is None:
         return _opaque_built(key)
     entry = resolve(key)
     if entry is None:
         return _opaque_built(key)
-    label = f"{entry.key}  L{entry.level}"
     try:
-        if len(entry.payload["nodes"]) > budget.remaining:
-            return _opaque_built(label)
-        if entry.entry_type == MODULE:
-            built = _build_genome(genome_from_dict(entry.payload), resolve=resolve, budget=budget, depth=depth + 1, stack=stack + (key,))
-        elif entry.entry_type == COMPOSITION:
-            built = _build_comp(comp_from_dict(entry.payload), resolve=resolve, budget=budget, depth=depth + 1, stack=stack + (key,))
-        else:
-            return _opaque_built(f"{label}  ?")
+        return _build_entry(
+            entry,
+            resolve=resolve,
+            budget=budget,
+            depth=depth + 1,
+            reference_depth=reference_depth + 1,
+            stack=(*stack, key),
+            max_inline_depth=max_inline_depth,
+        )
     except Exception:
-        return _opaque_built(f"{label}  ?")
-    built.label = label
-    return built
+        return _opaque_built(f"{entry.key}  L{entry.level}  ?")
 
 
 def _edge_width(strength: float) -> float:
@@ -400,7 +449,16 @@ def _layer_color(layer: int, max_layer: int) -> str:
     return str(mcolors.to_hex(plt.get_cmap(THEME["cmap"])(t)))
 
 
-def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
+def _build_genome(
+    genome: Genome,
+    *,
+    resolve: ResolveFn | None,
+    budget: _Budget,
+    depth: int,
+    reference_depth: int,
+    stack: tuple[str, ...],
+    max_inline_depth: int,
+) -> _Built:
     spec = RenderSpec()
     if not genome.nodes:
         return _Built(spec=spec)
@@ -480,14 +538,31 @@ def _build_genome(genome: Genome, *, resolve: ResolveFn | None, budget: _Budget,
 
     callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
     for macro in genome.macros:
-        child = _build_ref(macro.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
+        child = _build_ref(
+            macro.ref,
+            resolve=resolve,
+            budget=budget,
+            depth=depth,
+            reference_depth=reference_depth,
+            stack=stack,
+            max_inline_depth=max_inline_depth,
+        )
         anchors = [positions[stub_id] for stub_id in macro.output_node_ids if stub_id in positions]
         callouts.append((child, anchors))
     spec.width, spec.height, _centers = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
     return _Built(spec=spec, output_nodes=output_nodes)
 
 
-def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _Budget, depth: int, stack: tuple[str, ...]) -> _Built:
+def _build_comp(
+    comp: CompositionGenome,
+    *,
+    resolve: ResolveFn | None,
+    budget: _Budget,
+    depth: int,
+    reference_depth: int,
+    stack: tuple[str, ...],
+    max_inline_depth: int,
+) -> _Built:
     spec = RenderSpec()
     if not comp.nodes:
         return _Built(spec=spec)
@@ -540,7 +615,15 @@ def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _
     callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
     for node in comp.nodes.values():
         if node.kind is CompNodeKind.MODULE:
-            child = _build_ref(node.ref, resolve=resolve, budget=budget, depth=depth, stack=stack)
+            child = _build_ref(
+                node.ref,
+                resolve=resolve,
+                budget=budget,
+                depth=depth,
+                reference_depth=reference_depth,
+                stack=stack,
+                max_inline_depth=max_inline_depth,
+            )
             callouts.append((child, [positions[node.id]]))
     spec.width, spec.height, _centers = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
     return _Built(spec=spec, output_nodes=output_nodes)
@@ -549,20 +632,59 @@ def _build_comp(comp: CompositionGenome, *, resolve: ResolveFn | None, budget: _
 # --- public builders -------------------------------------------------------------------------------
 
 
-def build_genome_spec(genome: Genome, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> RenderSpec:
-    return _build_genome(genome, resolve=resolve, budget=_Budget(node_budget), depth=0, stack=()).spec
+def build_genome_spec(
+    genome: Genome,
+    *,
+    resolve: ResolveFn | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> RenderSpec:
+    return _build_genome(
+        genome,
+        resolve=resolve,
+        budget=_Budget(node_budget),
+        depth=0,
+        reference_depth=0,
+        stack=(),
+        max_inline_depth=max_inline_depth,
+    ).spec
 
 
-def build_composition_spec(comp: CompositionGenome, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> RenderSpec:
-    return _build_comp(comp, resolve=resolve, budget=_Budget(node_budget), depth=0, stack=()).spec
+def build_composition_spec(
+    comp: CompositionGenome,
+    *,
+    resolve: ResolveFn | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> RenderSpec:
+    return _build_comp(
+        comp,
+        resolve=resolve,
+        budget=_Budget(node_budget),
+        depth=0,
+        reference_depth=0,
+        stack=(),
+        max_inline_depth=max_inline_depth,
+    ).spec
 
 
-def build_entry_spec(entry: LibraryEntry, *, resolve: ResolveFn | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> RenderSpec:
+def build_entry_spec(
+    entry: LibraryEntry,
+    *,
+    resolve: ResolveFn | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> RenderSpec:
     try:
-        if entry.entry_type == MODULE:
-            return build_genome_spec(genome_from_dict(entry.payload), resolve=resolve, node_budget=node_budget)
-        if entry.entry_type == COMPOSITION:
-            return build_composition_spec(comp_from_dict(entry.payload), resolve=resolve, node_budget=node_budget)
+        return _build_entry(
+            entry,
+            resolve=resolve,
+            budget=_Budget(node_budget),
+            depth=0,
+            reference_depth=0,
+            stack=(entry.key,),
+            max_inline_depth=max_inline_depth,
+        ).spec
     except Exception:
         pass
     built = _opaque_built(f"{entry.key}  ?")
@@ -690,21 +812,42 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int =
     return out_path
 
 
-def render_network(directory: Path, genome: Genome, *, title: str, library: ModuleLibrary | None = None) -> Path:
+def render_network(
+    directory: Path,
+    genome: Genome,
+    *,
+    title: str,
+    library: ModuleLibrary | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     """Render a flat genome (macros expand into callouts when a library is supplied) to `net.png`."""
     resolve = library_resolver(library) if library is not None else None
-    return _render_spec_png(directory / "net.png", build_genome_spec(genome, resolve=resolve), title)
+    return _render_spec_png(directory / "net.png", build_genome_spec(genome, resolve=resolve, max_inline_depth=max_inline_depth), title)
 
 
-def render_composition_network(directory: Path, comp: CompositionGenome, *, title: str, library: ModuleLibrary | None = None) -> Path:
+def render_composition_network(
+    directory: Path,
+    comp: CompositionGenome,
+    *,
+    title: str,
+    library: ModuleLibrary | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     """Render a composition (module refs expand into callouts when a library is supplied) to `net.png`."""
     resolve = library_resolver(library) if library is not None else None
-    return _render_spec_png(directory / "net.png", build_composition_spec(comp, resolve=resolve), title)
+    return _render_spec_png(directory / "net.png", build_composition_spec(comp, resolve=resolve, max_inline_depth=max_inline_depth), title)
 
 
-def render_entry(out_path: Path, entry: LibraryEntry, *, library: ModuleLibrary | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> Path:
+def render_entry(
+    out_path: Path,
+    entry: LibraryEntry,
+    *,
+    library: ModuleLibrary | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     resolve = library_resolver(library) if library is not None else None
-    spec = build_entry_spec(entry, resolve=resolve, node_budget=node_budget)
+    spec = build_entry_spec(entry, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
     return _render_spec_png(out_path, spec, f"{entry.key}  L{entry.level} {entry.entry_type}")
 
 
@@ -717,7 +860,15 @@ def _cell_title(summary: dict[str, Any]) -> str:
     return f"{label}  retired" if summary.get("retired", False) else label
 
 
-def render_library_gallery(library: ModuleLibrary, out_path: Path, *, columns: int = 4, include_retired: bool = False, include_dependencies: bool = True) -> Path:
+def render_library_gallery(
+    library: ModuleLibrary,
+    out_path: Path,
+    *,
+    columns: int = 4,
+    include_retired: bool = False,
+    include_dependencies: bool = True,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     """One contact-sheet PNG of every (selected) library entry, drawn through the same spec/draw
     pipeline as the single renders. One bad entry must never kill the sheet."""
     import matplotlib
@@ -744,7 +895,7 @@ def render_library_gallery(library: ModuleLibrary, out_path: Path, *, columns: i
         flat_axes = [axis for row_axes in axes for axis in row_axes]
         for axis, summary in zip(flat_axes, rows):
             try:
-                spec = build_entry_spec(library.load(summary["key"]), resolve=resolve, node_budget=GALLERY_NODE_BUDGET)
+                spec = build_entry_spec(library.load(summary["key"]), resolve=resolve, node_budget=GALLERY_NODE_BUDGET, max_inline_depth=max_inline_depth)
                 draw_spec(axis, spec)
             except Exception:
                 axis.set_facecolor(THEME["background"])
@@ -908,7 +1059,7 @@ _BAND_GAP = 4  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
 _LEGEND_ROW_STEP = 1.8
 _LEGEND_WIDTH = 24.0
-_OVERMIND_COLUMNS = 16
+_OVERMIND_COLUMNS = 8
 _OVERMIND_DPI = 300
 _OVERMIND_X_PADDING = 2 * _PAD
 
@@ -963,6 +1114,7 @@ def build_overmind_spec(
     cell_node_budget: int = 160,
     columns: int = _OVERMIND_COLUMNS,
     legend: bool = True,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
     """The whole routed model as a top-down flow portrait: input adapters band across the TOP, every
     expert a fully-embedded cell in a `columns`-wide grid (row order = observed firing order, so an
@@ -989,7 +1141,25 @@ def build_overmind_spec(
         if vertex.key:
             allowance = min(cell_node_budget, budget.remaining)
             cell_budget = _Budget(allowance)
-            child = _build_ref(f"library:{vertex.key}", resolve=resolve, budget=cell_budget, depth=0, stack=())
+            entry = resolve(vertex.key) if resolve is not None else None
+            try:
+                # An overmind cell is a root payload, just like render_entry: selecting it for the
+                # grid does not consume a reference level. Seed its key only for cycle detection.
+                child = (
+                    _build_entry(
+                        entry,
+                        resolve=resolve,
+                        budget=cell_budget,
+                        depth=1,
+                        reference_depth=0,
+                        stack=(vertex.key,),
+                        max_inline_depth=max_inline_depth,
+                    )
+                    if entry is not None
+                    else _opaque_built(vertex.key)
+                )
+            except Exception:
+                child = _opaque_built(f"{vertex.key}  ?")
             budget.remaining -= allowance - cell_budget.remaining
         else:
             child = _opaque_built(vertex.label)
@@ -1084,11 +1254,18 @@ def build_overmind_spec(
     return spec
 
 
-def render_overmind(out_path: Path, view: OvermindView, *, library: ModuleLibrary | None = None, node_budget: int = DEFAULT_NODE_BUDGET) -> Path:
+def render_overmind(
+    out_path: Path,
+    view: OvermindView,
+    *,
+    library: ModuleLibrary | None = None,
+    node_budget: int = DEFAULT_NODE_BUDGET,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> Path:
     """Render the entire routed model (every expert embedded, wired to the shared bus) to one PNG.
     Intended for `<library_dir>/images/overmind.png`, refreshed whenever the model grows."""
     resolve = library_resolver(library) if library is not None else None
-    spec = build_overmind_spec(view, resolve=resolve, node_budget=node_budget)
+    spec = build_overmind_spec(view, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
     live = sum(1 for vertex in view.vertices if not vertex.retired)
     title = f"overmind: {live} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
     return _render_spec_png(out_path, spec, title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)

@@ -232,3 +232,15 @@ def test_decompose_first_off_registers_nothing(tmp_path: Path, decomposable_task
     from ardevo.orchestrator import comp_task_spec
 
     assert orchestrator._wants_decompose_first(decomposable_task, comp_task_spec(decomposable_task)) is False
+
+
+def test_adaptive_decompose_first_uses_hardware_envelope(tmp_path: Path, decomposable_task: Task) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"decompose_first_above": "adaptive"},
+        config_extra={"resources": {"mode": "adaptive", "host_reserve_gb": 1_000_000, "device_reserve_gb": 1_000_000}},
+    )
+    from ardevo.orchestrator import comp_task_spec
+
+    assert orchestrator._wants_decompose_first(decomposable_task, comp_task_spec(decomposable_task)) is True
+    assert "resource_declines" in orchestrator.counters

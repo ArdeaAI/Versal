@@ -1,0 +1,5 @@
+# P1: replace rung-interleaved curriculum ordering with ordinary round-robin sampling.
+extends = "base.toml"
+
+[schedule]
+kind = "round_robin"

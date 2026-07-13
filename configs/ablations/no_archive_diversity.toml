@@ -1,0 +1,16 @@
+# P1: remove both the QD library archive and behavioral novelty objective/archive.
+extends = "base.toml"
+
+[library]
+admission = "default"
+
+[evolution.selection]
+kind = "tournament"
+tournament_size = 3
+
+[evolution.novelty]
+enabled = false
+archive_cap = 0
+
+[fitness]
+objectives = ["support_accuracy"]

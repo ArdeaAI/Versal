@@ -1,0 +1,6 @@
+# P0: disable both ordinary and decompose-first recursion.
+extends = "base.toml"
+
+[orchestrator]
+decompose = []
+decompose_first_above = 0

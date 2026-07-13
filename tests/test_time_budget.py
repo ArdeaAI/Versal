@@ -75,6 +75,36 @@ def test_expired_deadline_stops_ladder_after_first_strategy(tmp_path: Path, xor_
     assert orchestrator.counters["time_budget_hits"] == 1
 
 
+def test_expired_total_budget_is_recorded_without_starting_new_work(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    table = {"max_total_task_seconds": 3600, "max_depth": 0, "evolve": ["tb_first", "tb_second"], "decompose": []}
+    orchestrator = _orchestrator(tmp_path, table=table)
+    monkeypatch.setattr(type(orchestrator), "_total_deadline_exceeded", lambda _self: True)
+    _CALLS.clear()
+    assert orchestrator.solve(xor_task) is None
+    assert _CALLS == []
+    assert orchestrator.attempts[-1].strategy == "time_budget"
+    assert orchestrator.counters["time_budget_hits"] == 1
+    assert orchestrator.counters["total_time_budget_hits"] == 1
+
+
+def test_recursive_solve_inherits_earlier_total_deadline(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"max_task_seconds": 3600, "max_total_task_seconds": 3600})
+    total_deadline = time.perf_counter() + 30
+    orchestrator._total_task_deadline = total_deadline
+    observed: list[float | None] = []
+
+    def observe_deadline(_task: Task, depth: int = 0):
+        observed.append(orchestrator._solve_deadline)
+        return None
+
+    setattr(orchestrator, "_solve_timed", observe_deadline)
+
+    orchestrator.solve(xor_task, depth=1)
+
+    assert observed == [total_deadline]
+    assert orchestrator._total_task_deadline == total_deadline
+
+
 def test_deadline_stop_wrapper_defers_to_the_detector_until_the_deadline(tmp_path: Path) -> None:
     orchestrator = _orchestrator(tmp_path, table={"max_task_seconds": 3600})
     improving = [types.SimpleNamespace(fitness=float(step), metrics={"query_accuracy": 0.5, "query_loss": 0.1}) for step in range(4)]

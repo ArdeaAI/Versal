@@ -376,12 +376,15 @@ class ModuleLibrary:
         self._entry_cache[key] = entry
         return entry
 
-    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
-        """Depth of the macro-reference chain under `key`: 0 = no macros, 1 + deepest target
-        otherwise. This is what the decode cap (`substrate._MAX_MACRO_DEPTH`) actually limits, so
-        macro-adding mutations consult it to never manufacture a genome that cannot decode (the
-        wall-ledger lesson: repeated seed-then-embed cycles deepen the chain one level per attempt).
-        A missing or cyclic ref reads as unboundedly deep: never a safe macro target."""
+    def reference_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Deepest persistent-reference path below ``key``.
+
+        A leaf has depth 0; otherwise the result is one plus the deepest referenced entry. The
+        root entry itself is not counted, matching ``max_inline_depth`` decode/assembly semantics.
+        Both composition module refs and genome macro refs participate through ``payload_refs``.
+        Missing and cyclic references return a deliberately unbounded sentinel so construction
+        filters never select them.
+        """
         cached = self._macro_depth_cache.get(key)
         if cached is not None:
             return cached
@@ -392,9 +395,13 @@ class ModuleLibrary:
         except KeyError:
             return 999
         refs = payload_refs(entry.entry_type, entry.payload)
-        depth = 0 if not refs else 1 + max(self.macro_subtree_depth(ref, _visiting | {key}) for ref in refs)
+        depth = 0 if not refs else 1 + max(self.reference_subtree_depth(ref, _visiting | {key}) for ref in refs)
         self._macro_depth_cache[key] = depth
         return depth
+
+    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Compatibility name for the now type-agnostic reference-depth query."""
+        return self.reference_subtree_depth(key, _visiting)
 
     def collect_garbage(self, *, protect: Iterable[str] = (), dry_run: bool = False) -> list[str]:
         """Physically delete retired entries nothing retained still references. Mark-and-sweep:

@@ -7,6 +7,7 @@ readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "boto3",
     "clearml>=1.16",
     "datasets>=5.0.0",
     "matplotlib>=3.9",
@@ -24,6 +25,8 @@ library_gc = "ardevo.tools.library_gc:main"
 motif_census = "ardevo.tools.motif_census:main"
 cppn_spike = "ardevo.tools.cppn_spike:main"
 run_matrix = "ardevo.tools.run_matrix:main"
+ablation_suite = "ardevo.tools.ablation_suite:main"
+experiment_archive = "ardevo.tools.experiment_archive:main"
 runtime_inventory = "ardevo.tools.runtime_inventory:main"
 
 [build-system]

@@ -1,0 +1,28 @@
+version = 1
+
+[suite]
+name = "full_cluster_campaign"
+description = "Three independent cold-library flagship runs over all 18 rungs."
+baseline = "full"
+results_root = "results/full_cluster"
+
+[seeds]
+p0 = [0, 1, 2]
+p1 = [0, 1, 2]
+
+[slurm]
+job_name = "ardevo-full"
+time = "48:00:00"
+cpus_per_task = 16
+mem = "128G"
+gpus = 1
+max_parallel = 3
+
+[[arms]]
+name = "full"
+priority = "P0"
+config = "../full_cluster.toml"
+seeds = [0, 1, 2]
+lever = "full all-features methodology with cluster-scale budgets"
+claim = "flagship three-seed result"
+measure = "per-rung solve rate, transfer, wall time, library growth, and resource declines"

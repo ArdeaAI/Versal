@@ -23,7 +23,7 @@ def test_default_config_drives_the_orchestrated_trial():
 def test_implicit_resume_uses_effective_run_snapshot(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    source = Config.DEFAULT_CONFIG.read_bytes()
+    source = b'extends = "../configs/missing-after-snapshot.toml"\n'
     (run_dir / "config.toml").write_bytes(source)
     effective = Config().current
     effective["seed"] = 19

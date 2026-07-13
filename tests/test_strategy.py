@@ -59,16 +59,25 @@ def test_composition_declines_oversized_initial_glue_before_run_task(monkeypatch
     spec = _spec(xor_task)
     expected_values = spec.output_width + spec.n_inputs * spec.output_width
     loop.max_initial_glue_values = expected_values - 1
+    assess_resources = loop.assess_glue_resources
+    resource_devices: list[str | None] = []
+
+    def capture_resources(*args, **kwargs):
+        resource_devices.append(kwargs.get("device"))
+        return assess_resources(*args, **kwargs)
 
     def unexpected_run(*_args, **_kwargs):
         raise AssertionError("the allocation guard must run before loop.run_task")
 
+    monkeypatch.setattr(loop, "assess_glue_resources", capture_resources)
     monkeypatch.setattr(loop, "run_task", unexpected_run)
     result = CompositionStrategy()(xor_task, spec, _runtime_for(loop, state, threshold=0.95), budget=10)
 
     assert result.generations_used == 0
     assert result.champion_comp is None
-    assert result.champion_metrics == {"declined_composition_glue_values": float(expected_values)}
+    assert result.champion_metrics["declined_composition_glue_values"] == float(expected_values)
+    assert result.resource_metrics["composition_resource_declined"] == 1.0
+    assert resource_devices == ["cpu"]
 
 
 def test_composition_glue_limit_builds_from_config() -> None:

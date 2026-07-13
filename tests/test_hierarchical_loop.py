@@ -74,8 +74,13 @@ def _spec(task: Task) -> CompTaskSpec:
 def test_build_loop_resolves_kinds() -> None:
     default = build_loop({"evolution": {}, "fitness": {"components": []}})
     assert isinstance(default, HierarchicalLoop) and isinstance(default.evolver, Evolver)
+    assert default.max_inline_depth == default.evolver.max_inline_depth == 4
     hierarchical = build_loop(_config())
     assert isinstance(hierarchical, HierarchicalLoop)
+    configured = _config()
+    configured["evolution"]["composition"]["max_inline_depth"] = 7
+    deep = build_loop(configured)
+    assert deep.max_inline_depth == deep.evolver.max_inline_depth == 7
     for gone in ("flat", "nonsense"):
         with pytest.raises(KeyError):
             build_loop({"evolution": {"loop": gone}})

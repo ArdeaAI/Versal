@@ -42,6 +42,19 @@ def _entry(key: str, payload: dict) -> LibraryEntry:
     return LibraryEntry(key=key, entry_type=MODULE, level=1, io=_IO, payload=payload, weights_frozen=True, provenance={})
 
 
+def _render_chain() -> dict[str, LibraryEntry]:
+    leaf = Genome(
+        nodes={0: NodeGene(0, NodeKind.INPUT, "identity"), 1: NodeGene(1, NodeKind.OUTPUT, "identity")},
+        connections=[ConnectionGene(0, 1, 1.0, True, 0)],
+    )
+    chain: dict[str, LibraryEntry] = {}
+    payload = genome_to_dict(leaf)
+    for index in reversed(range(6)):  # d0 embeds d1 embeds ... embeds d5 (the leaf)
+        chain[f"d{index}"] = _entry(f"d{index}", payload)
+        payload = genome_to_dict(_macro_host(f"d{index}"))
+    return chain
+
+
 # --- spec builders ---------------------------------------------------------------------------------
 
 
@@ -100,15 +113,37 @@ def test_cycle_guard_stops_expansion() -> None:
 
 
 def test_depth_guard_stops_expansion() -> None:
-    leaf = Genome(nodes={0: NodeGene(0, NodeKind.INPUT, "identity"), 1: NodeGene(1, NodeKind.OUTPUT, "identity")}, connections=[ConnectionGene(0, 1, 1.0, True, 0)])
-    chain: dict[str, LibraryEntry] = {}
-    payload = genome_to_dict(leaf)
-    for index in reversed(range(6)):  # d0 embeds d1 embeds ... embeds d5 (the leaf)
-        chain[f"d{index}"] = _entry(f"d{index}", payload)
-        payload = genome_to_dict(_macro_host(f"d{index}"))
+    chain = _render_chain()
+
+    def resolve(key: str) -> LibraryEntry | None:
+        return chain.get(key)
+
     spec = build_genome_spec(_macro_host("d0"), resolve=lambda key: chain.get(key))
     assert any(container.opaque for container in spec.containers)
     assert sum(1 for container in spec.containers if not container.opaque) == RENDER_MAX_DEPTH
+    shallow = build_genome_spec(_macro_host("d0"), resolve=resolve, max_inline_depth=2)
+    assert sum(1 for container in shallow.containers if not container.opaque) == 2
+    deep = build_genome_spec(_macro_host("d0"), resolve=resolve, max_inline_depth=6)
+    assert sum(1 for container in deep.containers if not container.opaque) == 6
+    assert not any(container.opaque for container in deep.containers)
+
+
+def test_overmind_card_root_does_not_consume_reference_depth() -> None:
+    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec
+
+    chain = _render_chain()
+
+    def resolve(key: str) -> LibraryEntry | None:
+        return chain.get(key)
+
+    entry_spec = build_entry_spec(chain["d0"], resolve=resolve, max_inline_depth=5)
+    assert sum(1 for container in entry_spec.containers if not container.opaque) == 5
+    assert not any(container.opaque for container in entry_spec.containers)
+
+    view = OvermindView(vertices=[OvermindVertex(key="d0", label="root")], input_signatures=[], output_signatures=[], d_model=8, top_k=1, max_steps=1)
+    overmind = build_overmind_spec(view, resolve=resolve, legend=False, max_inline_depth=5)
+    assert sum(1 for container in overmind.containers if not container.opaque) == 6  # root card plus five followed refs
+    assert not any(container.opaque for container in overmind.containers)
 
 
 def test_budget_falls_back_opaque(tmp_path: Path, solving_genome: Genome) -> None:

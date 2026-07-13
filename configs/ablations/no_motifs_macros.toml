@@ -1,0 +1,22 @@
+# P1: remove grammar and every mutation operator that creates, embeds, or unties repeated motifs.
+extends = "base.toml"
+
+[orchestrator]
+evolve = ["routed", "direct", "composition"]
+
+[evolution.mutation]
+operators = [
+  "add_rich_node",
+  "add_deep_node",
+  "add_connection",
+  "toggle_connection",
+  "mutate_activation",
+  "mutate_aggregation",
+  "add_recurrent_connection",
+  "tweak_refine_steps",
+  "add_local_node",
+  "add_local_connection",
+  "remove_connection",
+  "remove_hidden_node",
+  "prune_and_regrow",
+]

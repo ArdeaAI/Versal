@@ -1,0 +1,71 @@
+extends = "preflight.toml"
+
+# Flagship profile: the preflight methodology with wider search/resource envelopes.  Run each seed
+# against a cold library; use the campaign/ablation runner for the declared three-seed series.
+[campaign]
+seeds = [0, 1, 2]
+cold_library = true
+
+[run]
+experiment = "orchestrated_overmind_full_cluster"
+machine = "ClusterCUDA"
+
+[schedule]
+tasks_per_rung = 20
+
+[orchestrator]
+tasks = 360
+max_task_seconds = 7200
+max_total_task_seconds = 21600
+max_depth = 4
+decompose_first_above = "adaptive"
+
+  [orchestrator.budgets]
+  depth0 = 2000
+  depth1 = 1000
+  depth2 = 500
+  depth3 = 250
+  depth4 = 125
+
+  [orchestrator.routed]
+  distill_max_nodes = 16
+
+  [orchestrator.direct]
+  max_flat_outputs = "adaptive"
+  max_init_genes = "adaptive"
+
+    [orchestrator.direct.train]
+    # Same scheduled Adam method as preflight, executed as one population tensor program on CUDA.
+    # Small/non-batchable candidates remain on the CPU pool; OOMs split deterministically and then
+    # fall back candidate-by-candidate without dropping work.
+    batched = true
+    min_batch_nodes = 768
+    max_padded_nodes = 8192
+    microbatch_size = 0
+    adaptive_microbatch = true
+
+[library]
+per_niche_cap = 4
+max_per_signature = 48
+
+[resources]
+mode = "adaptive"
+host_fraction = 0.55
+device_fraction = 0.70
+host_reserve_gb = 8
+device_reserve_gb = 2
+tuple_bytes_per_value = 32
+f32_bytes_per_value = 4
+device_bytes_per_value = 20
+
+[archive]
+enabled = true
+backend = "s3"
+uri_env = "ARDEVO_ARCHIVE_URI"
+snapshot_every_tasks = 1
+retain_local_snapshots = 2
+
+[evolution.composition]
+max_inline_depth = 8
+glue_storage = "f32"
+max_initial_glue_values = 0

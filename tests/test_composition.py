@@ -57,6 +57,19 @@ def _module_comp(ref: str, glue_in: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0), gl
     return CompositionGenome(nodes=nodes, edges=edges)
 
 
+def _module_chain(library: ModuleLibrary, solving_genome: Genome, links: int) -> list[str]:
+    keys: list[str] = []
+    for link in range(links):
+        payload = genome_to_dict(solving_genome)
+        payload["connections"][0]["weight"] += link + 1  # keep every immutable entry key distinct
+        if keys:
+            input_ids = [node["id"] for node in payload["nodes"] if node["kind"] == "input"]
+            stub = next(node["id"] for node in payload["nodes"] if node["kind"] == "hidden")
+            payload["macros"] = [{"ref": f"library:{keys[-1]}", "inputs": input_ids, "outputs": [stub], "innovation": 50 + link, "trainable": False}]
+        keys.append(library.add(entry_type=MODULE, payload=payload, io=_IO, provenance={}))
+    return keys
+
+
 def test_minimal_composition_is_a_linear_readout() -> None:
     tracker = InnovationTracker(_next_node_id=0)
     comp = minimal_composition([(_BANK, 2)], "head", 1, tracker, random.Random(0))
@@ -162,6 +175,16 @@ def test_nesting_depth_guard(tmp_path: Path) -> None:
     assert assemble(top, _ctx(library=library), n_inputs=2)(torch.tensor([[1.0, 1.0]])).shape == (1, 1)
     with pytest.raises(CompositionAssemblyError, match="max_inline_depth"):
         assemble(top, _ctx(library=library, max_inline_depth=2), n_inputs=2)
+
+
+def test_reference_depth_does_not_reset_at_composition_to_module_boundary(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _module_chain(library, solving_genome, links=5)  # four module-to-module refs
+    root = _module_comp(f"library:{keys[-1]}")  # composition-to-module is the fifth ref
+
+    with pytest.raises(CompositionAssemblyError, match="max_inline_depth=4"):
+        assemble(root, _ctx(library=library, max_inline_depth=4), n_inputs=2)
+    assert assemble(root, _ctx(library=library, max_inline_depth=5), n_inputs=2)(torch.zeros(1, 2)).shape == (1, 1)
 
 
 def test_serialization_round_trip(solving_genome: Genome) -> None:

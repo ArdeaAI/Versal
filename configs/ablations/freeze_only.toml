@@ -1,0 +1,10 @@
+# P1: freeze-only control. The runtime has one inner-loop training seam shared by composition glue
+# and modules, so this transparently disables all gradient fitting rather than claiming a glue-only
+# intervention. The direct-path override must also be disabled.
+extends = "base.toml"
+
+[evolution.train]
+kind = "none"
+
+[orchestrator.direct.train]
+kind = "none"

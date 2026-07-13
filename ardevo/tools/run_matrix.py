@@ -77,6 +77,11 @@ def flatten_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "failure_stage": record.get("failure_stage"),
                 "seconds": record.get("seconds", 0.0),
                 "new_library_keys": len(record.get("new_library_keys", [])),
+                "report_metric": record.get("report_metric"),
+                "task_metrics": dict(record.get("task_metrics", {})),
+                "sample_metrics": dict(record.get("sample_metrics", {})),
+                "size_metrics": dict(record.get("size_metrics", {})),
+                "resource_metrics": dict(record.get("resource_metrics", {})),
             }
         )
         rows.append(row)

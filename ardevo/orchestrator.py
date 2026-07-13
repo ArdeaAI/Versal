@@ -19,21 +19,23 @@ reference them, so library entries never dangle across runs.
 
 import math
 import time
+from array import array
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.decompose import Subtask, build_decomposers
 from ardevo.evaluation import fit_query_target, without_query
-from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, comp_from_dict, comp_to_dict
+from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, GlueValues, comp_from_dict, comp_to_dict
 from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.train import _writeback
-from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, module_level, structural_fingerprint, task_io
+from ardevo.library import COMPOSITION, LIBRARY_ADMISSION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, module_level, structural_fingerprint, task_io
 from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
 from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import format_bytes
 from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
@@ -98,6 +100,7 @@ class Attempt:
     # must show in the record, not only through `seconds` (the diag_g2 free-growth blowup was
     # invisible until the wall-clock had already exploded). Empty on cheap library hits.
     size_metrics: dict[str, float] = field(default_factory=dict)
+    resource_metrics: dict[str, float] = field(default_factory=dict)
     # Optional held-out report, emitted only by the blind-query protocol after candidate selection.
     report_metric: float | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
@@ -124,6 +127,8 @@ class Attempt:
             data["sample_metrics"] = self.sample_metrics
         if self.size_metrics:
             data["size_metrics"] = self.size_metrics
+        if self.resource_metrics:
+            data["resource_metrics"] = self.resource_metrics
         if self.report_metric is not None:
             data["report_metric"] = self.report_metric
         if self.task_metrics:
@@ -147,6 +152,7 @@ class Attempt:
             stage_seconds=dict(data.get("stage_seconds", {})),
             sample_metrics=dict(data.get("sample_metrics", {})),
             size_metrics=dict(data.get("size_metrics", {})),
+            resource_metrics=dict(data.get("resource_metrics", {})),
             report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
             task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
         )
@@ -266,7 +272,10 @@ class Orchestrator:
         # 15, 18) would wedge in direct evolution before ever reaching it. On decompose failure the
         # ordinary ladder still runs, so this knob must ship WITH a scale-safe init (factored or
         # sparse) in the same config. 0 (the default) is off and byte-identical.
-        self.decompose_first_above = int(table.get("decompose_first_above", 0))
+        decompose_first = table.get("decompose_first_above", 0)
+        if decompose_first != "adaptive" and int(decompose_first) < 0:
+            raise ValueError("[orchestrator] decompose_first_above must be non-negative or 'adaptive'")
+        self.decompose_first_above: int | str = decompose_first if decompose_first == "adaptive" else int(decompose_first)
         budgets = table.get("budgets", {})
         self.budgets = {int(name.removeprefix("depth")): int(value) for name, value in budgets.items()} or {0: 120, 1: 60, 2: 30}
         self.decomposers = build_decomposers(table)
@@ -302,6 +311,9 @@ class Orchestrator:
         # generation, later ladder stages are skipped, and the attempt fails with its best champion
         # (the wall ledger still shelves it). 0 (the default) is off and byte-identical.
         self.max_task_seconds = float(table.get("max_task_seconds", 0.0))
+        # Cumulative budget for the whole top-level solve, including recursive subtasks.  This is
+        # distinct from max_task_seconds, which remains a per-depth attempt budget.
+        self.max_total_task_seconds = float(table.get("max_total_task_seconds", 0.0))
         self.loop = loop
         self.library = library
         self.state = state
@@ -332,12 +344,16 @@ class Orchestrator:
             # routed_solved counts DISTILLED admissions (the router's win became a library composition);
             # no_experts = short-circuited on an empty vertex set; undistillable = won in router space
             # but the pathway did not survive verification as a composition (reported as a miss).
-            self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0})
+            self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0, "routed_resource_declined": 0})
         if self.wall_ledger:
             self.counters.update({"wall_stones_admitted": 0, "wall_stones_improved": 0, "wall_seeded_attempts": 0})
-        if self.max_task_seconds > 0:  # registered only when the budget is on, so off-mode summaries stay byte-identical
+        if self.max_task_seconds > 0 or self.max_total_task_seconds > 0:  # absent limits keep legacy summaries byte-identical
             self.counters.update({"time_budget_hits": 0})
-        if self.decompose_first_above > 0:  # registered only when the policy is on
+        if self.max_total_task_seconds > 0:
+            self.counters.update({"total_time_budget_hits": 0})
+        if self.loop.resource_policy.mode == "adaptive":
+            self.counters.update({"resource_declines": 0, "direct_resource_declines": 0, "composition_resource_declines": 0, "decomposition_resource_declines": 0})
+        if self.decompose_first_above == "adaptive" or int(self.decompose_first_above) > 0:  # registered only when the policy is on
             self.counters.update({"decompose_first": 0})
         self._failure_stage: str | None = None
         self._failure_op: str | None = None
@@ -351,16 +367,27 @@ class Orchestrator:
         # without clobbering the parent's ledger. The deadline rides the same tuple: each depth
         # gets a fresh budget, but a sub-solve only starts while its parent still has time.
         previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None), getattr(self, "_solve_deadline", None))
-        self._solve_started: float | None = time.perf_counter()
+        previous_total_deadline = getattr(self, "_total_task_deadline", None)
+        now = time.perf_counter()
+        if depth == 0:
+            self._total_task_deadline: float | None = (now + self.max_total_task_seconds) if self.max_total_task_seconds > 0 else None
+        self._solve_started: float | None = now
         self._active_stages: dict[str, float] | None = {}
-        self._solve_deadline: float | None = (time.perf_counter() + self.max_task_seconds) if self.max_task_seconds > 0 else None
-        BOARD.clock(float(self.max_task_seconds) if self.max_task_seconds > 0 else None)
+        local_deadline = (now + self.max_task_seconds) if self.max_task_seconds > 0 else None
+        total_deadline = getattr(self, "_total_task_deadline", None)
+        deadlines = [deadline for deadline in (local_deadline, total_deadline) if deadline is not None]
+        self._solve_deadline = min(deadlines) if deadlines else None
+        BOARD.clock(max(0.0, self._solve_deadline - now) if self._solve_deadline is not None else None)
         try:
             return self._solve_timed(task, depth)
         finally:
             self._solve_started, self._active_stages, self._solve_deadline = previous_timing
+            if depth == 0:
+                self._total_task_deadline = previous_total_deadline
 
     def _solve_timed(self, task: Task, depth: int = 0) -> Solution | None:
+        if self._total_deadline_exceeded():
+            return self._record_total_timeout(task, depth)
         spec = comp_task_spec(task, include_query=not self.blind_query, structured_grid=self.structured_grid)
         report_spec = comp_task_spec(task, structured_grid=self.structured_grid) if self.blind_query else spec
         name = task.meta.name
@@ -372,6 +399,8 @@ class Orchestrator:
         if hit is not None:
             self.counters["library_hits"] += 1
             return self._handle_library_hit(hit, task, spec, depth)
+        if self._total_deadline_exceeded():
+            return self._record_total_timeout(task, depth)
         self.counters["library_misses"] += 1
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
@@ -409,6 +438,7 @@ class Orchestrator:
                     strategy=result.strategy,
                     sample_metrics=_sample_metrics_of(result),
                     size_metrics=dict(result.size_metrics),
+                    resource_metrics=dict(result.resource_metrics),
                     report_metric=self._result_report_value(result),
                     task_metrics=_task_metrics_of(result),
                 )
@@ -425,12 +455,16 @@ class Orchestrator:
                 self._active_stages["decompose"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
+            timed_out = self._deadline_exceeded()
 
         self.counters["failures"] += 1
         if timed_out:
             # The counter key only exists when max_task_seconds > 0, and timed_out requires it.
             # Decompose was skipped above, so at depth 0 the forensics slot is free to claim.
             self.counters["time_budget_hits"] += 1
+            total_deadline = getattr(self, "_total_task_deadline", None)
+            if depth == 0 and total_deadline is not None and time.perf_counter() > total_deadline:
+                self.counters["total_time_budget_hits"] += 1
             if depth == 0:
                 self._failure_stage = "time_budget"
         stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
@@ -447,6 +481,7 @@ class Orchestrator:
                 failure_stage=self._failure_stage if depth == 0 else None,
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
+                resource_metrics=dict(result.resource_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -476,12 +511,52 @@ class Orchestrator:
         deadline = getattr(self, "_solve_deadline", None)
         return deadline is not None and time.perf_counter() > deadline
 
+    def _total_deadline_exceeded(self) -> bool:
+        deadline = getattr(self, "_total_task_deadline", None)
+        return deadline is not None and time.perf_counter() > deadline
+
+    def _record_total_timeout(self, task: Task, depth: int) -> None:
+        """Record an expired cumulative budget without starting lookup, probing, or evolution."""
+
+        self.counters["failures"] += 1
+        self.counters["time_budget_hits"] += 1
+        if depth == 0:
+            self.counters["total_time_budget_hits"] += 1
+            self._failure_stage = "time_budget"
+        self._record(
+            Attempt(
+                task=task.meta.name,
+                depth=depth,
+                outcome="failed",
+                metric=0.0,
+                generations=0,
+                strategy="time_budget",
+                failure_stage="time_budget" if depth == 0 else None,
+            )
+        )
+        logger.info("orchestrator skipped %s at depth %d: cumulative task budget exhausted", task.meta.name, depth)
+        return None
+
     def _wants_decompose_first(self, task: Task, spec: CompTaskSpec) -> bool:
         """True when the task's dense-init gene estimate marks it too wide to evolve flat first."""
-        if self.decompose_first_above <= 0:
+        if self.decompose_first_above != "adaptive" and int(self.decompose_first_above) <= 0:
             return False
         io = self._io_of(task, spec)
-        return (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"]) > self.decompose_first_above
+        init_genes = (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"])
+        if self.decompose_first_above != "adaptive":
+            return init_genes > int(self.decompose_first_above)
+        direct = next((strategy for name, strategy in self.strategies if name == "direct"), None)
+        evolver = getattr(direct, "evolver", None)
+        population_execution = str(getattr(evolver, "execution_mode", "serial")).startswith("population_")
+        estimate = self.loop.assess_glue_resources(
+            init_genes,
+            stage="decompose_first",
+            storage="tuple",
+            fixed_limit=0,
+            population_multiplicity=max(1, int(getattr(evolver, "pop_size", 1))),
+            concurrent_trainers=max(1, int(getattr(evolver, "pop_size", 1))) if population_execution else max(1, int(getattr(evolver, "assess_workers", 1))),
+        )
+        return not estimate.accepted
 
     def _with_deadline(self, detector: StallDetector) -> Callable[[int, Any], bool]:
         """Chain the per-solve deadline behind a stall detector. With no deadline the detector is
@@ -508,6 +583,7 @@ class Orchestrator:
             stall_factory=self._bounded_stall_detector,
             on_generation=self._on_generation,
             accepts=self._accepts_item,
+            deadline_exceeded=self._deadline_exceeded,
         )
 
     def _evolve(
@@ -519,8 +595,11 @@ class Orchestrator:
         runtime = self._runtime()
         total_share = sum(self.evolve_shares.values()) or 1.0
         results: list[StrategyResult] = []
+        resource_metrics: dict[str, float] = {}
         remaining = budget
         carry = 0
+        if self._total_deadline_exceeded():
+            return StrategyResult(strategy="time_budget", metric=0.0, generations_used=0)
         for position, (name, strategy) in enumerate(self.strategies):
             # Past the deadline, later ladder stages never start; position 0 always runs so
             # `max(results)` below is never asked to rank an empty list.
@@ -543,20 +622,30 @@ class Orchestrator:
             if stages is not None:
                 stages[name] = round(stages.get(name, 0.0) + (time.perf_counter() - stage_started), 3)
             if name == "routed":  # the strategy has no counter access; it stamps markers instead
-                for marker in ("routed_no_experts", "routed_undistillable"):
+                for marker in ("routed_no_experts", "routed_undistillable", "routed_resource_declined"):
                     if outcome.champion_metrics.get(marker):
                         self.counters[marker] += 1
+            resource_metrics.update(outcome.resource_metrics)
+            declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
+            if declined and "resource_declines" in self.counters:
+                self.counters["resource_declines"] += 1
+                counter = f"{name}_resource_declines"
+                if counter in self.counters:
+                    self.counters[counter] += 1
             results.append(outcome)
             remaining -= outcome.generations_used
             carry = max(0, allocation - outcome.generations_used)
             if self._accepts_result(outcome):
+                outcome.resource_metrics = dict(resource_metrics)
                 return outcome
             if remaining <= 0:
                 break
         # Metric-only diagnostics (for example an adapter-space routed score whose pathway could
         # not be distilled) must not displace a real below-bar champion that the wall ledger can
         # preserve. When every strategy declined, the metric remains a useful failure diagnostic.
-        return max(results, key=lambda item: (item.has_admissible_champion, item.metric))
+        best = max(results, key=lambda item: (item.has_admissible_champion, item.metric))
+        best.resource_metrics = dict(resource_metrics)
+        return best
 
     # --- learn-mode refinement of library hits --------------------------------------------------------
 
@@ -566,7 +655,7 @@ class Orchestrator:
         zero side effects, so budget_k = 0 (live mode) is byte-identical to the plain hit path. The
         task can never regress: a failed refinement returns the original hit."""
         refine_generations = 0
-        if self.refine_budget_k > 0 and depth <= self.refine_depth_max and hit.key is not None:
+        if self.refine_budget_k > 0 and depth <= self.refine_depth_max and hit.key is not None and not self._total_deadline_exceeded():
             improved, refine_generations = self._refine_hit(hit, task, spec, depth)
             if improved is not None:
                 return improved  # _refine_hit already recorded the "refined" attempt
@@ -665,6 +754,7 @@ class Orchestrator:
                 refine_generations=result.generations_used,
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
+                resource_metrics=dict(result.resource_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -703,6 +793,7 @@ class Orchestrator:
             stall_factory=refine_stall_factory,
             on_generation=self._on_generation,
             accepts=lambda item: self._metric(item) >= target_metric,
+            deadline_exceeded=self._deadline_exceeded,
         )
 
     def _candidate_rank(self, result: StrategyResult) -> RefinementRank | None:
@@ -827,6 +918,8 @@ class Orchestrator:
             limit=self.quick_eval_top_k,
         )
         for entry in candidates:
+            if self._total_deadline_exceeded():
+                return None
             assessment = self._quick_assessment(entry, task, spec)
             if assessment is None or not self._accepts_item(assessment):
                 continue
@@ -852,17 +945,37 @@ class Orchestrator:
 
         try:
             if entry.entry_type == MODULE and self._entry_is_temporal(entry):
-                adapter = temporal_adapter(task)
+                adapter = temporal_adapter(task, max_inline_depth=self.loop.max_inline_depth)
                 if spec.encoded.query_input is None:
                     adapter.encoded = without_query(adapter.encoded)
-                module = decode_recurrent(genome_from_dict(entry.payload), adapter.n_inputs, adapter.n_outputs, adapter.mode)
+                module = decode_recurrent(
+                    genome_from_dict(entry.payload),
+                    adapter.n_inputs,
+                    adapter.n_outputs,
+                    adapter.mode,
+                    macro_resolver=macro_resolver(self.library),
+                    max_inline_depth=self.loop.max_inline_depth,
+                    _reference_stack=(entry.key,),
+                )
                 metrics = adapter.evaluate(module)
                 return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None)
             if entry.entry_type == MODULE:
-                module = decode_module(genome_from_dict(entry.payload), spec.n_inputs, spec.output_width)
+                module = decode_module(
+                    genome_from_dict(entry.payload),
+                    spec.n_inputs,
+                    spec.output_width,
+                    macro_resolver=macro_resolver(self.library),
+                    max_inline_depth=self.loop.max_inline_depth,
+                    _reference_stack=(entry.key,),
+                )
             else:
                 comp = comp_from_dict(entry.payload)
-                ctx = AssemblyContext(bank_columns=dict(spec.bank_columns), library=self.library, max_inline_depth=self.loop.max_inline_depth)
+                ctx = AssemblyContext(
+                    bank_columns=dict(spec.bank_columns),
+                    library=self.library,
+                    max_inline_depth=self.loop.max_inline_depth,
+                    expansion_stack=[entry.key],
+                )
                 module = assemble(comp, ctx, spec.n_inputs)
         except (ValueError, CompositionAssemblyError) as error:
             logger.debug("library candidate %s not evaluable here: %s", entry.key, error)
@@ -877,9 +990,13 @@ class Orchestrator:
         return self._report(assessment) if report else self._metric(assessment)
 
     def _decompose_and_recurse(self, task: Task, spec: CompTaskSpec, depth: int, budget: int, first_metric: float) -> Solution | None:
+        if self._total_deadline_exceeded():
+            return None
         chosen_name: str | None = None
         subtasks: list[Subtask] = []
         for op_name, op in self.decomposers:
+            if self._total_deadline_exceeded():
+                return None
             produced = op(task, rng=self.state.rng)
             if len(produced) < 2:
                 continue
@@ -895,6 +1012,8 @@ class Orchestrator:
 
         solutions: list[tuple[Subtask, Solution]] = []
         for subtask in subtasks:
+            if self._total_deadline_exceeded():
+                return None
             solved = self.solve(subtask.task, depth + 1)
             if solved is None:
                 # A missing part means the wired parent cannot be completed; record WHERE it died.
@@ -904,9 +1023,13 @@ class Orchestrator:
                 return None
             solutions.append((subtask, solved))
 
+        if self._total_deadline_exceeded():
+            return None
         seed = self._port_wired_skeleton(spec, solutions)
         seeds = [seed] if seed is not None else None
         retry_budget = max(budget // 2, 5)
+        if self._total_deadline_exceeded():
+            return None
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         if self.blind_query:
             result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
@@ -924,6 +1047,7 @@ class Orchestrator:
                 strategy=result.strategy,
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
+                resource_metrics=dict(result.resource_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -949,6 +1073,8 @@ class Orchestrator:
         if self.decompose_solvability_floor <= 0.0:
             return True
         for subtask in subtasks:
+            if self._total_deadline_exceeded():
+                return False
             spec = comp_task_spec(subtask.task, include_query=not self.blind_query, structured_grid=self.structured_grid)
             probe = self._evolve(subtask.task, spec, self.decompose_probe_generations)
             if probe.champion_metrics.get("support_accuracy", 0.0) < self.decompose_solvability_floor:
@@ -1122,12 +1248,17 @@ class Orchestrator:
                 glue_values += parent_width * subset_width + out_width * spec.output_width
             loaded.append((subtask, key, entry))
 
-        limit = self.loop.max_initial_glue_values
-        if limit > 0 and glue_values > limit:
+        estimate = self.loop.assess_glue_resources(glue_values, stage="decomposition_skeleton", device="cpu")
+        if not estimate.accepted:
+            if "resource_declines" in self.counters:
+                self.counters["resource_declines"] += 1
+                self.counters["decomposition_resource_declines"] += 1
             logger.warning(
-                "decomposition skeleton declined before allocation: candidate needs %s glue values (limit %s)",
+                "decomposition skeleton declined before allocation: candidate needs %s glue values (%s host, %s device; limit %s)",
                 f"{glue_values:,}",
-                f"{limit:,}",
+                format_bytes(estimate.host_required_bytes),
+                format_bytes(estimate.device_required_bytes),
+                f"{estimate.limit_values:,}",
             )
             return None
 
@@ -1139,7 +1270,15 @@ class Orchestrator:
         comp.nodes[bias_id] = CompNodeGene(bias_id, CompNodeKind.INPUT, BIAS_REF, 0, 1)
         output_id = tracker.new_node_id()
         comp.nodes[output_id] = CompNodeGene(output_id, CompNodeKind.OUTPUT, spec.output_ref, spec.output_width, 0)
-        comp.edges.append(CompEdgeGene(bias_id, output_id, True, tracker.innovation(bias_id, output_id), tuple(0.0 for _ in range(spec.output_width))))
+        comp.edges.append(
+            CompEdgeGene(
+                bias_id,
+                output_id,
+                True,
+                tracker.innovation(bias_id, output_id),
+                _zero_glue(spec.output_width, self.loop.glue_storage),
+            )
+        )
 
         positions_total = sum(subtask.port.width for subtask, _ in solutions if subtask.port.role == "output_slice")
         per_position = spec.output_width // positions_total if positions_total else 1
@@ -1151,12 +1290,12 @@ class Orchestrator:
             comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
             port = subtask.port
             if port.role == "output_slice":
-                in_glue = _identity_glue(parent_width, in_width)
+                in_glue = _identity_glue(parent_width, in_width, self.loop.glue_storage)
                 start = port.offsets[0] * per_position
-                out_glue = _placement_glue(out_width, spec.output_width, start)
+                out_glue = _placement_glue(out_width, spec.output_width, start, self.loop.glue_storage)
             else:  # input_subset
-                in_glue = _selection_glue(parent_width, port.offsets)
-                out_glue = _identity_glue(out_width, spec.output_width)
+                in_glue = _selection_glue(parent_width, port.offsets, self.loop.glue_storage)
+                out_glue = _identity_glue(out_width, spec.output_width, self.loop.glue_storage)
             comp.edges.append(CompEdgeGene(input_id, node_id, True, tracker.innovation(input_id, node_id), in_glue))
             comp.edges.append(CompEdgeGene(node_id, output_id, True, tracker.innovation(node_id, output_id), out_glue))
         return comp
@@ -1259,21 +1398,29 @@ def _comp_behavior(comp: CompositionGenome, level: int) -> list[str]:
     return [f"m{min(len(comp.module_ids), 6)}", f"L{level}"]
 
 
-def _identity_glue(in_width: int, out_width: int) -> tuple[float, ...]:
+def _stored_glue(values: Any, storage: str) -> GlueValues:
+    return array("f", values) if storage == "f32" else tuple(values)
+
+
+def _zero_glue(count: int, storage: str) -> GlueValues:
+    return array("f", [0.0]) * count if storage == "f32" else tuple(0.0 for _ in range(count))
+
+
+def _identity_glue(in_width: int, out_width: int, storage: str = "tuple") -> GlueValues:
     """Row-major identity-ish map: 1.0 on the diagonal, zero elsewhere (rectangular allowed)."""
-    return tuple(1.0 if row == column else 0.0 for row in range(in_width) for column in range(out_width))
+    return _stored_glue((1.0 if row == column else 0.0 for row in range(in_width) for column in range(out_width)), storage)
 
 
-def _placement_glue(in_width: int, out_width: int, start: int) -> tuple[float, ...]:
+def _placement_glue(in_width: int, out_width: int, start: int, storage: str = "tuple") -> GlueValues:
     """Maps a module's output block onto its slice of the parent head: out[start + r] = in[r]."""
-    return tuple(1.0 if row == start + column else 0.0 for row in range(in_width) for column in range(out_width))
+    return _stored_glue((1.0 if row == start + column else 0.0 for row in range(in_width) for column in range(out_width)), storage)
 
 
-def _selection_glue(in_width: int, offsets: tuple[int, int]) -> tuple[float, ...]:
+def _selection_glue(in_width: int, offsets: tuple[int, int], storage: str = "tuple") -> GlueValues:
     """Selects parent input columns [start, end) into a module's input ports."""
     start, end = offsets
     out_width = end - start
-    return tuple(1.0 if start + column == row else 0.0 for row in range(in_width) for column in range(out_width))
+    return _stored_glue((1.0 if start + column == row else 0.0 for row in range(in_width) for column in range(out_width)), storage)
 
 
 def attempts_to_dicts(attempts: list[Attempt]) -> list[dict[str, Any]]:

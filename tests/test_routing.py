@@ -113,6 +113,30 @@ def test_persistence_round_trip_and_growth(tmp_path: Path, xor_task: Task, solvi
     assert len(grown.net._vertex_order) == len(service.net._vertex_order) + 1
 
 
+def test_router_construction_sync_and_reload_honor_reference_depth(tmp_path: Path, solving_genome: Genome) -> None:
+    from tests.test_macro_nodes import _macro_chain
+
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)
+    top = library.load(keys[-1])
+    assert build_vertex(top, library, max_inline_depth=3) is None
+    assert build_vertex(top, library, max_inline_depth=4) is not None  # the selected entry root is free
+
+    router_dir = tmp_path / "lib" / "router"
+    shallow = RouterService(library, d_model=8, top_k=1, max_steps=1, persist_dir=router_dir, max_inline_depth=3)
+    assert shallow.sync() == 4  # subtree depths 0..3
+    shallow.save()
+    deep = RouterService(library, d_model=8, top_k=1, max_steps=1, persist_dir=router_dir, max_inline_depth=4)
+    assert len(deep.net._vertex_order) == 5  # reload rebuilds old roots, then admits the depth-4 root
+
+
+def test_routed_strategy_reads_authoritative_composition_depth() -> None:
+    from ardevo.routing import build_routed_strategy
+
+    strategy = build_routed_strategy({"evolution": {"composition": {"max_inline_depth": 7}}})
+    assert strategy.max_inline_depth == 7
+
+
 def test_persistence_mismatch_starts_fresh_or_raises(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     library = _seed_library(tmp_path, xor_task, solving_genome)
     router_dir = tmp_path / "lib" / "router"
@@ -271,15 +295,23 @@ def test_routed_distillation_declines_oversized_glue_before_allocation(monkeypat
     runtime = orchestrator._runtime()
     runtime.loop.max_initial_glue_values = 1
     next_node_id = runtime.state.comp_innovations._next_node_id
+    assess_resources = runtime.loop.assess_glue_resources
+    resource_devices: list[str | None] = []
+
+    def capture_resources(*args, **kwargs):
+        resource_devices.append(kwargs.get("device"))
+        return assess_resources(*args, **kwargs)
 
     def unexpected_allocation(*_args, **_kwargs):
         raise AssertionError("the distillation guard must run before composition glue construction")
 
     monkeypatch.setattr(routing_module, "minimal_composition", unexpected_allocation)
     monkeypatch.setattr(routing_module, "_glue_for", unexpected_allocation)
+    monkeypatch.setattr(runtime.loop, "assess_glue_resources", capture_resources)
 
     assert strategy._verify_distilled([[key]], comp_task_spec(xor_task), runtime) is None
     assert runtime.state.comp_innovations._next_node_id == next_node_id
+    assert resource_devices == ["cpu"]
 
 
 def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:

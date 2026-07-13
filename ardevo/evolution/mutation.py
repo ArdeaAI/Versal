@@ -28,6 +28,7 @@ from ardevo.evolution.genome import (
     would_create_cycle,
 )
 from ardevo.evolution.registry import Registry
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 
 if TYPE_CHECKING:
     from ardevo.library import ModuleLibrary
@@ -49,6 +50,7 @@ class MutationContext:
     activations: list[str]
     default_activation: str
     library: "ModuleLibrary | None" = None
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
 
 
 @dataclass
@@ -556,7 +558,9 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     # The live handle sees entries admitted MID-RUN; the by-path cache is the flat-config fallback.
     library = ctx.library if ctx.library is not None else _cached_library(path)
     assert isinstance(library, ModuleLibrary)
-    entries = library.query(entry_type=MODULE_ENTRY)
+    # The entry payload is copied into the candidate root, so its own root is free and its deepest
+    # remaining library path may consume the full configured boundary budget.
+    entries = [entry for entry in library.query(entry_type=MODULE_ENTRY) if library.reference_subtree_depth(entry.key) <= ctx.max_inline_depth]
     if not entries:
         return genome
     entry = entries[rng.randrange(len(entries))]
@@ -623,7 +627,6 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         return genome
     from ardevo.library import MODULE as MODULE_ENTRY
     from ardevo.library import ModuleLibrary
-    from ardevo.substrate import _MAX_MACRO_DEPTH
 
     library = ctx.library if ctx.library is not None else _cached_library(path)
     assert isinstance(library, ModuleLibrary)
@@ -644,7 +647,7 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
             continue
         # Embedding this entry nests its whole macro chain one level deeper; past the decode cap
         # the child is a dead phenotype (the wall ledger's seed-then-embed cycles get there fast).
-        if library.macro_subtree_depth(entry.key) > _MAX_MACRO_DEPTH - 1:
+        if library.reference_subtree_depth(entry.key) > ctx.max_inline_depth - 1:
             continue
         candidates.append((entry, k, m))
     if not candidates:

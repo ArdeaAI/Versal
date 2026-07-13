@@ -52,17 +52,21 @@ def load_run_config(config_path: str | None, resume: str | None) -> Config:
         run_dir = Path(resume)
         source_snapshot = run_dir / "config.toml"
         effective_snapshot = run_dir / "config.effective.json"
-        config = Config(conf_path=source_snapshot if source_snapshot.exists() else None)
         if effective_snapshot.exists():
             restored = json.loads(effective_snapshot.read_text())
             if not isinstance(restored, dict):
                 raise ValueError(f"invalid effective config snapshot: {effective_snapshot}")
+            # Construct without parsing config.toml: an inherited leaf retains a relative `extends`
+            # path that is intentionally invalid after the leaf is copied into the run directory.
+            config = Config.__new__(Config)
+            config.toml = Config._load_toml()
             config.current = restored
             if source_snapshot.exists():
                 payload = source_snapshot.read_bytes()
                 config.current["config_path"] = str(source_snapshot)
                 config.current["config_sha256"] = hashlib.sha256(payload).hexdigest()
-        return config
+            return config
+        return Config(conf_path=source_snapshot if source_snapshot.exists() else None)
     return Config(conf_path=config_path)
 
 

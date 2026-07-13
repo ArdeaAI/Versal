@@ -29,6 +29,7 @@ from ardevo.evolution.mutation import AdaptiveMutationPipeline, MutationContext,
 from ardevo.evolution.novelty import NoveltyConfig, archive_insert, compute_descriptor, novelty_scores, probe_tensor
 from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_key
 from ardevo.evolution.speciation import SpeciesPlan
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 
 
@@ -61,12 +62,13 @@ class TaskAdapter:
     # the same probe that stamps geometry coordinates); None elsewhere. Descriptor axes carry no
     # per-axis lengths, so grid-aware evaluate ops (augmented_vote) read the shape from here.
     grid_shape: tuple[int, ...] | None = None
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
 
     def decode(self, genome: Genome) -> GraphNet:
         # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
         # same static input re-applied with state carried across passes); steps == 1 keeps the exact
         # feedforward path, so the flat search is unchanged until refinement is actually evolved.
-        return decode_module(genome, self.n_inputs, self.n_outputs)
+        return decode_module(genome, self.n_inputs, self.n_outputs, max_inline_depth=self.max_inline_depth)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
         from ardevo.structured import StructuredGridEncoded, evaluate_structured_grid
@@ -147,6 +149,7 @@ class Evolver:
     execution_mode: str = "serial"
     assess_workers: int = 0
     library_dir: str = "library"
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
     # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so
     # they sample the SAME entries the decode-time macro resolver resolves. Left None on the pure
     # flat path; the orchestrator's direct strategy sets it to the attached library. Without this the
@@ -168,7 +171,13 @@ class Evolver:
     halving_keep: float = 0.5
 
     def _context(self, state: EvolverState) -> MutationContext:
-        return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
+        return MutationContext(
+            innovations=state.innovations,
+            activations=self.activations,
+            default_activation=self.default_activation,
+            library=self.library,
+            max_inline_depth=self.max_inline_depth,
+        )
 
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""

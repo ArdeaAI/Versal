@@ -1,0 +1,5 @@
+# P1: fixed configured mutation rates instead of inherited per-genome strategy parameters.
+extends = "base.toml"
+
+[evolution.mutation]
+self_adaptive = false
