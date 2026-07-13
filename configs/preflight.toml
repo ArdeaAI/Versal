@@ -111,7 +111,7 @@ max_task_seconds = 600        # per-attempt wall-clock budget: past it the runni
                               # 3532s on one task). 0 = off, byte-identical.
 max_depth = 2                 # recursion cap for decomposition
 quick_eval_top_k = 5
-library_dir = "library/preflight" # isolated persistent canary memory; never mutates the canonical library
+library_dir = "library" # isolated persistent canary memory; never mutates the canonical library
 decompose_first_above = 2000000   # MERGE: a task whose dense-init gene estimate exceeds this runs
                               # DECOMPOSE before any flat attempt (rungs 11-14, 17, 18), the route
                               # that produced smoke's first production decomposition (cosmic 0.986)

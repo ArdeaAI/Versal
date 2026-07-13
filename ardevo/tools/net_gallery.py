@@ -145,7 +145,7 @@ def main() -> None:
     parser.add_argument("--metadata-overmind", action="store_true", help="render only overmind.png from router metadata, without loading router_state.pt")
     parser.add_argument("--cold-overmind", action="store_true", help="ignore persisted router state and render the current library with an untrained router")
     parser.add_argument("--config", default=None, help="run config that selects the default library and shapes a cold overmind portrait")
-    parser.add_argument("--columns", type=int, default=4, help="gallery columns")
+    parser.add_argument("--columns", type=int, default=16, help="gallery columns")
     parser.add_argument("--include-retired", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-dependencies", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()

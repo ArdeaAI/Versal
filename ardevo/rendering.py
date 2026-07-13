@@ -903,12 +903,12 @@ class OvermindView:
     pathways: list[tuple[int, int, float]] = field(default_factory=list)
 
 
-_ROW_GAP = 1.6  # vertical gap between grid rows; leaves room for the container label above a box
-_BAND_GAP = 2.5  # clearance between the input/output bands and the grid
+_ROW_GAP = 2.4  # vertical gap between grid rows; leaves room for the container label above a box
+_BAND_GAP = 4  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
-_LEGEND_ROW_STEP = 1.1
-_LEGEND_WIDTH = 16.0
-_OVERMIND_COLUMNS = 8
+_LEGEND_ROW_STEP = 1.8
+_LEGEND_WIDTH = 24.0
+_OVERMIND_COLUMNS = 16
 _OVERMIND_DPI = 300
 _OVERMIND_X_PADDING = 2 * _PAD
 
