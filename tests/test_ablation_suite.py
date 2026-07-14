@@ -53,7 +53,8 @@ def test_checked_in_manifest_expands_p0_and_p1_seed_protocols() -> None:
     unrouted = Config(next(arm.config for arm in manifest.arms if arm.name == "no_routing")).current
     assert "routed" not in unrouted["orchestrator"]["evolve"]
     assert [Path(source["path"]).name for source in unrouted["config_sources"]] == [
-        "orchestrated_overmind_all_features.toml",
+        "canary.toml",
+        "full_cluster.toml",
         "base.toml",
         "no_routing.toml",
     ]
@@ -63,7 +64,7 @@ def test_checked_in_manifest_expands_p0_and_p1_seed_protocols() -> None:
     assert len(full_runs) == 3
     assert full_campaign.slurm["max_parallel"] == 3
     assert all(requests_cuda(spec) for spec in full_runs)
-    assert not requests_cuda(runs[0])
+    assert all(requests_cuda(run) for run in runs)
 
 
 def test_selection_and_gpu_assignment_are_deterministic() -> None:
@@ -115,6 +116,7 @@ def test_completed_run_state_is_skipped_without_launching(tmp_path: Path, monkey
             }
         )
     )
+    (run_dir / "archive_state.json").write_text(json.dumps({"status": "complete", "snapshot_status": "done"}))
     path = state_path(output, spec)
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"status": "running", "run_dir": str(run_dir), "attempt": 1}))

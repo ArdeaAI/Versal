@@ -20,19 +20,20 @@ We want to use ClearML for this as well as much as we can make use of it. I alre
 
 ```bash
 uv sync --group dev                         # install runtime and development dependencies
-uv run app                                  # run or resume the orchestrated evolutionary ladder
-uv run run_report results/<run>             # build JSON, Markdown, and per-rung CSV reports
-uv run rung_doctor --rungs 1-18             # probe task availability and tensor shapes
-uv run render --overmind                     # render library entries and the routed overmind
-uv run benchmark                             # measure execution throughput and calibration
-uv run library_gc --dry-run                  # inspect unreferenced library tombstones
-uv run motif_census --render                 # run the descriptive motif and reuse census
-uv run cppn_spike                            # run the CPPN expressibility diagnostic
-uv run run_matrix                            # execute a configured experiment matrix
-uv run ablation_suite                        # validate and launch the paper ablation suite
-uv run experiment_archive list               # list, verify, restore, or snapshot external archives
-uv run router_migrate --library <v1> --output <v2>  # migrate a verified library copy to router v2
-uv run runtime_inventory --check             # verify registry, config, CLI, and path inventory
+uv run app                                  # exercise every rung with the fast smoke profile
+uv run app --verbose                        # add device, worker-pool, and persistence diagnostics
+uv run run_report results/<run>             # summarize held-out results, strategy use, timing, and storage
+uv run rung_doctor --rungs 1-18             # verify task availability, axes, and tensor shapes without searching
+uv run render --overmind                     # inspect learned library structures and routing traffic visually
+uv run benchmark                             # compare candidate-training paths and calibrate the local machine
+uv run library_gc --dry-run                  # preview unreachable persistent entries before reclaiming them
+uv run motif_census --render                 # measure recurring structures, lineage support, and reuse evidence
+uv run cppn_spike                            # test whether coordinate generators can sparsely seed very wide networks
+uv run run_matrix                            # repeat a profile across seeds and cold/warm library conditions
+uv run ablation_suite                        # launch controlled mechanism removals and aggregate their effects
+uv run experiment_archive list               # deduplicate, verify, snapshot, or restore external experiment state
+uv run router_migrate --library <v1> --output <v2>  # verify and shard a copied legacy router without touching its source
+uv run runtime_inventory --check             # detect drift in configs, registries, CLIs, and persistent paths
 uv run ruff check .                          # lint and import checks
 uv run ruff format .                         # format Python sources
 uv run ty check                              # static type checking
@@ -41,14 +42,18 @@ uv run pytest tests/ -v                      # complete offline test suite
 
 ## The workflow
 
-There is ONE run mode: the orchestrated overmind evolver. The canonical configuration is
-`configs/orchestrated_overmind_all_features.toml`, also the default when `uv run app` gets no `--config`.
-Other files in `configs/` are retained as paper-reproduction, diagnostic, smoke, and ablation arms.
+There is one run mode: the orchestrated overmind evolver. `configs/canary.toml` defines the complete
+methodology, and the other five top-level profiles inherit it for a specific scale or machine. Plain
+`uv run app` selects the reduced `configs/smoke.toml` health check.
 
 ```bash
 uv sync --group dev
-uv run app                                        # the orchestrated overmind run (all 18 rungs)
-uv run app --config configs/preflight.toml        # 180-task MonadMetal/ClearML production canary
+uv run app                                        # 10-30 minute smoke test, one task per rung
+uv run app --config configs/canary.toml           # 1-2 hour full-method check, one task per rung
+uv run app --config configs/brute.toml             # deep search over twenty tasks from one editable rung
+uv run app --config configs/preflight.toml         # 14-25 hour M4 run, ten tasks per rung
+uv run app --config configs/canary-lattice.toml    # full-method CUDA check on the RTX 3080 workstation
+uv run app --config configs/full_cluster.toml      # flagship profile used by the cluster campaign
 uv run app --resume results/<ts>_orchestrated     # continue a run from its rolling checkpoint
 uv run render --overmind                          # re-render the library + the routed model portrait
 nice -n 20 uv run render --config configs/preflight.toml --metadata-overmind --images /tmp/ardevo-overmind-preview
@@ -91,8 +96,8 @@ end up in it as a reusable entry, and it survives across runs (delete `library/`
    - **composition**: a per-task population of compositions (small DAGs whose MODULE nodes reference live module
      species or library entries, wired by trainable linear GLUE) co-evolves with ONE shared mini-model
      population; fitness flows DOWN as attribution, and only the champion writes module weights back. The
-     shipping `max_initial_glue_values = 5000000` guard declines any initial wiring whose exact dense or
-     rank-factored allocation exceeds that generic representation budget before a population is built.
+   smoke profile caps initial glue at five million values; full-method profiles allow deeper, unrestricted
+   float32 glue while adaptive machine profiles still enforce their declared resource envelopes.
 3. **DECOMPOSE**: on a stall, registered operators (`output_slices`, `input_subsets`, `time_windows`,
    `spatial_patches` for grid->grid) split the task into valid subtasks and the orchestrator RECURSES on each
    (depth-capped); a solvability gate probes subtasks before committing budget. Accepted parts become frozen
@@ -164,7 +169,7 @@ the reuse census reports the growing vocabulary (who is built FROM whom). Report
 ## Lego-block evolution
 
 Every stage of the generational loop is an independent, registered operator selected and tuned from
-`configs/orchestrated_overmind_all_features.toml`. The loop runs: **select -> crossover -> mutate -> train -> evaluate ->
+`configs/canary.toml`. The loop runs: **select -> crossover -> mutate -> train -> evaluate ->
 fitness -> replace**, with speciation shaping how offspring are allocated. To experiment, change a `kind`,
 reorder `[evolution.mutation].operators`, retune a weight, or register one new function in the matching
 registry; the loop itself never changes.
@@ -255,7 +260,7 @@ ardevo/
 ├── trials/
 │   └── orchestrated_trial.py # OrchestratedTrial(Proctor): the run loop, observability, resume
 ├── utils/
-│   ├── config.py       # canonical all-features TOML -> runtime dict
+│   ├── config.py       # layered TOML profiles -> normalized runtime dict
 │   ├── pipelines.py    # ClearML task + machine->queue + trial orchestration
 │   ├── proctor.py      # base trial: logging, device, artifacts
 │   └── logging.py      # Rich logger / console

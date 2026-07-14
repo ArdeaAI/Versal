@@ -46,10 +46,10 @@ def test_enabled_board_tracks_state_and_renders() -> None:
             probe.print(_Footer(board))
         text = capture.get()
         assert "task 2/18" in text and "arc.train.31aa019c" in text
-        assert "direct  gen 4" in text and "0.398" in text
-        assert "best acc 0.630" in text  # the running per-task maximum, not the current generation's
+        assert "direct · generation 4" in text and "current support 0.510" in text
+        assert "best support 0.630" in text  # the running per-task maximum, not the current generation's
         assert "stone shelved" in text
-        assert "/600s" in text  # the armed budget clock renders a bar
+        assert "/600s" not in text  # configured deadlines stay in the config, not the runtime display
     finally:
         board.close()
     assert not board.enabled

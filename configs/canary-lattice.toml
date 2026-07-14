@@ -1,0 +1,29 @@
+extends = "canary.toml"
+
+# CUDA parity canary for the RTX 3080 10 GiB workstation. Search semantics match the M4 canary;
+# adaptive batching limits resident tensors and falls back without dropping candidates.
+
+[run]
+experiment = "orchestrated_overmind_canary_lattice"
+machine = "LatticeCUDA"
+
+[orchestrator.direct]
+max_flat_outputs = "adaptive"
+max_init_genes = "adaptive"
+
+  [orchestrator.direct.train]
+  batched = true
+  min_batch_nodes = 768
+  max_padded_nodes = 8192
+  microbatch_size = 0
+  adaptive_microbatch = true
+
+[resources]
+mode = "adaptive"
+host_fraction = 0.55
+device_fraction = 0.65
+host_reserve_gb = 8
+device_reserve_gb = 2
+tuple_bytes_per_value = 32
+f32_bytes_per_value = 4
+device_bytes_per_value = 20

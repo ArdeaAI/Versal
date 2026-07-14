@@ -36,6 +36,7 @@ from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
 from ardevo.utils.logging import Logger
 from ardevo.utils.resources import format_bytes
+from ardevo.utils.runtime_display import NULL_DISPLAY
 from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
@@ -105,6 +106,13 @@ class Attempt:
     report_metric: float | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
     strategy_metrics: dict[str, float] = field(default_factory=dict)
+    # Literal quality observations. `metric` and `report_metric` remain the configurable policy
+    # scores; these fields always mean sample-level accuracy and never silently substitute one for
+    # the other. Statuses make a real 0.0 distinguishable from an evaluation that never happened.
+    support_accuracy: float | None = None
+    query_accuracy: float | None = None
+    support_status: str = "legacy_missing"
+    query_status: str = "legacy_missing"
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -136,6 +144,15 @@ class Attempt:
             data["task_metrics"] = self.task_metrics
         if self.strategy_metrics:
             data["strategy_metrics"] = self.strategy_metrics
+        if self.support_status != "legacy_missing" or self.query_status != "legacy_missing" or self.support_accuracy is not None or self.query_accuracy is not None:
+            data.update(
+                {
+                    "support_accuracy": self.support_accuracy,
+                    "query_accuracy": self.query_accuracy,
+                    "support_status": self.support_status,
+                    "query_status": self.query_status,
+                }
+            )
         return data
 
     @classmethod
@@ -159,6 +176,10 @@ class Attempt:
             report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
             task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
             strategy_metrics={str(key): float(value) for key, value in data.get("strategy_metrics", {}).items()},
+            support_accuracy=float(data["support_accuracy"]) if data.get("support_accuracy") is not None else None,
+            query_accuracy=float(data["query_accuracy"]) if data.get("query_accuracy") is not None else None,
+            support_status=str(data.get("support_status", "legacy_missing")),
+            query_status=str(data.get("query_status", "legacy_missing")),
         )
 
 
@@ -184,6 +205,15 @@ def _task_metrics_of(result: StrategyResult) -> dict[str, float]:
     return _task_metrics(dict(result.champion_metrics) | dict(result.report_metrics))
 
 
+def _finite_accuracy(metrics: dict[str, float], key: str, *, loss_key: str | None = None) -> float | None:
+    """Read a literal accuracy without turning a missing/invalid evaluation into a zero."""
+
+    if loss_key is not None and not math.isfinite(float(metrics.get(loss_key, math.inf))):
+        return None
+    value = metrics.get(key)
+    return float(value) if value is not None and math.isfinite(float(value)) else None
+
+
 @dataclass(frozen=True)
 class Solution:
     key: str | None  # None when the task was SOLVED but the admission gate declined to shelve it
@@ -191,6 +221,10 @@ class Solution:
     metric: float
     report_metric: float | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
+    support_accuracy: float | None = None
+    query_accuracy: float | None = None
+    support_status: str = "legacy_missing"
+    query_status: str = "legacy_missing"
 
 
 @dataclass(frozen=True)
@@ -322,6 +356,7 @@ class Orchestrator:
         self.library = library
         self.state = state
         self.proctor = proctor
+        self.display = getattr(proctor, "display", NULL_DISPLAY)
         self.attempts: list[Attempt] = []
         self.counters = {
             "library_hits": 0,
@@ -372,11 +407,13 @@ class Orchestrator:
         # gets a fresh budget, but a sub-solve only starts while its parent still has time.
         previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None), getattr(self, "_solve_deadline", None))
         previous_total_deadline = getattr(self, "_total_task_deadline", None)
+        previous_display_depth = getattr(self, "_display_depth", 0)
         now = time.perf_counter()
         if depth == 0:
             self._total_task_deadline: float | None = (now + self.max_total_task_seconds) if self.max_total_task_seconds > 0 else None
         self._solve_started: float | None = now
         self._active_stages: dict[str, float] | None = {}
+        self._display_depth = depth
         local_deadline = (now + self.max_task_seconds) if self.max_task_seconds > 0 else None
         total_deadline = getattr(self, "_total_task_deadline", None)
         deadlines = [deadline for deadline in (local_deadline, total_deadline) if deadline is not None]
@@ -386,6 +423,7 @@ class Orchestrator:
             return self._solve_timed(task, depth)
         finally:
             self._solve_started, self._active_stages, self._solve_deadline = previous_timing
+            self._display_depth = previous_display_depth
             if depth == 0:
                 self._total_task_deadline = previous_total_deadline
 
@@ -399,10 +437,21 @@ class Orchestrator:
             self._failure_stage = None  # forensics for THIS top-level task only
             self._failure_op = None
 
+        self.display.stage_started("lookup")
+        lookup_started = time.perf_counter()
         hit = self._lookup(task, spec)
         if hit is not None:
             self.counters["library_hits"] += 1
+            self.display.stage_result(
+                "lookup",
+                "hit",
+                "compatible learned solution cleared the support gate",
+                seconds=time.perf_counter() - lookup_started,
+                depth=depth,
+                support_accuracy=hit.support_accuracy,
+            )
             return self._handle_library_hit(hit, task, spec, depth)
+        self.display.stage_result("lookup", "miss", "no compatible learned solution cleared the support gate", seconds=time.perf_counter() - lookup_started, depth=depth)
         if self._total_deadline_exceeded():
             return self._record_total_timeout(task, depth)
         self.counters["library_misses"] += 1
@@ -428,27 +477,19 @@ class Orchestrator:
         result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
         if self.blind_query:
             result = self._attach_report_metrics(result, report_spec)
+            _support, query, _support_status, query_status = self._quality_of_result(result)
+            self.display.query_result(query, query_status, depth=depth)
         if self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=None)
-            self.counters["accepts"] += 1
-            self._record(
-                Attempt(
-                    task=name,
-                    depth=depth,
-                    outcome="evolved",
-                    metric=result.metric,
-                    generations=result.generations_used,
-                    library_key=key,
-                    strategy=result.strategy,
-                    sample_metrics=_sample_metrics_of(result),
-                    size_metrics=dict(result.size_metrics),
-                    resource_metrics=dict(result.resource_metrics),
-                    strategy_metrics=dict(result.strategy_metrics),
-                    report_metric=self._result_report_value(result),
-                    task_metrics=_task_metrics_of(result),
-                )
+            self.display.stage_result(
+                "persist",
+                "saved" if key is not None else "skipped",
+                "solution retained for reuse" if key is not None else "solution accepted but not retained by library policy",
+                depth=depth,
             )
-            return Solution(key=key, entry_type=self._entry_type_of(result), metric=result.metric, report_metric=self._result_report_value(result))
+            self.counters["accepts"] += 1
+            self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key))
+            return self._solution_from_result(result, key)
 
         timed_out = self._deadline_exceeded()  # sampled ONCE: the failure forensics below must match the decompose gate
         if depth < self.max_depth and not timed_out and not decomposed_first:  # decompose-first already spent its shot
@@ -473,26 +514,21 @@ class Orchestrator:
             if depth == 0:
                 self._failure_stage = "time_budget"
         stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
+        if stone_key is not None:
+            self.display.stage_result("persist", "saved", "below-threshold stepping stone retained for a later attempt", depth=depth)
         self._record(
-            Attempt(
+            self._attempt_from_result(
+                result,
                 task=name,
                 depth=depth,
                 outcome="failed",
-                metric=result.metric,
-                generations=result.generations_used,
-                library_key=stone_key,  # the wall ledger's trace of this failure, when one was shelved
-                strategy=result.strategy,
+                library_key=stone_key,
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
-                sample_metrics=_sample_metrics_of(result),
-                size_metrics=dict(result.size_metrics),
-                resource_metrics=dict(result.resource_metrics),
-                strategy_metrics=dict(result.strategy_metrics),
-                report_metric=self._result_report_value(result),
-                task_metrics=_task_metrics_of(result),
+                query_status="time_limit_before_evaluation" if timed_out else None,
             )
         )
-        logger.info("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
+        logger.debug("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
         return None
 
     def _attach_report_metrics(self, result: StrategyResult, report_spec: CompTaskSpec) -> StrategyResult:
@@ -538,9 +574,11 @@ class Orchestrator:
                 generations=0,
                 strategy="time_budget",
                 failure_stage="time_budget" if depth == 0 else None,
+                support_status="not_reached",
+                query_status="time_limit_before_evaluation",
             )
         )
-        logger.info("orchestrator skipped %s at depth %d: cumulative task budget exhausted", task.meta.name, depth)
+        logger.debug("orchestrator skipped %s at depth %d: cumulative task budget exhausted", task.meta.name, depth)
         return None
 
     def _wants_decompose_first(self, task: Task, spec: CompTaskSpec) -> bool:
@@ -622,14 +660,15 @@ class Orchestrator:
             if allocation <= 0:
                 break
             stage_started = time.perf_counter()
-            BOARD.stage(name, f"starting (budget {allocation} gens)")
+            self.display.stage_started(name)
             if name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=handoff_seeds if name == "composition" else None)
+            stage_elapsed = time.perf_counter() - stage_started
             stages = getattr(self, "_active_stages", None)
             if stages is not None:
-                stages[name] = round(stages.get(name, 0.0) + (time.perf_counter() - stage_started), 3)
+                stages[name] = round(stages.get(name, 0.0) + stage_elapsed, 3)
             if name == "routed":  # the strategy has no counter access; it stamps markers instead
                 for marker in ("routed_no_experts", "routed_undistillable", "routed_resource_declined"):
                     if outcome.champion_metrics.get(marker):
@@ -651,6 +690,26 @@ class Orchestrator:
                     ladder_metrics["handoff_count"] = ladder_metrics.get("handoff_count", 0.0) + 1.0
             if name == "composition" and ladder_metrics.get("handoff_count", 0.0):
                 ladder_metrics["recovery_result"] = float(outcome.metric)
+            support, _query, support_status, _query_status = self._quality_of_result(outcome)
+            notes = [f"{outcome.generations_used} generations"]
+            if support_status == "no_executable_champion":
+                notes.append("diagnostic only; no executable champion")
+            if name == "routed" and "router_score" in outcome.strategy_metrics:
+                notes.append(f"router {outcome.strategy_metrics['router_score']:.3f}")
+                if "distilled_score" in outcome.strategy_metrics:
+                    notes.append(f"distilled {outcome.strategy_metrics['distilled_score']:.3f}")
+                if ladder_metrics.get("handoff_count", 0.0):
+                    notes.append("executable handoff prepared")
+            if declined:
+                notes.append("resource guard declined allocation")
+            self.display.stage_result(
+                name,
+                "accepted" if self._accepts_result(outcome) else "continue",
+                " · ".join(notes),
+                seconds=stage_elapsed,
+                depth=getattr(self, "_display_depth", 0),
+                support_accuracy=support,
+            )
             remaining -= outcome.generations_used
             carry = max(0, allocation - outcome.generations_used)
             if self._accepts_result(outcome):
@@ -679,6 +738,7 @@ class Orchestrator:
             improved, refine_generations = self._refine_hit(hit, task, spec, depth)
             if improved is not None:
                 return improved  # _refine_hit already recorded the "refined" attempt
+        self.display.query_result(hit.query_accuracy, hit.query_status, depth=depth)
         self._record(
             Attempt(
                 task=task.meta.name,
@@ -690,6 +750,10 @@ class Orchestrator:
                 refine_generations=refine_generations,
                 report_metric=hit.report_metric,
                 task_metrics=dict(hit.task_metrics),
+                support_accuracy=hit.support_accuracy,
+                query_accuracy=hit.query_accuracy,
+                support_status=hit.support_status,
+                query_status=hit.query_status,
             )
         )
         return hit
@@ -699,15 +763,19 @@ class Orchestrator:
         improvement (metric, then robustness, then lower complexity). Runs ONLY the strategy
         matching the entry shape, so K stays focused and `_evolve`'s share arithmetic is untouched."""
         assert hit.key is not None
+        self.display.stage_started("refine")
+        refine_started = time.perf_counter()
         entry = self.library.load(hit.key)
         strategy_name = "direct" if entry.entry_type == MODULE else "composition"
         strategy = dict(self.strategies).get(strategy_name)
         if strategy is None:
             self.counters["refine_skipped_no_strategy"] += 1
+            self.display.stage_result("refine", "skipped", "no compatible refinement strategy", seconds=time.perf_counter() - refine_started, depth=depth)
             return None, 0
         effective_budget = self._effective_refine_budget(entry)
         if effective_budget < self.refine_min_generations:
             self.counters["refine_skipped_decayed"] += 1
+            self.display.stage_result("refine", "skipped", "the lineage has exhausted its useful refinement allowance", seconds=time.perf_counter() - refine_started, depth=depth)
             return None, 0
         self.counters["refine_attempts"] += 1
         # The target is deliberately NOT clamped to 1.0: an incumbent at 1.0 makes it unreachable,
@@ -736,6 +804,10 @@ class Orchestrator:
         if not improves:
             self.library.record_refinement(hit.key, improved=False)
             self.counters["refine_no_gain"] += 1
+            support, _query, _support_status, _query_status = self._quality_of_result(result)
+            self.display.stage_result(
+                "refine", "continue", "retrieved solution remains stronger", seconds=time.perf_counter() - refine_started, depth=depth, support_accuracy=support
+            )
             return None, result.generations_used
 
         # Scalars, not the stats dict: `summary` copies shallowly, and record_refinement below
@@ -762,34 +834,13 @@ class Orchestrator:
         if key is not None and self.refine_retire_superseded and candidate is not None:
             self._retire_if_dominated(hit.key, candidate, incumbent)
         self.counters["refine_improvements"] += 1
-        self._record(
-            Attempt(
-                task=task.meta.name,
-                depth=depth,
-                outcome="refined",
-                metric=result.metric,
-                generations=result.generations_used,
-                library_key=key,
-                strategy=result.strategy,
-                refine_generations=result.generations_used,
-                sample_metrics=_sample_metrics_of(result),
-                size_metrics=dict(result.size_metrics),
-                resource_metrics=dict(result.resource_metrics),
-                strategy_metrics=dict(result.strategy_metrics),
-                report_metric=self._result_report_value(result),
-                task_metrics=_task_metrics_of(result),
-            )
+        self._record(self._attempt_from_result(result, task=task.meta.name, depth=depth, outcome="refined", library_key=key, refine_generations=result.generations_used))
+        support, query, _support_status, query_status = self._quality_of_result(result)
+        self.display.stage_result(
+            "refine", "accepted", "strict non-regressing improvement selected", seconds=time.perf_counter() - refine_started, depth=depth, support_accuracy=support
         )
-        return (
-            Solution(
-                key=key,
-                entry_type=self._entry_type_of(result),
-                metric=result.metric,
-                report_metric=self._result_report_value(result),
-                task_metrics=_task_metrics_of(result),
-            ),
-            result.generations_used,
-        )
+        self.display.query_result(query, query_status, depth=depth)
+        return self._solution_from_result(result, key), result.generations_used
 
     def _effective_refine_budget(self, entry: LibraryEntry) -> int:
         summary = self.library.summary(entry.key) or {}
@@ -925,7 +976,7 @@ class Orchestrator:
             self.counters["wall_stones_improved"] += 1
         else:
             self.counters["wall_stones_admitted"] += 1
-        logger.info("wall ledger shelved stepping stone %s for %s (best %s=%.3f)", key, task.meta.name, self.search_metric, result.metric)
+        logger.debug("wall ledger shelved stepping stone %s for %s (best %s=%.3f)", key, task.meta.name, self.search_metric, result.metric)
         return key
 
     # --- ladder steps -------------------------------------------------------------------------------
@@ -948,7 +999,19 @@ class Orchestrator:
             report_assessment = self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment
             report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else metric
             combined = dict(assessment.metrics) | (dict(report_assessment.metrics) if report_assessment is not None else {})
-            return Solution(key=entry.key, entry_type=entry.entry_type, metric=metric, report_metric=report_metric, task_metrics=_task_metrics(combined))
+            support_accuracy = _finite_accuracy(assessment.metrics, "support_accuracy")
+            query_accuracy = _finite_accuracy(report_assessment.metrics, "query_accuracy", loss_key="query_loss") if report_assessment is not None else None
+            return Solution(
+                key=entry.key,
+                entry_type=entry.entry_type,
+                metric=metric,
+                report_metric=report_metric,
+                task_metrics=_task_metrics(combined),
+                support_accuracy=support_accuracy,
+                query_accuracy=query_accuracy,
+                support_status="evaluated" if support_accuracy is not None else "evaluation_unavailable",
+                query_status="evaluated" if query_accuracy is not None else "evaluation_unavailable",
+            )
         return None
 
     @staticmethod
@@ -1013,6 +1076,8 @@ class Orchestrator:
     def _decompose_and_recurse(self, task: Task, spec: CompTaskSpec, depth: int, budget: int, first_metric: float) -> Solution | None:
         if self._total_deadline_exceeded():
             return None
+        self.display.stage_started("decompose")
+        decompose_started = time.perf_counter()
         chosen_name: str | None = None
         subtasks: list[Subtask] = []
         for op_name, op in self.decomposers:
@@ -1022,14 +1087,15 @@ class Orchestrator:
             if len(produced) < 2:
                 continue
             if not self._subtasks_promising(produced):
-                logger.info("decompose op %s produced subtasks that fail the solvability probe; skipping", op_name)
+                logger.debug("decompose op %s produced subtasks that fail the solvability probe; skipping", op_name)
                 continue
             chosen_name, subtasks = op_name, produced
             break
         if not subtasks:
+            self.display.stage_result("decompose", "miss", "no registered split produced useful independent subtasks", seconds=time.perf_counter() - decompose_started, depth=depth)
             return None
         self.counters["decompositions"] += 1
-        logger.info("decomposing %s via %s into %d subtasks (depth %d)", task.meta.name, chosen_name, len(subtasks), depth)
+        logger.debug("decomposing %s via %s into %d subtasks (depth %d)", task.meta.name, chosen_name, len(subtasks), depth)
 
         solutions: list[tuple[Subtask, Solution]] = []
         for subtask in subtasks:
@@ -1041,6 +1107,9 @@ class Orchestrator:
                 self.counters["decompose_subtask_failed"] += 1
                 self._failure_stage = f"subtask:{subtask.task.meta.name}"
                 self._failure_op = chosen_name
+                self.display.stage_result(
+                    "decompose", "failed", f"required subtask {subtask.task.meta.name} did not solve", seconds=time.perf_counter() - decompose_started, depth=depth
+                )
                 return None
             solutions.append((subtask, solved))
 
@@ -1054,37 +1123,42 @@ class Orchestrator:
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         if self.blind_query:
             result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
+            _support, query, _support_status, query_status = self._quality_of_result(result)
+            self.display.query_result(query, query_status, depth=depth)
         if self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=chosen_name)
-            self.counters["accepts"] += 1
-            attempt = Attempt(
-                task=task.meta.name,
+            support, _query, _support_status, _query_status = self._quality_of_result(result)
+            self.display.stage_result(
+                "decompose",
+                "accepted",
+                f"{len(subtasks)} solved parts recomposed successfully",
+                seconds=time.perf_counter() - decompose_started,
                 depth=depth,
-                outcome="decomposed",
-                metric=result.metric,
-                generations=result.generations_used,
-                library_key=key,
-                decompose_op=chosen_name,
-                strategy=result.strategy,
-                sample_metrics=_sample_metrics_of(result),
-                size_metrics=dict(result.size_metrics),
-                resource_metrics=dict(result.resource_metrics),
-                strategy_metrics=dict(result.strategy_metrics),
-                report_metric=self._result_report_value(result),
-                task_metrics=_task_metrics_of(result),
+                support_accuracy=support,
             )
+            self.display.stage_result(
+                "persist",
+                "saved" if key is not None else "skipped",
+                "recomposed solution retained for reuse" if key is not None else "solution accepted but not retained by library policy",
+                depth=depth,
+            )
+            self.counters["accepts"] += 1
+            attempt = self._attempt_from_result(result, task=task.meta.name, depth=depth, outcome="decomposed", library_key=key, decompose_op=chosen_name)
             self._record(attempt)
-            return Solution(
-                key=key,
-                entry_type=self._entry_type_of(result),
-                metric=result.metric,
-                report_metric=self._result_report_value(result),
-                task_metrics=_task_metrics_of(result),
-            )
+            return self._solution_from_result(result, key)
         # Every part solved but the wired parent still missed the bar.
         self.counters["decompose_parent_failed"] += 1
         self._failure_stage = "parent_re_evolve"
         self._failure_op = chosen_name
+        support, _query, _support_status, _query_status = self._quality_of_result(result)
+        self.display.stage_result(
+            "decompose",
+            "failed",
+            "all parts solved, but the recomposed parent stayed below threshold",
+            seconds=time.perf_counter() - decompose_started,
+            depth=depth,
+            support_accuracy=support,
+        )
         return None
 
     def _subtasks_promising(self, subtasks: list[Subtask]) -> bool:
@@ -1115,7 +1189,7 @@ class Orchestrator:
         decision = self.admission(self.library, entry_type=entry_type, io=io, provenance=provenance)
         if not decision.admit:
             self.counters["admission_rejected"] += 1
-            logger.info("admission rejected (%s): %s", entry_type, decision.reason)
+            logger.debug("admission rejected (%s): %s", entry_type, decision.reason)
             return None
         for retired_key in decision.retire:
             self.library.retire(retired_key)
@@ -1243,10 +1317,10 @@ class Orchestrator:
     def _port_wired_skeleton(self, spec: CompTaskSpec, solutions: list[tuple[Subtask, Solution]]) -> CompositionGenome | None:
         """Seed every decomposer role with compact immutable gather/scatter port maps."""
         if any(solution.key is None for _subtask, solution in solutions):
-            logger.info("a sub-solution was solved but not shelved; relying on the ref catalog instead of a wired skeleton")
+            logger.debug("a sub-solution was solved but not shelved; relying on the ref catalog instead of a wired skeleton")
             return None
         if any(not subtask.port.input_runs or not subtask.port.output_runs for subtask, _ in solutions):
-            logger.info("decomposition produced a legacy port without compact maps; relying on the ref catalog instead")
+            logger.debug("decomposition produced a legacy port without compact maps; relying on the ref catalog instead")
             return None
 
         signature, parent_width = spec.input_specs[0]
@@ -1264,7 +1338,7 @@ class Orchestrator:
             input_count = sum(run[2] for run in subtask.port.input_runs)
             output_count = sum(run[2] for run in subtask.port.output_runs)
             if input_count != in_width or output_count != out_width:
-                logger.info(
+                logger.debug(
                     "compact port map width drift for %s: map %d->%d, entry %d->%d; relying on the ref catalog",
                     subtask.task.meta.name,
                     input_count,
@@ -1374,6 +1448,78 @@ class Orchestrator:
     def _result_report_value(self, result: StrategyResult) -> float | None:
         return self._report_value(result.report_metrics) if result.report_metrics else None
 
+    def _quality_of_result(self, result: StrategyResult) -> tuple[float | None, float | None, str, str]:
+        """Return literal support/query accuracy plus explicit availability states.
+
+        A router diagnostic without an executable payload is deliberately not promoted to a task
+        result. The configurable policy scores continue to live in `metric`/`report_metric`.
+        """
+
+        if not result.has_admissible_champion:
+            return None, None, "no_executable_champion", "no_executable_champion"
+        support = _finite_accuracy(result.champion_metrics, "support_accuracy")
+        support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        query_metrics = result.report_metrics if self.blind_query else result.champion_metrics
+        query = _finite_accuracy(query_metrics, "query_accuracy", loss_key="query_loss")
+        if query is not None:
+            query_status = "evaluated"
+        elif "query_loss" in query_metrics and not math.isfinite(float(query_metrics["query_loss"])):
+            query_status = "query_split_unavailable"
+        else:
+            query_status = "evaluation_unavailable"
+        return support, query, support_status, query_status
+
+    def _attempt_from_result(
+        self,
+        result: StrategyResult,
+        *,
+        task: str,
+        depth: int,
+        outcome: str,
+        library_key: str | None = None,
+        decompose_op: str | None = None,
+        failure_stage: str | None = None,
+        refine_generations: int = 0,
+        query_status: str | None = None,
+    ) -> Attempt:
+        support, query, support_status, observed_query_status = self._quality_of_result(result)
+        return Attempt(
+            task=task,
+            depth=depth,
+            outcome=outcome,
+            metric=result.metric,
+            generations=result.generations_used,
+            library_key=library_key,
+            decompose_op=decompose_op,
+            strategy=result.strategy,
+            failure_stage=failure_stage,
+            refine_generations=refine_generations,
+            sample_metrics=_sample_metrics_of(result),
+            size_metrics=dict(result.size_metrics),
+            resource_metrics=dict(result.resource_metrics),
+            strategy_metrics=dict(result.strategy_metrics),
+            report_metric=self._result_report_value(result),
+            task_metrics=_task_metrics_of(result),
+            support_accuracy=support,
+            query_accuracy=query,
+            support_status=support_status,
+            query_status=query_status if query is None and query_status is not None else observed_query_status,
+        )
+
+    def _solution_from_result(self, result: StrategyResult, key: str | None) -> Solution:
+        support, query, support_status, query_status = self._quality_of_result(result)
+        return Solution(
+            key=key,
+            entry_type=self._entry_type_of(result),
+            metric=result.metric,
+            report_metric=self._result_report_value(result),
+            task_metrics=_task_metrics_of(result),
+            support_accuracy=support,
+            query_accuracy=query,
+            support_status=support_status,
+            query_status=query_status,
+        )
+
     def _report_value(self, metrics: dict[str, float]) -> float | None:
         if not self.blind_query:
             return None
@@ -1391,11 +1537,12 @@ class Orchestrator:
             attempt.seconds = round(time.perf_counter() - started, 3)
             attempt.stage_seconds = dict(getattr(self, "_active_stages", None) or {})
         self.attempts.append(attempt)
-        logger.info("attempt: %s", attempt.to_dict())
+        logger.debug("attempt: %s", attempt.to_dict())
         BOARD.event(f"{attempt.task} d{attempt.depth}: {attempt.outcome} {self.search_metric}={attempt.metric:.3f}")
 
     def _on_generation(self, strategy: str, generation: int, best: Any, mean_fitness: float) -> None:
-        BOARD.generation(strategy, generation, best.fitness, self._metric(best), mean_fitness)
+        support = float(best.metrics.get("support_accuracy", self._metric(best)))
+        self.display.generation(strategy, generation, best.fitness, support, mean_fitness)
         if self.proctor is not None:
             self.proctor.log_scalar("Fitness", f"{strategy}_best", best.fitness, self.state.generation)
             self.proctor.log_scalar("Fitness", f"{strategy}_mean", mean_fitness, self.state.generation)

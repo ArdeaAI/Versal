@@ -1,14 +1,13 @@
-# Shared frozen methodology for the paper ablation suite. Arms below this file change only their
-# named mechanism; the base inherits every other current all-features setting.
-extends = "../orchestrated_overmind_all_features.toml"
+extends = "../full_cluster.toml"
+
+# Reduced comparison scope for cluster ablations. Each arm inherits the flagship methodology and
+# changes only its named mechanism across the first five rungs.
 
 [run]
 experiment = "ablation_suite_rungs_1_5"
 
 [schedule]
-kind = "interleave_rungs"
 rungs = [1, 2, 3, 4, 5]
-require_all_rungs = true
 tasks_per_rung = 20
 
 [orchestrator]

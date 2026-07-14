@@ -8,8 +8,6 @@ import pytest
 
 from ardevo.utils.config import Config
 
-_FROZEN_PREFLIGHT_SHA256 = "bc023654a4c07cb438b2e3094b90b211a9d2a89c4fdc42405b8d46c491b9f18c"
-
 
 def _effective_hash(value: dict) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
@@ -122,18 +120,26 @@ def test_effective_hash_is_format_independent_and_changes_with_merged_values(tmp
     assert first_config["config_effective_sha256"] != changed_config["config_effective_sha256"]
 
 
-def test_full_cluster_is_a_frozen_preflight_overlay_with_declared_scale_and_archival() -> None:
-    preflight_path = Config.PROJECT_ROOT / "configs" / "preflight.toml"
+def test_full_cluster_scales_the_canary_method_and_enables_archival() -> None:
     full_path = Config.PROJECT_ROOT / "configs" / "full_cluster.toml"
-    assert hashlib.sha256(preflight_path.read_bytes()).hexdigest() == _FROZEN_PREFLIGHT_SHA256
 
     config = Config(full_path).current
 
-    assert [Path(source["path"]).name for source in config["config_sources"]] == ["preflight.toml", "full_cluster.toml"]
+    assert [Path(source["path"]).name for source in config["config_sources"]] == ["canary.toml", "full_cluster.toml"]
     assert config["machine_env"] == "ClusterCUDA"
     assert config["schedule"]["tasks_per_rung"] == 20
     assert config["orchestrator"]["tasks"] == 360
-    assert config["orchestrator"]["budgets"] == {"depth0": 2000, "depth1": 1000, "depth2": 500, "depth3": 250, "depth4": 125}
+    assert config["orchestrator"]["budgets"] == {
+        "depth0": 2000,
+        "depth1": 1000,
+        "depth2": 500,
+        "depth3": 250,
+        "depth4": 125,
+        "depth5": 62,
+        "depth6": 31,
+        "depth7": 15,
+        "depth8": 7,
+    }
     assert config["evolution"]["composition"]["max_inline_depth"] == 8
     assert config["evolution"]["composition"]["glue_storage"] == "f32"
     assert config["resources"]["mode"] == "adaptive"

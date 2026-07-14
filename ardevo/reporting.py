@@ -70,8 +70,10 @@ def _tasks(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _held_out(row: dict[str, Any]) -> float | None:
-    # ``report_metric`` is the canonical one-shot query rail.  The fallbacks support proposed
-    # future ledgers and hand-authored legacy fixtures without ever treating absence as zero.
+    # New ledgers carry the literal sample-level rail explicitly; report_metric remains the
+    # configurable legacy score (which may be task-exact rather than accuracy).
+    if "query_accuracy" in row:
+        return _finite(row.get("query_accuracy")) if row.get("query_status") == "evaluated" else None
     direct = _finite(row.get("report_metric"))
     if direct is not None:
         return direct
@@ -91,6 +93,8 @@ def _held_out(row: dict[str, Any]) -> float | None:
 
 
 def _support(row: dict[str, Any]) -> float | None:
+    if "support_accuracy" in row:
+        return _finite(row.get("support_accuracy")) if row.get("support_status") == "evaluated" else None
     value = _finite(row.get("metric"))
     if value is not None:
         return value

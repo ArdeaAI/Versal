@@ -13,7 +13,7 @@ from ardevo.utils.pipelines import Pipeline
 def require_orchestrator(config: dict[str, Any]) -> None:
     """The orchestrated trial is the only run mode; fail fast on a config that cannot drive it."""
     if not config.get("orchestrator"):
-        raise SystemExit("config has no [orchestrator] table; the canonical run config is configs/orchestrated_overmind_all_features.toml")
+        raise SystemExit("config has no [orchestrator] table; the default run config is configs/smoke.toml")
 
 
 def configure_assess_pool(config: dict[str, Any]) -> None:
@@ -72,11 +72,13 @@ def load_run_config(config_path: str | None, resume: str | None) -> Config:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ArdEVO: the orchestrated overmind evolver on the Icarus ladder.")
-    parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/orchestrated_overmind_all_features.toml).")
+    parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/smoke.toml).")
     parser.add_argument("--resume", type=str, default=None, help="Resume a run from its directory (e.g. results/<ts>_orchestrated).")
     parser.add_argument("--seed", type=int, default=None, help="Override [run] seed (the multi-seed matrix driver's seam; the config file stays frozen).")
     parser.add_argument("--library-dir", type=str, default=None, help="Override [orchestrator] library_dir (cold/warm arms without editing the config).")
+    parser.add_argument("--verbose", action="store_true", help="Show concise operational diagnostics in addition to the Rich run display.")
     args = parser.parse_args()
+    Logger.configure(verbose=args.verbose)
 
     config = load_run_config(args.config, args.resume)
     require_orchestrator(config.current)
@@ -91,7 +93,7 @@ def main() -> None:
     logger = Logger.get_logger()
 
     pipe = Pipeline(config.current, load_data=False)
-    logger.info("pipeline: %s", pipe.get_pipeline_info())
+    logger.debug("pipeline: %s", pipe.get_pipeline_info())
     pipe.add_trial(OrchestratedTrial)
     pipe.run_task()
 

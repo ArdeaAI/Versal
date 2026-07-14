@@ -245,7 +245,7 @@ class CompositionStrategy:
         if runtime.accepted(fresh):
             return fresh
         if runtime.accepted(best):
-            logger.info("champion verification dropped below threshold (stale %.3f -> fresh %.3f); one re-fit", runtime.metric_of(best), runtime.metric_of(fresh))
+            logger.debug("champion verification dropped below threshold (stale %.3f -> fresh %.3f); one re-fit", runtime.metric_of(best), runtime.metric_of(fresh))
             refit = runtime.loop.assess_composition(best.comp, spec, runtime.state, train=True)
             return refit if runtime.metric_of(refit) >= runtime.metric_of(fresh) else fresh
         return fresh

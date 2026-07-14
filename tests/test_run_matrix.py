@@ -12,7 +12,7 @@ def _summary(tasks: list[dict], **overrides: object) -> dict:
     summary: dict[str, object] = {
         "run_dir": "results/x",
         "status": "done",
-        "config_path": "configs/recon_ladder.toml",
+        "config_path": "configs/canary.toml",
         "config_sha256": "deadbeef",
         "seed": 0,
         "library_dir": "library_recon",

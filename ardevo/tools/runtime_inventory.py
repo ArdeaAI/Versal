@@ -108,10 +108,10 @@ def _registry_surface() -> dict[str, list[str]]:
 def build_inventory() -> dict[str, Any]:
     config_path = Config.DEFAULT_CONFIG
     config_bytes = config_path.read_bytes()
-    raw_config = tomllib.loads(config_bytes.decode("utf-8"))
+    effective_config, _sources = Config._load_config_tree(config_path)
     with open(Config.TOML_FILE, "rb") as handle:
         project = tomllib.load(handle)
-    tables, keys = _config_surface(raw_config)
+    tables, keys = _config_surface(effective_config)
     scripts = {str(name): str(target) for name, target in project.get("project", {}).get("scripts", {}).items()}
     runtime_config = Config(conf_path=config_path).current
     return {

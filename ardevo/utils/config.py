@@ -1,7 +1,7 @@
 """Configuration for ArdEVO.
 
-`configs/orchestrated_overmind_all_features.toml` is the canonical run configuration (and the
-default when `uv run app` gets no --config). `Config` parses it and produces `current`, a flat dict that
+`configs/smoke.toml` is the default when `uv run app` gets no --config. It inherits the complete
+method from `configs/canary.toml`. `Config` parses it and produces `current`, a flat dict that
 the `Pipeline`/`Proctor` infra reads (scalar run settings plus a `hyperparameters` dict for
 ClearML), while preserving the nested `evolution`/`substrate`/`fitness` tables verbatim so
 the evolver factory can resolve operators from them.
@@ -22,7 +22,7 @@ class Config:
 
     PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
     TOML_FILE: ClassVar[Path] = PROJECT_ROOT / "pyproject.toml"
-    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "configs" / "orchestrated_overmind_all_features.toml"
+    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "configs" / "smoke.toml"
 
     def __init__(self, conf_path: Path | str | None = None) -> None:
         self.toml = self._load_toml()

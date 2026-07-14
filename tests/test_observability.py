@@ -5,6 +5,8 @@ used to leave empty directories whenever nothing new was shelved."""
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.multitask import task_entry
@@ -47,6 +49,8 @@ def test_attempts_carry_wall_clock_and_stage_forensics(xor_task: Task, tmp_path:
     assert attempt.seconds > 0.0
     assert attempt.stage_seconds  # at least one strategy timed
     assert all(value >= 0.0 for value in attempt.stage_seconds.values())
+    assert attempt.support_status == "evaluated" and attempt.support_accuracy is not None
+    assert attempt.query_status == "evaluated" and attempt.query_accuracy is not None
     row = attempt.to_dict()
     assert row["seconds"] == attempt.seconds and row["stage_seconds"] == attempt.stage_seconds
     assert Attempt.from_dict(row).stage_seconds == attempt.stage_seconds
@@ -57,6 +61,28 @@ def test_attempts_from_old_checkpoints_without_timing_still_restore() -> None:
     attempt = Attempt.from_dict(legacy)
     assert attempt.seconds == 0.0 and attempt.stage_seconds == {}
     assert "seconds" not in attempt.to_dict()  # zero stays absent: old summaries byte-identical
+
+
+def test_literal_accuracy_round_trip_distinguishes_zero_from_missing() -> None:
+    attempt = Attempt(
+        task="xor",
+        depth=0,
+        outcome="failed",
+        metric=0.7,
+        generations=2,
+        support_accuracy=0.0,
+        query_accuracy=None,
+        support_status="evaluated",
+        query_status="time_limit_before_evaluation",
+    )
+    row = attempt.to_dict()
+    assert row["support_accuracy"] == 0.0 and row["query_accuracy"] is None
+    restored = Attempt.from_dict(row)
+    assert restored.support_accuracy == 0.0 and restored.support_status == "evaluated"
+    assert restored.query_accuracy is None and restored.query_status == "time_limit_before_evaluation"
+
+    legacy = Attempt.from_dict({"task": "xor", "depth": 0, "outcome": "failed", "metric": 0.0, "generations": 0})
+    assert legacy.support_status == "legacy_missing" and "support_accuracy" not in legacy.to_dict()
 
 
 def test_attempt_sample_metrics_round_trip_and_absent_when_empty() -> None:
@@ -136,6 +162,27 @@ def test_run_summary_records_a_task_that_admits_nothing(tmp_path: Path, xor_task
     assert row["outcome"] == "failed" and row["strategy"] == "direct" and row["new_library_keys"] == []
 
 
+def test_run_summary_task_row_preserves_literal_zero_and_unavailable_reason(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    entry = task_entry(xor_task)
+    attempt = Attempt(
+        task=entry.name,
+        depth=0,
+        outcome="failed",
+        metric=0.5,
+        generations=1,
+        support_accuracy=0.0,
+        query_accuracy=None,
+        support_status="evaluated",
+        query_status="evaluation_unavailable",
+    )
+    trial._record_task(entry, attempt, [], 0)
+    assert trial.task_records[0]["support_accuracy"] == 0.0
+    assert trial.task_records[0]["query_accuracy"] is None
+    assert trial.task_records[0]["query_status"] == "evaluation_unavailable"
+
+
 def test_run_summary_carries_config_provenance(tmp_path: Path, xor_task: Task) -> None:
     """A results directory identifies its exact config, seed, and library; a reviewer (or the
     matrix driver) never has to match a run to a config by schedule shape again."""
@@ -144,7 +191,7 @@ def test_run_summary_carries_config_provenance(tmp_path: Path, xor_task: Task) -
     sources = [{"path": "configs/base.toml", "sha256": "cd" * 32}]
     trial.config = dict(
         trial.config,
-        config_path="configs/recon_ladder.toml",
+        config_path="configs/canary.toml",
         config_sha256="ab" * 32,
         config_effective_sha256="ef" * 32,
         config_sources=sources,
@@ -152,7 +199,7 @@ def test_run_summary_carries_config_provenance(tmp_path: Path, xor_task: Task) -
     )
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
-    assert summary["config_path"] == "configs/recon_ladder.toml"
+    assert summary["config_path"] == "configs/canary.toml"
     assert summary["config_sha256"] == "ab" * 32
     assert summary["config_effective_sha256"] == "ef" * 32
     assert summary["config_sources"] == sources
@@ -175,6 +222,23 @@ def test_crash_leaves_a_diagnosable_summary(tmp_path: Path) -> None:
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: ValueError: boom")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
     assert summary["status"].startswith("crashed") and "boom" in summary["status"]
+
+
+def test_interruption_history_is_separate_and_keeps_task_retryable(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    trial.interruptions = []
+    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve network", provisional_support=0.75))
+    entry = task_entry(xor_task)
+    trial._record_interruption(entry, task_cursor=0, error=RuntimeError("boom"), elapsed=2.5)
+    trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: RuntimeError: boom")
+
+    summary = json.loads((trial.run_dir / "run_summary.json").read_text())
+    assert summary["tasks_attempted"] == 0 and summary["tasks"] == []
+    assert summary["interruptions"][0]["task"] == entry.name
+    assert summary["interruptions"][0]["support_accuracy"] == 0.75
+    assert summary["interruptions"][0]["query_status"] == "task_crashed"
+    assert trial._load_prior_interruptions() == summary["interruptions"]
 
 
 def test_rolling_checkpoint_restores_exact_state(tmp_path: Path) -> None:

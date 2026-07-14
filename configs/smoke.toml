@@ -1,0 +1,40 @@
+extends = "canary.toml"
+
+# Fast end-to-end health check across all rungs. It retains every strategy but reduces the
+# populations, training, recursion, and data needed to expose broken wiring in 10-30 minutes.
+
+[run]
+experiment = "orchestrated_overmind_smoke"
+clearml = false
+
+[dataset]
+n_samples = 48
+
+[orchestrator]
+max_task_seconds = 90
+max_total_task_seconds = 90
+max_depth = 1
+
+  [orchestrator.budgets]
+  depth0 = 40
+  depth1 = 20
+
+  [orchestrator.direct]
+  pop_size = 16
+
+    [orchestrator.direct.train]
+    steps = 20
+
+[evolution]
+pop_size = 32
+
+  [evolution.train]
+  steps = 20
+
+  [evolution.composition]
+  pop_size = 24
+  max_inline_depth = 4
+  max_initial_glue_values = 5000000
+
+  [evolution.modules]
+  pop_size = 32

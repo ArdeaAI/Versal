@@ -1,20 +1,9 @@
-# RECON LADDER (plan Phase 0): the first-ever scheduled attempts on rungs 8-10, 16, 17, plus the
-# known 1-7 as the comparison anchor, under a hard per-task time budget. This produces the baseline
-# per-rung tier scorecard every later phase is measured against (uv run run_matrix --scorecard).
-#
-# EXCLUDED rungs, by measured init math ((n_in + 1) x n_out genes under minimal init, widths from
-# `uv run rung_doctor --rungs 1-18`): 11 spherical (108k x 100 = 10.8M), 12 cosmic (65k x 65k),
-# 13 darcy (17k x 17k), 14 psicov (116k x 205k), 15 fsd50k (5633 x 200 = 1.13M), 18 arc
-# (901 x 9000 = 8.1M). All are init-wall class until the Phase 1 sparse/factored init lands; the
-# deadline check cannot interrupt ladder position 0, so scheduling them here would wedge the run.
-#
-#   uv run run_matrix --config configs/recon_ladder.toml --seeds 0 --cold
-#
-# Derived from configs/orchestrated_overmind.toml; deltas are marked RECON.
+# Complete local methodology: one task from every rung with every search, reuse, and
+# decomposition mechanism enabled. Intended for an M4 Max and roughly a 1-2 hour run.
 
 [run]
 project = "ardevo"
-experiment = "recon_ladder"          # RECON
+experiment = "orchestrated_overmind_canary"
 clearml = true
 machine = "MonadMetal"
 seed = 0
@@ -23,48 +12,70 @@ output_uri = false
 repo = "https://github.com/ArdeaAI/ardevo.git"
 render_async = true
 tf32 = false
+live_status = true
+
   [run.duration]
   generations = 1000
 
 [dataset]
 source = "Ardea/Icarus-dataset"
-n_samples = 400
+n_samples = 128
 support_fraction = 0.8
 
 [schedule]
 kind = "interleave_rungs"
-rungs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17]   # RECON: every rung minimal init can survive
+rungs = "all"
 require_all_rungs = true
-tasks_per_rung = 2                    # RECON: breadth, not depth
+tasks_per_rung = 1
 shuffle = true
 
 [orchestrator]
-tasks = 24                            # RECON: 12 rungs x 2 tasks
-accept_metric = "query_accuracy"
+tasks = 18
+# Search uses dense support feedback, admission respects task-level semantics, and reporting is held out.
+search_metric = "support_accuracy"
+accept_metric = "support_task_appropriate"
+report_metric = "query_task_appropriate"
+blind_query = true
 accept_threshold = 0.95
 floor = 0.35
 stall_generations = 28
 stall_epsilon = 0.005
-max_depth = 2
+max_task_seconds = 600
+max_total_task_seconds = 600
+max_depth = 8
 quick_eval_top_k = 5
-library_dir = "library_recon"         # RECON: never touches the live library (run_matrix --cold overrides per seed)
-max_task_seconds = 300                # RECON: no rung may eat the run; forensics still land
-evolve = ["routed", "direct", "composition"]
+library_dir = "library"
+# Oversized dense initializations decompose before trying a flat network.
+decompose_first_above = 2000000
+evolve = ["routed", "grammar", "direct", "composition"]
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
+output_slices_max_output_features = 1024
 input_subsets_n_subsets = 2
 time_windows_n_windows = 2
 spatial_patches_n_patches = 2
 decompose_solvability_floor = 0.6
 decompose_probe_generations = 6
+
+  # Deeper subproblems receive progressively smaller evolutionary searches.
   [orchestrator.budgets]
   depth0 = 240
   depth1 = 120
   depth2 = 80
+  depth3 = 40
+  depth4 = 20
+  depth5 = 10
+  depth6 = 5
+  depth7 = 5
+  depth8 = 5
+
   [orchestrator.evolve_budget]
-  routed = 0.2
-  direct = 0.5
-  composition = 0.3
+  routed = 0.15
+  grammar = 0.15
+  direct = 0.45
+  composition = 0.25
+
+  # The router selects frozen library experts, then distills successful pathways into reusable compositions.
   [orchestrator.routed]
   d_model = 64
   top_k = 2
@@ -89,6 +100,35 @@ decompose_probe_generations = 6
   ponder_epsilon = 0.01
   ponder_cost = 0.001
   edge_bias = true
+
+  # Grammar search recombines structures independently rediscovered across multiple lineages.
+  [orchestrator.grammar]
+  max_productions = 12
+  candidates_per_production = 3
+  mutation_steps = 2
+  module_sizes = [3, 4]
+  composition_sizes = [2, 3, 4]
+  min_lineage_support = 2
+  per_entry_cap = 5000
+
+  # Direct search grows task-shaped networks and trains their weights with a warmup/cosine schedule.
+  [orchestrator.direct]
+  pop_size = 64
+  elitism = 2
+  assess_workers = "auto"
+  max_flat_outputs = 4096
+  max_init_genes = 2000000
+  structured_grid = true
+
+    [orchestrator.direct.train]
+    kind = "gradient_scheduled"
+    steps = 160
+    lr = 0.03
+    writeback = true
+    weight_decay = 0.0002
+    compute_policy_path = "results/compute_policy.json"
+
+  # A library hit may spend a small decaying budget to improve capability or compress its topology.
   [orchestrator.refine]
   budget_k = 24
   depth_max = 0
@@ -98,22 +138,15 @@ decompose_probe_generations = 6
   min_generations = 4
   stall_generations = 8
   retire_superseded = true
+
+  # Below-threshold champions become warm starts instead of being discarded between related tasks.
   [orchestrator.wall]
   ledger = true
   min_metric = 0.45
+  min_gain_over_baseline = 0.0
   seed_top_k = 1
-  [orchestrator.direct]
-  pop_size = 64
-  elitism = 2
-  assess_workers = 12
-    [orchestrator.direct.train]
-    kind = "gradient_refine"
-    batched = false
-    steps = 120
-    lr = 0.03
-    writeback = true
-    weight_decay = 0.0002
 
+# The quality-diversity archive keeps distinct useful behaviors while bounding each I/O signature.
 [library]
 admission = "archive"
 gc = true
@@ -131,18 +164,47 @@ recurrent = true
 loop = "hierarchical"
 pop_size = 64
 elitism = 1
+
+  # A small coordinate network generates sparse, diverse initial connectivity for every genome.
   [evolution.init]
-  kind = "minimal"
+  kind = "cppn"
   weight_scale = 1.0
+  hidden = 4
+  density = 0.3
+  generator_hidden = 3
+
   [evolution.selection]
-  kind = "tournament"
-  tournament_size = 3
-  parsimony_epsilon = 0.01            # RECON: anti-bloat guardrail on for the wide rungs
+  kind = "nsga2"
+  parsimony_epsilon = 0.01
+
   [evolution.crossover]
   kind = "neat"
   rate = 0.2
-  [evolution.mutation]                # RECON: default operator set plus the true prune pair
-  operators = ["add_rich_node", "add_deep_node", "add_connection", "toggle_connection", "mutate_activation", "mutate_aggregation", "add_recurrent_connection", "add_library_module", "add_macro_node", "tweak_refine_steps", "add_local_node", "add_local_connection", "add_shared_motif", "remove_connection", "remove_hidden_node"]
+
+  # Mutation rates are inherited and perturbed so each lineage can adapt its structural search pressure.
+  [evolution.mutation]
+  self_adaptive = true
+  self_adaptive_learning_rate = 0.1
+  self_adaptive_min = 0.001
+  self_adaptive_max = 1.0
+  operators = [
+    "add_rich_node",
+    "add_deep_node",
+    "add_connection",
+    "toggle_connection",
+    "mutate_activation",
+    "mutate_aggregation",
+    "add_recurrent_connection",
+    "add_macro_node",
+    "tweak_refine_steps",
+    "add_local_node",
+    "add_local_connection",
+    "add_shared_motif",
+    "untie_motif_weights",
+    "remove_connection",
+    "remove_hidden_node",
+    "prune_and_regrow",
+  ]
   add_rich_node_prob = 0.12
   add_rich_node_fan_in = 4
   add_deep_node_prob = 0.12
@@ -154,7 +216,6 @@ elitism = 1
   mutate_aggregation_prob = 0.05
   mutate_aggregation_max_fan_in = 4
   add_recurrent_connection_prob = 0.04
-  add_library_module_prob = 0.05
   add_macro_node_prob = 0.05
   add_macro_node_max_outputs = 16
   tweak_refine_steps_prob = 0.06
@@ -165,18 +226,33 @@ elitism = 1
   add_local_connection_radius = 1.5
   add_shared_motif_prob = 0.05
   add_shared_motif_copies = 2
-  remove_connection_prob = 0.05       # RECON
-  remove_hidden_node_prob = 0.05      # RECON
+  add_shared_motif_tied = true
+  untie_motif_weights_prob = 0.02
+  remove_connection_prob = 0.05
+  remove_hidden_node_prob = 0.05
+  prune_and_regrow_prob = 0.1
+  prune_and_regrow_fraction = 0.05
+
+  # Composition training tunes glue and live module copies, then writes learned weights back.
   [evolution.train]
   kind = "gradient"
   steps = 40
   lr = 0.03
   writeback = true
   weight_decay = 0.0002
+
   [evolution.evaluate]
   kind = "hybrid"
   samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
   batched_samples = "auto"
+
+  # Novelty rewards behaviors unlike the current population and its bounded task-local archive.
+  [evolution.novelty]
+  k = 15
+  archive_cap = 256
+  probe_rows = 64
+
+  # Species protect structurally distinct modules while the threshold tracks a target population count.
   [evolution.speciation]
   kind = "neat"
   threshold = 1.5
@@ -187,19 +263,26 @@ elitism = 1
   c_disjoint = 1.0
   c_weight = 0.5
 
+  # Compositions evolve graphs of reusable modules connected by trainable low-rank glue.
   [evolution.composition]
   pop_size = 48
   elitism = 2
-  max_inline_depth = 4
+  max_inline_depth = 8
   glue_rank = 8
   glue_rank_threshold = 4096
+  glue_storage = "f32"
+  max_initial_glue_values = 0
   catalog_width_tolerance = -1
+  version = 1
+
     [evolution.composition.selection]
     kind = "tournament"
     tournament_size = 2
+
     [evolution.composition.crossover]
     kind = "comp_neat"
     rate = 0.3
+
     [evolution.composition.mutation]
     operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
     add_module_node_prob = 0.3
@@ -209,6 +292,7 @@ elitism = 1
     perturb_glue_prob = 0.6
     perturb_glue_sigma = 0.3
 
+  # The shared module population absorbs reusable library structures and receives champion-only credit.
   [evolution.modules]
   pop_size = 64
   elitism = 1
@@ -222,6 +306,7 @@ elitism = 1
   seed_fraction = 0.25
   absorb_top_k = 2
 
+# Scalar fitness trains champions; the objective vector drives Pareto selection.
 [fitness]
 components = ["bounded_negative_support_loss", "support_accuracy", "weight_robustness", "hidden_penalty", "complexity_penalty"]
 w_bounded_negative_support_loss = 2.0
@@ -229,3 +314,4 @@ w_support_accuracy = 1.0
 w_weight_robustness = 0.5
 w_hidden_penalty = 0.05
 w_complexity_penalty = 0.01
+objectives = ["support_accuracy", "novelty", "connection_cost"]

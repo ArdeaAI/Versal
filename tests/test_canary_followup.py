@@ -42,8 +42,27 @@ def test_report_preserves_missing_vs_zero_and_future_wrapper(tmp_path: Path) -> 
                 "schema_version": 99,
                 "report": {
                     "records": [
-                        {"rung": 1, "task": "missing", "metric": 1.0, "outcome": "failed"},
-                        {"rung": 1, "task": "zero", "metric": 0.0, "report_metric": 0.0, "outcome": "evolved", "new_library_keys": []},
+                        {
+                            "rung": 1,
+                            "task": "missing",
+                            "metric": 1.0,
+                            "report_metric": 1.0,
+                            "query_accuracy": None,
+                            "query_status": "evaluation_unavailable",
+                            "outcome": "failed",
+                        },
+                        {
+                            "rung": 1,
+                            "task": "zero",
+                            "metric": 0.9,
+                            "report_metric": 0.8,
+                            "support_accuracy": 0.2,
+                            "support_status": "evaluated",
+                            "query_accuracy": 0.0,
+                            "query_status": "evaluated",
+                            "outcome": "evolved",
+                            "new_library_keys": [],
+                        },
                     ]
                 },
                 "rungs": [1],
@@ -54,6 +73,7 @@ def test_report_preserves_missing_vs_zero_and_future_wrapper(tmp_path: Path) -> 
     assert report["quality"]["held_out_query_count"] == 1
     assert report["quality"]["held_out_accuracy_mean"] == 0.0
     assert report["rungs"][0]["query_count"] == 1
+    assert report["rungs"][0]["support_mean"] == 0.6  # literal 0.2 plus the legacy metric fallback 1.0
     assert "N/A" not in (run / "rung_summary.csv").read_text().splitlines()[1]  # rung aggregate has a valid zero
 
 

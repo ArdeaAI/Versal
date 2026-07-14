@@ -510,7 +510,7 @@ class HierarchicalLoop:
             state.absorbed_keys.append(entry.key)
             absorbed += 1
         if absorbed:
-            logger.info("absorbed %d library entries into the module pool: %s", absorbed, state.absorbed_keys[-absorbed:])
+            logger.info("absorbed %d library entries into the module pool", absorbed)
             self._speciate_only(state)
         return absorbed
 

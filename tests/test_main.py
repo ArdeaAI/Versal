@@ -14,7 +14,7 @@ def test_missing_orchestrator_table_is_a_startup_error():
 
 
 def test_default_config_drives_the_orchestrated_trial():
-    config = Config()  # resolves configs/orchestrated_overmind_all_features.toml
+    config = Config()  # resolves the fast smoke profile
     require_orchestrator(config.current)
     assert config.current["orchestrator"].get("evolve")
     assert config.current["config_path"] == str(Config.DEFAULT_CONFIG)

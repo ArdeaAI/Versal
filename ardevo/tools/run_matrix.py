@@ -1,6 +1,6 @@
 """run_matrix: the multi-seed experiment driver plus the per-rung tier scorecard.
 
-    uv run run_matrix --config configs/recon_ladder.toml --seeds 0,1,2 --cold
+    uv run run_matrix --config configs/canary.toml --seeds 0,1,2 --cold
     uv run run_matrix --scorecard results/20260706_024726_orchestrated
 
 One arm = (config, seed, cold or shared library). Arms execute sequentially as subprocesses of the

@@ -1209,7 +1209,7 @@ class RoutedStrategy:
             {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": False}
         )
         service.checkpoint_and_evict()
-        logger.info("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
+        logger.debug("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
         return StrategyResult(
             strategy=self.name,
             metric=float(distilled_metric),
