@@ -16,6 +16,29 @@ the types in the metadata of that dataset that allow it to describe itself.
 
 We want to use ClearML for this as well as much as we can make use of it. I already have my config set up for that.
 
+## Usage
+
+```bash
+uv sync --group dev                         # install runtime and development dependencies
+uv run app                                  # run or resume the orchestrated evolutionary ladder
+uv run run_report results/<run>             # build JSON, Markdown, and per-rung CSV reports
+uv run rung_doctor --rungs 1-18             # probe task availability and tensor shapes
+uv run render --overmind                     # render library entries and the routed overmind
+uv run benchmark                             # measure execution throughput and calibration
+uv run library_gc --dry-run                  # inspect unreferenced library tombstones
+uv run motif_census --render                 # run the descriptive motif and reuse census
+uv run cppn_spike                            # run the CPPN expressibility diagnostic
+uv run run_matrix                            # execute a configured experiment matrix
+uv run ablation_suite                        # validate and launch the paper ablation suite
+uv run experiment_archive list               # list, verify, restore, or snapshot external archives
+uv run router_migrate --library <v1> --output <v2>  # migrate a verified library copy to router v2
+uv run runtime_inventory --check             # verify registry, config, CLI, and path inventory
+uv run ruff check .                          # lint and import checks
+uv run ruff format .                         # format Python sources
+uv run ty check                              # static type checking
+uv run pytest tests/ -v                      # complete offline test suite
+```
+
 ## The workflow
 
 There is ONE run mode: the orchestrated overmind evolver. The canonical configuration is

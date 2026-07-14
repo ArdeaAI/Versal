@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output_features, support_loader
 from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
-from ardevo.evolution.composition import CompositionGenome, glue_value_count
+from ardevo.evolution.composition import CompositionGenome, edge_storage_value_count, glue_value_count
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter, get_shared_pool
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
@@ -83,6 +83,8 @@ class StrategyResult:
     size_metrics: dict[str, float] = field(default_factory=dict)
     # Pre-allocation estimates are operational evidence, kept separate from task/quality metrics.
     resource_metrics: dict[str, float] = field(default_factory=dict)
+    # Cross-strategy diagnostics (especially routed distillation and executable handoff).
+    strategy_metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def has_admissible_champion(self) -> bool:
@@ -169,7 +171,7 @@ class CompositionStrategy:
         minimal_values = spec.output_width + sum(
             glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for _signature, width in spec.input_specs
         )
-        seeded = [sum(len(edge.glue) for edge in comp.edges) for comp in (seed_comps or [])[: loop.comp_pop_size]]
+        seeded = [sum(edge_storage_value_count(edge) for edge in comp.edges) for comp in (seed_comps or [])[: loop.comp_pop_size]]
         if len(seeded) < loop.comp_pop_size:
             seeded.append(minimal_values)
         return max(seeded, default=minimal_values)

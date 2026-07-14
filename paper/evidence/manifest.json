@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manuscript": {
     "path": "paper/preprint.md",
-    "sha256": "43242cb30fc3e3314c405e4ca0ab1b5dabba287786dfcc0d4da1d96839c86e84",
+    "sha256": "e964d1a150d3b34bcc9c9f7445b3848c6d550996cef412f35ce8636a794d454a",
     "role": "manuscript"
   },
   "claims": [
@@ -112,6 +112,88 @@
       ]
     },
     {
+      "id": "full-ladder-canary",
+      "section": "Section 7.5; Appendices C-E",
+      "summary": "The completed ten-task-per-rung canary, its pinned configuration, reports, retained-library metadata, ARC transcript, and post-hoc motif evidence.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260712_preflight/results/run_summary.json",
+          "sha256": "74bf3361d40047c37d6ac1a3829969cd9433a135d2b48536800f0e651218cf4b",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/results/config.toml",
+          "sha256": "bc31e8e6cb8bb85449f7e2a9b7a286c151739c09fc27f5037be51ab30fd4d11c",
+          "role": "config"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/results/config.effective.json",
+          "sha256": "924f34e3eb68ff392fb9147b949ff25f9c4cf04bf62f09712a587d8636372a06",
+          "role": "config"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/library/index.json",
+          "sha256": "b586959b4bdfbedd0c0121f1e08ba427ca66df355d2f537fc146b3389104c4a3",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/library/motifs.json",
+          "sha256": "071786e3abad732f2e027af0486825157d4b211b905c4f1faa9037104d062156",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/run_report.json",
+          "sha256": "283884517d0ab479b271a60d5c162002edc3d8c756a9c5d70e13acdb07e40a6e",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/run_report.md",
+          "sha256": "274aad84c42f28ec2f147adb8b8b8a7171881d25131b66f8eae2eb7a82d0a5f7",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/rung_summary.csv",
+          "sha256": "55e28dfdfc9e2236568daf8e31a313fa4f7e28df23c75ee975ba02a5f11ddb16",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/results_report.md",
+          "sha256": "c49fe363e45d76be29be81ed7a2a19aa9e1a9cae61eec9418d078f4cdde85fe3",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/arc_transcript.json",
+          "sha256": "04a0e8d45bd26a4e5dc16b211472a21d5f41bbeff2b30060691eb8bd62430a45",
+          "role": "transcript"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/motif_census_snapshot.json",
+          "sha256": "de4a24ba207f699670a7636cf3befef657b14e4cabedbc77081920e37e415ad4",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/motif_discoveries.json",
+          "sha256": "f19888d4ee0dae7e01f5d982234580381107ed4f0509660c7a5b24d6a6081c4a",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/motif_discoveries.md",
+          "sha256": "1b99db151b817997b6ddfdaba5b5bbf83086ba259e8c0bc82ecf68c5b083edda",
+          "role": "transcript"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/reports/motif_discoveries.png",
+          "sha256": "aa5ce516d75c10f8c0f28495940c5bdc3fbc244fbb71286d9a8d042be80a6a17",
+          "role": "output"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/SHA256SUMS",
+          "sha256": "203de05cd11907de8b60c0a41c9de2b199d3f0203056d8e3207ca58cb2ad29a2",
+          "role": "transcript"
+        }
+      ]
+    },
+    {
       "id": "compute-accounting",
       "section": "Appendix D",
       "summary": "Per-task wall-clock rows underlying the reported aggregate experimental compute.",
@@ -144,6 +226,11 @@
         {
           "path": "ai/archive/20260705_g2/results/20260706_015530_orchestrated/run_summary.json",
           "sha256": "b86ff20510ee1a559c1e662be153019d72d30fcb8788cfba3b041201e46d6fd4",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260712_preflight/results/run_summary.json",
+          "sha256": "74bf3361d40047c37d6ac1a3829969cd9433a135d2b48536800f0e651218cf4b",
           "role": "summary"
         }
       ]

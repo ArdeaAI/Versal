@@ -229,7 +229,16 @@ def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     else:
         skeleton = {
             "nodes": sorted((int(node["id"]), node["kind"], node["ref"], node.get("aggregation", "sum"), bool(node.get("trainable", True))) for node in payload["nodes"]),
-            "edges": sorted((int(edge["in"]), int(edge["out"]), bool(edge["enabled"]), int(edge.get("glue_rank", 0))) for edge in payload["edges"]),
+            "edges": sorted(
+                (
+                    int(edge["in"]),
+                    int(edge["out"]),
+                    bool(edge["enabled"]),
+                    int(edge.get("glue_rank", 0)),
+                    tuple((int(run["source_start"]), int(run["target_start"]), int(run["length"])) for run in edge.get("port_map", [])),
+                )
+                for edge in payload["edges"]
+            ),
         }
     return hashlib.sha1(json.dumps(skeleton, sort_keys=True).encode()).hexdigest()[:16]
 

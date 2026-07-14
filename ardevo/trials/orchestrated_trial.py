@@ -11,6 +11,7 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import os
 import random
 import shutil
 import tempfile
@@ -33,6 +34,7 @@ from ardevo.evolution.schedule import build_schedule
 from ardevo.external_archive import ArchiveManager, ExperimentLock
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
+from ardevo.reporting import write_run_report
 from ardevo.utils.device import capture_hardware_profile
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
@@ -384,6 +386,8 @@ class OrchestratedTrial(Proctor):
             record["task_metrics"] = dict(attempt.task_metrics)
         if attempt is not None and getattr(attempt, "resource_metrics", None):
             record["resource_metrics"] = dict(attempt.resource_metrics)
+        if attempt is not None and getattr(attempt, "strategy_metrics", None):
+            record["strategy_metrics"] = dict(attempt.strategy_metrics)
         if module_pool_sizes:
             record["module_pool"] = dict(module_pool_sizes)
         self.task_records.append(record)
@@ -428,7 +432,24 @@ class OrchestratedTrial(Proctor):
         if orchestrator is not None and getattr(orchestrator, "blind_query", False):
             summary["search_metric"] = orchestrator.search_metric
             summary["report_metric"] = orchestrator.report_metric
-        (self.run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
+        path = self.run_dir / "run_summary.json"
+        payload = (json.dumps(summary, indent=2) + "\n").encode()
+        descriptor, temporary = tempfile.mkstemp(prefix=".run_summary.json.", dir=self.run_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+        # Reports share the summary's durability boundary.  A report failure is a run failure:
+        # silently stale analysis is more dangerous than a visibly resumable crash.
+        write_run_report(self.run_dir, self.library.root)
 
     def _snapshot_config(self) -> None:
         """Copy the exact run config beside the checkpoint before task zero.

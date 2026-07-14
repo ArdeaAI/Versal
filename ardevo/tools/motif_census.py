@@ -79,6 +79,9 @@ def main() -> None:
     parser.add_argument("--per-entry-cap", type=int, default=50_000, help="max enumerated subgraphs per entry per size (deterministic truncation)")
     parser.add_argument("--json-out", default=None, help="report path (default <library>/motifs.json)")
     parser.add_argument("--render", action="store_true", help="also draw the motif atlas to <library>/images/motifs.png")
+    parser.add_argument("--run", type=Path, help="run directory that receives motif_discoveries.{json,md,png}")
+    parser.add_argument("--discover", action="store_true", help="rank non-plumbing motifs against 64 deterministic null graphs")
+    parser.add_argument("--counterfactual", action="store_true", help="request frozen knockout/control evidence (unavailable evidence is reported, never promoted)")
     args = parser.parse_args()
 
     library_root = Path(args.library)
@@ -153,6 +156,15 @@ def main() -> None:
         atlas_records = _top_per_class(report.module_motifs, args.top) + _top_per_class(report.composition_motifs, args.top)
         atlas_path = render_motif_atlas(library_root / "images" / "motifs.png", atlas_records, empty_note=module_note)
         console.print(f"atlas written to {atlas_path}")
+
+    if args.discover or args.counterfactual:
+        if args.run is None:
+            parser.error("--discover/--counterfactual requires --run <run-dir>")
+        from ardevo.motif_discovery import discover_motifs, write_discoveries
+
+        discovery = discover_motifs(ModuleLibrary(library_root), report, counterfactual=args.counterfactual)
+        write_discoveries(args.run, discovery)
+        console.print(f"discovery evidence written under {args.run}")
 
 
 if __name__ == "__main__":

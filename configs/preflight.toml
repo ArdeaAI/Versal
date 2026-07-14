@@ -109,9 +109,9 @@ max_task_seconds = 600        # per-attempt wall-clock budget: past it the runni
                               # fails with its best champion (the wall ledger still shelves it).
                               # The guard against free-growth blowups (the 2026-07-05 diag_g2 run hit
                               # 3532s on one task). 0 = off, byte-identical.
-max_depth = 2                 # recursion cap for decomposition
+max_depth = 8                 # recursion cap for decomposition
 quick_eval_top_k = 5
-library_dir = "library" # isolated persistent canary memory; never mutates the canonical library
+library_dir = "library/xor_bash" # isolated persistent canary memory; never mutates the canonical library
 decompose_first_above = 2000000   # MERGE: a task whose dense-init gene estimate exceeds this runs
                               # DECOMPOSE before any flat attempt (rungs 11-14, 17, 18), the route
                               # that produced smoke's first production decomposition (cosmic 0.986)
@@ -410,7 +410,7 @@ elitism = 1
   max_inline_depth = 4
   glue_rank = 8               # NEW glue factorizes to rank 8 when in*out exceeds the threshold
   glue_rank_threshold = 4096  # (a width-784 dense edge is 614k floats; rank 8 is 12.5k)
-  max_initial_glue_values = 5000000 # decline any candidate whose exact tuple-backed glue allocation
+  max_initial_glue_values = 50000000 # decline any candidate whose exact tuple-backed glue allocation
                                     # exceeds this cap before population construction or distillation
   catalog_width_tolerance = -1  # -1 = expose every library entry to comp mutations (glue adapts)
     [evolution.composition.selection]

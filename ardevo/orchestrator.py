@@ -26,7 +26,7 @@ from typing import Any, Callable
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
 from ardevo.decompose import Subtask, build_decomposers
 from ardevo.evaluation import fit_query_target, without_query
-from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, GlueValues, comp_from_dict, comp_to_dict
+from ardevo.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, GlueValues, IndexRun, PortMap, comp_from_dict, comp_to_dict
 from ardevo.evolution.genome import Genome, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.train import _writeback
@@ -104,6 +104,7 @@ class Attempt:
     # Optional held-out report, emitted only by the blind-query protocol after candidate selection.
     report_metric: float | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
+    strategy_metrics: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -133,6 +134,8 @@ class Attempt:
             data["report_metric"] = self.report_metric
         if self.task_metrics:
             data["task_metrics"] = self.task_metrics
+        if self.strategy_metrics:
+            data["strategy_metrics"] = self.strategy_metrics
         return data
 
     @classmethod
@@ -155,6 +158,7 @@ class Attempt:
             resource_metrics=dict(data.get("resource_metrics", {})),
             report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
             task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
+            strategy_metrics={str(key): float(value) for key, value in data.get("strategy_metrics", {}).items()},
         )
 
 
@@ -439,6 +443,7 @@ class Orchestrator:
                     sample_metrics=_sample_metrics_of(result),
                     size_metrics=dict(result.size_metrics),
                     resource_metrics=dict(result.resource_metrics),
+                    strategy_metrics=dict(result.strategy_metrics),
                     report_metric=self._result_report_value(result),
                     task_metrics=_task_metrics_of(result),
                 )
@@ -482,6 +487,7 @@ class Orchestrator:
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
                 resource_metrics=dict(result.resource_metrics),
+                strategy_metrics=dict(result.strategy_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -595,6 +601,9 @@ class Orchestrator:
         runtime = self._runtime()
         total_share = sum(self.evolve_shares.values()) or 1.0
         results: list[StrategyResult] = []
+        handoff_seeds = list(seed_comps or [])
+        handoff_fingerprints = {structural_fingerprint(COMPOSITION, comp_to_dict(comp)) for comp in handoff_seeds}
+        ladder_metrics: dict[str, float] = {}
         resource_metrics: dict[str, float] = {}
         remaining = budget
         carry = 0
@@ -617,7 +626,7 @@ class Orchestrator:
             if name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
-                outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=seed_comps if name == "composition" else None)
+                outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=handoff_seeds if name == "composition" else None)
             stages = getattr(self, "_active_stages", None)
             if stages is not None:
                 stages[name] = round(stages.get(name, 0.0) + (time.perf_counter() - stage_started), 3)
@@ -633,10 +642,20 @@ class Orchestrator:
                 if counter in self.counters:
                     self.counters[counter] += 1
             results.append(outcome)
+            ladder_metrics.update(outcome.strategy_metrics)
+            if name == "routed" and outcome.champion_comp is not None and not self._accepts_result(outcome):
+                fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(outcome.champion_comp.comp))
+                if fingerprint not in handoff_fingerprints:
+                    handoff_fingerprints.add(fingerprint)
+                    handoff_seeds.append(outcome.champion_comp.comp)
+                    ladder_metrics["handoff_count"] = ladder_metrics.get("handoff_count", 0.0) + 1.0
+            if name == "composition" and ladder_metrics.get("handoff_count", 0.0):
+                ladder_metrics["recovery_result"] = float(outcome.metric)
             remaining -= outcome.generations_used
             carry = max(0, allocation - outcome.generations_used)
             if self._accepts_result(outcome):
                 outcome.resource_metrics = dict(resource_metrics)
+                outcome.strategy_metrics = dict(ladder_metrics)
                 return outcome
             if remaining <= 0:
                 break
@@ -645,6 +664,7 @@ class Orchestrator:
         # preserve. When every strategy declined, the metric remains a useful failure diagnostic.
         best = max(results, key=lambda item: (item.has_admissible_champion, item.metric))
         best.resource_metrics = dict(resource_metrics)
+        best.strategy_metrics = dict(ladder_metrics)
         return best
 
     # --- learn-mode refinement of library hits --------------------------------------------------------
@@ -755,6 +775,7 @@ class Orchestrator:
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
                 resource_metrics=dict(result.resource_metrics),
+                strategy_metrics=dict(result.strategy_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -1048,6 +1069,7 @@ class Orchestrator:
                 sample_metrics=_sample_metrics_of(result),
                 size_metrics=dict(result.size_metrics),
                 resource_metrics=dict(result.resource_metrics),
+                strategy_metrics=dict(result.strategy_metrics),
                 report_metric=self._result_report_value(result),
                 task_metrics=_task_metrics_of(result),
             )
@@ -1219,21 +1241,19 @@ class Orchestrator:
     # --- skeleton wiring ------------------------------------------------------------------------------
 
     def _port_wired_skeleton(self, spec: CompTaskSpec, solutions: list[tuple[Subtask, Solution]]) -> CompositionGenome | None:
-        """Seed composition wiring each sub-solution into the parent per its PortSpec. Supported
-        roles: output_slice (module output lands in its head slice) and input_subset (module reads
-        its input slice, outputs sum into the whole head). Other roles fall back to None: the
-        sub-solutions are still in the library and reachable through add_module_node."""
+        """Seed every decomposer role with compact immutable gather/scatter port maps."""
         if any(solution.key is None for _subtask, solution in solutions):
             logger.info("a sub-solution was solved but not shelved; relying on the ref catalog instead of a wired skeleton")
             return None
-        roles = {subtask.port.role for subtask, _ in solutions}
-        if not roles <= {"output_slice", "input_subset"}:
-            logger.info("no skeleton wiring for roles %s; relying on the ref catalog instead", roles)
+        if any(not subtask.port.input_runs or not subtask.port.output_runs for subtask, _ in solutions):
+            logger.info("decomposition produced a legacy port without compact maps; relying on the ref catalog instead")
             return None
 
         signature, parent_width = spec.input_specs[0]
         loaded: list[tuple[Subtask, str, LibraryEntry]] = []
-        glue_values = spec.output_width  # bias -> output
+        # Bias remains a small trainable vector. Fixed maps allocate only two int64 vectors per
+        # selected port (four float-equivalent values), never source_width * target_width glue.
+        glue_values = spec.output_width
         for subtask, solution in solutions:
             key = solution.key
             if key is None:  # unreachable after the guard above; narrows for the type checker
@@ -1241,11 +1261,23 @@ class Orchestrator:
             entry = self.library.load(key)
             in_width = sum(item["width"] for item in entry.io["inputs"])
             out_width = entry.io["output"]["width"]
-            if subtask.port.role == "output_slice":
-                glue_values += parent_width * in_width + out_width * spec.output_width
-            else:
-                subset_width = max(subtask.port.offsets[1] - subtask.port.offsets[0], 0)
-                glue_values += parent_width * subset_width + out_width * spec.output_width
+            input_count = sum(run[2] for run in subtask.port.input_runs)
+            output_count = sum(run[2] for run in subtask.port.output_runs)
+            if input_count != in_width or output_count != out_width:
+                logger.info(
+                    "compact port map width drift for %s: map %d->%d, entry %d->%d; relying on the ref catalog",
+                    subtask.task.meta.name,
+                    input_count,
+                    output_count,
+                    in_width,
+                    out_width,
+                )
+                return None
+            if any(source + length > parent_width or target + length > in_width for source, target, length in subtask.port.input_runs):
+                return None
+            if any(source + length > out_width or target + length > spec.output_width for source, target, length in subtask.port.output_runs):
+                return None
+            glue_values += 8 * (input_count + output_count)
             loaded.append((subtask, key, entry))
 
         estimate = self.loop.assess_glue_resources(glue_values, stage="decomposition_skeleton", device="cpu")
@@ -1280,24 +1312,15 @@ class Orchestrator:
             )
         )
 
-        positions_total = sum(subtask.port.width for subtask, _ in solutions if subtask.port.role == "output_slice")
-        per_position = spec.output_width // positions_total if positions_total else 1
-
         for subtask, key, entry in loaded:
             in_width = sum(item["width"] for item in entry.io["inputs"])
             out_width = entry.io["output"]["width"]
             node_id = tracker.new_node_id()
             comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
-            port = subtask.port
-            if port.role == "output_slice":
-                in_glue = _identity_glue(parent_width, in_width, self.loop.glue_storage)
-                start = port.offsets[0] * per_position
-                out_glue = _placement_glue(out_width, spec.output_width, start, self.loop.glue_storage)
-            else:  # input_subset
-                in_glue = _selection_glue(parent_width, port.offsets, self.loop.glue_storage)
-                out_glue = _identity_glue(out_width, spec.output_width, self.loop.glue_storage)
-            comp.edges.append(CompEdgeGene(input_id, node_id, True, tracker.innovation(input_id, node_id), in_glue))
-            comp.edges.append(CompEdgeGene(node_id, output_id, True, tracker.innovation(node_id, output_id), out_glue))
+            input_map = PortMap(tuple(IndexRun(*run) for run in subtask.port.input_runs))
+            output_map = PortMap(tuple(IndexRun(*run) for run in subtask.port.output_runs))
+            comp.edges.append(CompEdgeGene(input_id, node_id, True, tracker.innovation(input_id, node_id), (), 0, input_map))
+            comp.edges.append(CompEdgeGene(node_id, output_id, True, tracker.innovation(node_id, output_id), (), 0, output_map))
         return comp
 
     # --- plumbing -------------------------------------------------------------------------------------

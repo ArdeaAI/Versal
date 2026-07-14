@@ -270,7 +270,9 @@
     "library_gc": "ardevo.tools.library_gc:main",
     "motif_census": "ardevo.tools.motif_census:main",
     "render": "ardevo.tools.net_gallery:main",
+    "router_migrate": "ardevo.tools.router_migrate:main",
     "run_matrix": "ardevo.tools.run_matrix:main",
+    "run_report": "ardevo.tools.run_report:main",
     "rung_doctor": "ardevo.tools.rung_doctor:main",
     "runtime_inventory": "ardevo.tools.runtime_inventory:main"
   },

@@ -38,6 +38,10 @@ class PortSpec:
     offsets: tuple[int, int]
     width: int
     descriptor: FieldDescriptor
+    # Compact (source_start, target_start, length) maps. Input runs gather parent input into
+    # the child; output runs scatter child predictions into the parent head.
+    input_runs: tuple[tuple[int, int, int], ...] = ()
+    output_runs: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +70,44 @@ def _chunk_bounds(size: int, n_chunks: int) -> list[tuple[int, int]]:
 
 def _field_descriptor(field: Field) -> FieldDescriptor:
     return FieldDescriptor(axes=field.axes, value_type=field.value_type, n_classes=field.n_classes, value_range=field.value_range)
+
+
+def _feature_factor(field: Field) -> int:
+    return int(field.n_classes or 1) if field.value_type in (ValueType.CATEGORICAL, ValueType.ORDINAL) else 1
+
+
+def _max_shape(fields: list[Field]) -> tuple[int, ...]:
+    if not fields:
+        return ()
+    rank = fields[0].data.ndim
+    if any(field.data.ndim != rank for field in fields):
+        raise ValueError("decomposition fields must have a stable rank")
+    return tuple(max(int(field.data.shape[axis]) for field in fields) for axis in range(rank))
+
+
+def _flat_width(shape: tuple[int, ...], factor: int = 1) -> int:
+    return math.prod(shape) * factor
+
+
+def _slice_runs(shape: tuple[int, ...], axis: int, start: int, end: int, *, factor: int = 1, source_is_parent: bool) -> tuple[tuple[int, int, int], ...]:
+    """Axis slice as O(product(leading axes)) contiguous row-major index runs."""
+
+    trailing = math.prod(shape[axis + 1 :])
+    leading = math.prod(shape[:axis])
+    axis_width = shape[axis]
+    child_axis_width = end - start
+    runs: list[tuple[int, int, int]] = []
+    for prefix in range(leading):
+        parent_start = (prefix * axis_width * trailing + start * trailing) * factor
+        child_start = prefix * child_axis_width * trailing * factor
+        length = child_axis_width * trailing * factor
+        source, target = (parent_start, child_start) if source_is_parent else (child_start, parent_start)
+        if runs and runs[-1][0] + runs[-1][2] == source and runs[-1][1] + runs[-1][2] == target:
+            previous = runs[-1]
+            runs[-1] = (previous[0], previous[1], previous[2] + length)
+        else:
+            runs.append((source, target, length))
+    return tuple(runs)
 
 
 def _slice_field(field: Field, axis_position: int, start: int, end: int) -> Field:
@@ -122,12 +164,22 @@ def output_slices(task: Task, *, rng: random.Random, n_groups: int = 2, max_outp
     # Port offsets live in the parent's FLAT output positions (row-major flatten of the whole
     # field), so a chunk of the first axis spans trailing-many flat positions per step.
     trailing = math.prod(first_output.data.shape[1:])
+    input_shape = _max_shape([pair[0] for pair in task.support])
+    output_shape = _max_shape([pair[1] for pair in task.support])
+    output_factor = _feature_factor(first_output)
     subtasks: list[Subtask] = []
     for group, (start, end) in enumerate(_chunk_bounds(first_axis_size, n_groups)):
         support = [(inp, _slice_field(out, 0, start, end)) for inp, out in task.support]
         query = [(inp, _slice_field(out, 0, start, end)) for inp, out in task.query]
         child = Task(meta=_child_meta(task.meta, f".out{group}"), support=support, query=query)
-        port = PortSpec(role="output_slice", offsets=(start * trailing, end * trailing), width=(end - start) * trailing, descriptor=_field_descriptor(support[0][1]))
+        port = PortSpec(
+            role="output_slice",
+            offsets=(start * trailing, end * trailing),
+            width=(end - start) * trailing,
+            descriptor=_field_descriptor(support[0][1]),
+            input_runs=((0, 0, _flat_width(input_shape)),),
+            output_runs=_slice_runs(output_shape, 0, start, end, factor=output_factor, source_is_parent=False),
+        )
         subtasks.append(Subtask(task=child, port=port))
     return subtasks
 
@@ -150,12 +202,22 @@ def input_subsets(task: Task, *, rng: random.Random, n_subsets: int = 2) -> list
     if first_axis_size < n_subsets:
         return []
     trailing = math.prod(first_input.data.shape[1:])
+    input_shape = _max_shape([pair[0] for pair in task.support])
+    output_shape = _max_shape([pair[1] for pair in task.support])
+    output_factor = _feature_factor(task.support[0][1])
     subtasks: list[Subtask] = []
     for group, (start, end) in enumerate(_chunk_bounds(first_axis_size, n_subsets)):
         support = [(_slice_field(inp, 0, start, end), out) for inp, out in task.support]
         query = [(_slice_field(inp, 0, start, end), out) for inp, out in task.query]
         child = Task(meta=_child_meta(task.meta, f".in{group}"), support=support, query=query)
-        port = PortSpec(role="input_subset", offsets=(start * trailing, end * trailing), width=(end - start) * trailing, descriptor=_field_descriptor(support[0][0]))
+        port = PortSpec(
+            role="input_subset",
+            offsets=(start * trailing, end * trailing),
+            width=(end - start) * trailing,
+            descriptor=_field_descriptor(support[0][0]),
+            input_runs=_slice_runs(input_shape, 0, start, end, source_is_parent=True),
+            output_runs=((0, 0, _flat_width(output_shape, output_factor)),),
+        )
         subtasks.append(Subtask(task=child, port=port))
     return subtasks
 
@@ -183,12 +245,22 @@ def time_windows(task: Task, *, rng: random.Random, n_windows: int = 2) -> list[
         return []
     if time_length < n_windows:
         return []
+    input_shape = _max_shape([pair[0] for pair in task.support])
+    output_shape = _max_shape([pair[1] for pair in task.support])
+    output_factor = _feature_factor(first_output)
     subtasks: list[Subtask] = []
     for group, (start, end) in enumerate(_chunk_bounds(time_length, n_windows)):
         support = [(_slice_field(inp, input_time_position, start, end), _slice_field(out, output_time_position, start, end)) for inp, out in task.support]
         query = [(_slice_field(inp, input_time_position, start, end), _slice_field(out, output_time_position, start, end)) for inp, out in task.query]
         child = Task(meta=_child_meta(task.meta, f".t{group}"), support=support, query=query)
-        port = PortSpec(role="time_window", offsets=(start, end), width=end - start, descriptor=_field_descriptor(support[0][1]))
+        port = PortSpec(
+            role="time_window",
+            offsets=(start, end),
+            width=end - start,
+            descriptor=_field_descriptor(support[0][1]),
+            input_runs=_slice_runs(input_shape, input_time_position, start, end, source_is_parent=True),
+            output_runs=_slice_runs(output_shape, output_time_position, start, end, factor=output_factor, source_is_parent=False),
+        )
         subtasks.append(Subtask(task=child, port=port))
     return subtasks
 
@@ -213,12 +285,22 @@ def spatial_patches(task: Task, *, rng: random.Random, n_patches: int = 2) -> li
     length = first_input.data.shape[input_position]
     if first_output.data.shape[output_position] != length or length < n_patches:
         return []
+    input_shape = _max_shape([pair[0] for pair in task.support])
+    output_shape = _max_shape([pair[1] for pair in task.support])
+    output_factor = _feature_factor(first_output)
     subtasks: list[Subtask] = []
     for group, (start, end) in enumerate(_chunk_bounds(length, n_patches)):
         support = [(_slice_field(inp, input_position, start, end), _slice_field(out, output_position, start, end)) for inp, out in task.support]
         query = [(_slice_field(inp, input_position, start, end), _slice_field(out, output_position, start, end)) for inp, out in task.query]
         child = Task(meta=_child_meta(task.meta, f".{spatial.value.lower()}{group}"), support=support, query=query)
-        port = PortSpec(role="spatial_patch", offsets=(start, end), width=end - start, descriptor=_field_descriptor(support[0][1]))
+        port = PortSpec(
+            role="spatial_patch",
+            offsets=(start, end),
+            width=end - start,
+            descriptor=_field_descriptor(support[0][1]),
+            input_runs=_slice_runs(input_shape, input_position, start, end, source_is_parent=True),
+            output_runs=_slice_runs(output_shape, output_position, start, end, factor=output_factor, source_is_parent=False),
+        )
         subtasks.append(Subtask(task=child, port=port))
     return subtasks
 

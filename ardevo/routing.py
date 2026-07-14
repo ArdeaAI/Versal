@@ -22,9 +22,11 @@ instead. With `[orchestrator.routed] distill = false` the pre-contract behavior 
 are solved-but-not-shelved records (RoutedSolution), the executable state living in the router.
 """
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -59,8 +61,91 @@ from ardevo.utils.resources import format_bytes
 
 logger = Logger.get_logger()
 
-ROUTER_FORMAT_VERSION = 1
+ROUTER_FORMAT_VERSION = 2
 _TRAIN_HISTORY_CAP = 200
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def migrate_router_library(source: Path | str, output: Path | str) -> dict[str, Any]:
+    """Copy a library and convert its router v1 state to verified v2 shards."""
+
+    source_path, output_path = Path(source).resolve(), Path(output).resolve()
+    if output_path.exists():
+        raise FileExistsError(f"migration output already exists: {output_path}")
+    router = source_path / "router"
+    meta_path, state_path = router / "router_meta.json", router / "router_state.pt"
+    meta = json.loads(meta_path.read_text())
+    if int(meta.get("format_version", 0)) != 1:
+        raise ValueError("router migration requires a format-v1 source")
+    source_hashes = {path.name: _file_sha256(path) for path in (meta_path, state_path)}
+    shutil.copytree(source_path, output_path)
+    target_router = output_path / "router"
+    state = torch.load(state_path, weights_only=True)
+    shard_root = target_router / "shards"
+    for kind in ("vertices", "inputs", "outputs"):
+        (shard_root / kind).mkdir(parents=True, exist_ok=True)
+
+    large_prefixes = ("vertex_in_adapters.", "vertex_out_adapters.", "input_adapters.", "output_heads.")
+    core = {name: tensor for name, tensor in state.items() if not name.startswith(large_prefixes)}
+    temporary = target_router / ".router_state.pt.tmp"
+    torch.save(core, temporary)
+    os.replace(temporary, target_router / "router_state.pt")
+
+    def substate(prefix: str, key: str) -> dict[str, torch.Tensor]:
+        marker = f"{prefix}.{key}."
+        return {name.removeprefix(marker): tensor for name, tensor in state.items() if name.startswith(marker)}
+
+    sanitized = [sanitize_key(str(key)) for key in meta.get("vertex_keys", [])]
+    for key in sanitized:
+        payload = {"input": substate("vertex_in_adapters", key), "output": substate("vertex_out_adapters", key)}
+        torch.save(payload, shard_root / "vertices" / f"{key}.pt")
+    for item in meta.get("input_adapter_keys", []):
+        key = str(item["key"])
+        torch.save(substate("input_adapters", key), shard_root / "inputs" / f"{key}.pt")
+    for item in meta.get("output_head_keys", []):
+        key = str(item["key"])
+        torch.save(substate("output_heads", key), shard_root / "outputs" / f"{key}.pt")
+
+    accounted = set(core)
+    for prefix, keys in (
+        ("vertex_in_adapters", sanitized),
+        ("vertex_out_adapters", sanitized),
+        ("input_adapters", [str(item["key"]) for item in meta.get("input_adapter_keys", [])]),
+        ("output_heads", [str(item["key"]) for item in meta.get("output_head_keys", [])]),
+    ):
+        for key in keys:
+            accounted.update(name for name in state if name.startswith(f"{prefix}.{key}."))
+    if accounted != set(state):
+        shutil.rmtree(output_path)
+        missing = sorted(set(state) - accounted)
+        raise ValueError(f"router migration did not account for state keys: {missing[:5]}")
+    migrated = dict(meta)
+    migrated["format_version"] = ROUTER_FORMAT_VERSION
+    migrated["migrated_from_format"] = 1
+    migrated["source_state_sha256"] = source_hashes["router_state.pt"]
+    meta_tmp = target_router / ".router_meta.json.tmp"
+    meta_tmp.write_text(json.dumps(migrated, indent=2) + "\n")
+    os.replace(meta_tmp, target_router / "router_meta.json")
+    if source_hashes != {path.name: _file_sha256(path) for path in (meta_path, state_path)}:
+        shutil.rmtree(output_path)
+        raise RuntimeError("source router changed during migration")
+    return {
+        "format_version": ROUTER_FORMAT_VERSION,
+        "source": str(source_path),
+        "output": str(output_path),
+        "core_tensors": len(core),
+        "vertex_shards": len(sanitized),
+        "input_shards": len(meta.get("input_adapter_keys", [])),
+        "output_shards": len(meta.get("output_head_keys", [])),
+        "source_hashes": source_hashes,
+    }
 
 
 def sanitize_key(raw: str) -> str:
@@ -89,13 +174,13 @@ def _bottleneck_linear(in_features: int, out_features: int, rank: int) -> nn.Mod
 
 @dataclass
 class RouterVertex:
-    """One expert: a frozen library entry decoded once and wired to the bus by its adapters."""
+    """One expert descriptor; lazy services decode its frozen module only when selected."""
 
     original_key: str
     sanitized_key: str
     in_width: int
     out_width: int
-    module: SubstrateModule
+    module: SubstrateModule | None
 
 
 def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> RouterVertex | None:
@@ -160,6 +245,7 @@ class RoutedNet(nn.Module):
         ponder_cost: float = 0.001,
         edge_bias: bool = False,
         edge_dim: int = 8,
+        lazy_residency: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -172,6 +258,9 @@ class RoutedNet(nn.Module):
         self.ponder_cost = ponder_cost
         self.edge_bias = edge_bias
         self.edge_dim = edge_dim
+        self.lazy_residency = lazy_residency
+        self.shard_loader: Any | None = None
+        self.expert_loader: Any | None = None
         self.vertex_in_adapters = nn.ModuleDict()
         self.vertex_out_adapters = nn.ModuleDict()
         self.vertex_embeddings = nn.ParameterDict()
@@ -201,7 +290,7 @@ class RoutedNet(nn.Module):
 
     # --- vertex table -------------------------------------------------------------------------------
 
-    def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None) -> None:
+    def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None, lazy: bool = False) -> None:
         key = vertex.sanitized_key
         if key in self.vertex_embeddings:
             self._vertices[key] = vertex  # adapters/embedding already exist (e.g. rebuilt after load)
@@ -217,11 +306,14 @@ class RoutedNet(nn.Module):
             mean = torch.stack([self.vertex_embeddings[name].detach() for name in self._vertex_order]).mean(0)
             embedding = mean + torch.randn(self.d_model) * 0.02
         self.vertex_embeddings[key] = nn.Parameter(embedding)
-        self.vertex_in_adapters[key] = _bottleneck_linear(self.d_model, vertex.in_width, self.adapter_rank)
-        self.vertex_out_adapters[key] = _bottleneck_linear(vertex.out_width, self.d_model, self.adapter_rank)
+        if not lazy:
+            self.vertex_in_adapters[key] = _bottleneck_linear(self.d_model, vertex.in_width, self.adapter_rank)
+            self.vertex_out_adapters[key] = _bottleneck_linear(vertex.out_width, self.d_model, self.adapter_rank)
         if self.edge_bias:
             self.vertex_edge_out[key] = nn.Parameter(torch.randn(self.edge_dim) * 0.02)
             self.vertex_edge_in[key] = nn.Parameter(torch.randn(self.edge_dim) * 0.02)
+        if lazy:
+            vertex.module = None
         self._vertices[key] = vertex
         self._vertex_order.append(key)
 
@@ -233,6 +325,7 @@ class RoutedNet(nn.Module):
         exclude_temporal: bool = True,
         pending_embeddings: dict[str, torch.Tensor] | None = None,
         max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        lazy_residency: bool = False,
     ) -> int:
         """Append vertices for library keys not yet in the table; refresh the retired mask. Returns
         the number of new vertices. The vertex set only grows (entries tombstone, never delete).
@@ -268,21 +361,34 @@ class RoutedNet(nn.Module):
     def ensure_input_adapter(self, signature: str, width: int) -> str:
         key = sanitize_key(f"{signature}:{width}")
         if key not in self.input_adapters:
-            self.input_adapters[key] = _bottleneck_linear(width, self.d_model, self.adapter_rank)
-            self.input_adapter_widths[key] = width
+            if key in self.input_adapter_widths and self.shard_loader is not None:
+                self.shard_loader("input", key)
+            else:
+                self.input_adapters[key] = _bottleneck_linear(width, self.d_model, self.adapter_rank)
+                self.input_adapter_widths[key] = width
         return key
 
     def ensure_output_head(self, signature: str, width: int) -> str:
         key = sanitize_key(f"{signature}:{width}")
         if key not in self.output_heads:
-            self.output_heads[key] = nn.Linear(self.d_model, width)  # heads stay dense: they must express the output
-            self.output_head_widths[key] = width
-            self.output_signature_embeddings[key] = nn.Parameter(torch.randn(self.d_model) * 0.02)
+            if key in self.output_head_widths and self.shard_loader is not None:
+                self.shard_loader("output", key)
+            else:
+                self.output_heads[key] = nn.Linear(self.d_model, width)  # heads stay dense: they must express the output
+                self.output_head_widths[key] = width
+                self.output_signature_embeddings[key] = nn.Parameter(torch.randn(self.d_model) * 0.02)
         return key
 
     def task_embedding(self, support_input: torch.Tensor, input_key: str, head_key: str) -> torch.Tensor:
+        self._ensure_signature_resident(input_key, head_key)
         pooled = self.input_adapters[input_key](support_input).mean(dim=0)
         return torch.tanh(self.task_condition(torch.cat([pooled, self.output_signature_embeddings[head_key]])))
+
+    def _ensure_signature_resident(self, input_key: str, head_key: str) -> None:
+        if input_key not in self.input_adapters and input_key in self.input_adapter_widths and self.shard_loader is not None:
+            self.shard_loader("input", input_key)
+        if head_key not in self.output_heads and head_key in self.output_head_widths and self.shard_loader is not None:
+            self.shard_loader("output", head_key)
 
     # --- routing --------------------------------------------------------------------------------------
 
@@ -296,6 +402,7 @@ class RoutedNet(nn.Module):
         geometric halting head weights per-step readouts (stop mass p_t times the survival product)
         and execution EXITS EARLY once every sample has spent its halting mass: halting only ever
         shortens the unroll under the same hard cap."""
+        self._ensure_signature_resident(input_key, head_key)
         input_inject = self.input_adapters[input_key](x)
         h = input_inject
         aux_terms: list[torch.Tensor] = []
@@ -376,9 +483,15 @@ class RoutedNet(nn.Module):
         for vertex_position in torch.unique(top_indices):
             index = int(vertex_position)
             name = live_names[index]
+            if name not in self.vertex_in_adapters and self.shard_loader is not None:
+                self.shard_loader("vertex", name)
             selected = top_indices == index  # [B, k]
             weight = (top_probs * selected).sum(dim=1, keepdim=True)  # [B, 1], zero for non-selectors
             vertex = self._vertices[name]
+            if vertex.module is None and self.expert_loader is not None:
+                self.expert_loader(name)
+            if vertex.module is None:
+                raise RuntimeError(f"router expert {name!r} is not resident and has no loader")
             expert_in = self.vertex_in_adapters[name](h)
             expert_out = torch.zeros(batch, vertex.out_width, dtype=h.dtype) if self.expert_ablation == "zero" else vertex.module(expert_in)
             moe = moe + weight * self.vertex_out_adapters[name](expert_out)
@@ -458,6 +571,7 @@ class RouterService:
         persist_strict: bool = False,
         image_dir: Path | None = None,
         max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        lazy_residency: bool = False,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
@@ -465,6 +579,7 @@ class RouterService:
         self.image_dir = image_dir  # <library_dir>/images; where overmind.png lands
         self.adapter_rank = adapter_rank
         self.max_inline_depth = max_inline_depth
+        self.lazy_residency = lazy_residency
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
@@ -489,7 +604,10 @@ class RouterService:
             ponder_epsilon=ponder_epsilon,
             ponder_cost=ponder_cost,
             edge_bias=edge_bias,
+            lazy_residency=lazy_residency,
         )
+        self.net.shard_loader = self._load_shard
+        self.net.expert_loader = self._load_expert
         if persist_dir is not None and (persist_dir / "router_meta.json").exists():
             self._load(persist_dir)
 
@@ -500,6 +618,7 @@ class RouterService:
             exclude_temporal=exclude_temporal,
             pending_embeddings=self.pending_embeddings,
             max_inline_depth=self.max_inline_depth,
+            lazy_residency=self.lazy_residency,
         )
         if added:
             self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
@@ -686,18 +805,97 @@ class RouterService:
         }
 
     def save(self) -> None:
-        # Scale watchpoint: the state_dict grows with vertices/signatures and is rewritten whole on
-        # every routed win; fine at hundreds of vertices, revisit (sharded/incremental save) at thousands.
+        """Persist format v2: a small complete gate core plus independently replaceable shards."""
+
         if self.persist_dir is None:
             return
         self.version += 1
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        shard_root = self.persist_dir / "shards"
+        for kind in ("vertices", "inputs", "outputs"):
+            (shard_root / kind).mkdir(parents=True, exist_ok=True)
+
+        state = self.net.state_dict()
+        large_prefixes = ("vertex_in_adapters.", "vertex_out_adapters.", "input_adapters.", "output_heads.")
+        core = {name: tensor for name, tensor in state.items() if not name.startswith(large_prefixes)}
         state_tmp = self.persist_dir / "router_state.pt.tmp"
-        torch.save(self.net.state_dict(), state_tmp)
+        torch.save(core, state_tmp)
         os.replace(state_tmp, self.persist_dir / "router_state.pt")
+
+        for key in self.net.vertex_in_adapters:
+            temporary = shard_root / "vertices" / f".{key}.pt.tmp"
+            torch.save({"input": self.net.vertex_in_adapters[key].state_dict(), "output": self.net.vertex_out_adapters[key].state_dict()}, temporary)
+            os.replace(temporary, shard_root / "vertices" / f"{key}.pt")
+        for key, module in self.net.input_adapters.items():
+            temporary = shard_root / "inputs" / f".{key}.pt.tmp"
+            torch.save(module.state_dict(), temporary)
+            os.replace(temporary, shard_root / "inputs" / f"{key}.pt")
+        for key, module in self.net.output_heads.items():
+            temporary = shard_root / "outputs" / f".{key}.pt.tmp"
+            torch.save(module.state_dict(), temporary)
+            os.replace(temporary, shard_root / "outputs" / f"{key}.pt")
         meta_tmp = self.persist_dir / "router_meta.json.tmp"
         meta_tmp.write_text(json.dumps(self._meta(), indent=2))
         os.replace(meta_tmp, self.persist_dir / "router_meta.json")
+
+    def evict_shards(self) -> None:
+        """Drop wide task/expert state after a durable boundary, never during an optimizer step."""
+
+        if not self.lazy_residency or self.persist_dir is None:
+            return
+        for key in list(self.net.vertex_in_adapters):
+            del self.net.vertex_in_adapters[key]
+            del self.net.vertex_out_adapters[key]
+        for key in list(self.net.input_adapters):
+            del self.net.input_adapters[key]
+        for key in list(self.net.output_heads):
+            del self.net.output_heads[key]
+        for vertex in self.net._vertices.values():
+            vertex.module = None
+
+    def checkpoint_and_evict(self) -> None:
+        """Persist resident shards/core, then evict at the between-task optimizer boundary."""
+
+        self.save()
+        self.evict_shards()
+
+    def _load_expert(self, key: str) -> None:
+        vertex = self.net._vertices[key]
+        entry = self.library.load(vertex.original_key)
+        loaded = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
+        if loaded is None or (loaded.in_width, loaded.out_width) != (vertex.in_width, vertex.out_width):
+            raise KeyError(f"library expert {vertex.original_key!r} no longer matches its router descriptor")
+        vertex.module = loaded.module
+
+    def _load_shard(self, kind: str, key: str) -> None:
+        if kind == "vertex":
+            vertex = self.net._vertices[key]
+            input_adapter = _bottleneck_linear(self.net.d_model, vertex.in_width, self.net.adapter_rank)
+            output_adapter = _bottleneck_linear(vertex.out_width, self.net.d_model, self.net.adapter_rank)
+            path = self.persist_dir / "shards" / "vertices" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                payload = torch.load(path, weights_only=True)
+                input_adapter.load_state_dict(payload["input"], strict=True)
+                output_adapter.load_state_dict(payload["output"], strict=True)
+            self.net.vertex_in_adapters[key] = input_adapter
+            self.net.vertex_out_adapters[key] = output_adapter
+            self._load_expert(key)
+            return
+        if kind == "input":
+            module = _bottleneck_linear(self.net.input_adapter_widths[key], self.net.d_model, self.net.adapter_rank)
+            path = self.persist_dir / "shards" / "inputs" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                module.load_state_dict(torch.load(path, weights_only=True), strict=True)
+            self.net.input_adapters[key] = module
+            return
+        if kind == "output":
+            module = nn.Linear(self.net.d_model, self.net.output_head_widths[key])
+            path = self.persist_dir / "shards" / "outputs" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                module.load_state_dict(torch.load(path, weights_only=True), strict=True)
+            self.net.output_heads[key] = module
+            return
+        raise KeyError(f"unknown router shard kind {kind!r}")
 
     def _load(self, directory: Path) -> None:
         meta = json.loads((directory / "router_meta.json").read_text())
@@ -709,8 +907,11 @@ class RouterService:
             "halting": self.net.halting,
             "edge_bias": self.net.edge_bias,
         }
+        format_version = int(meta.get("format_version", 0))
+        if format_version == 1:
+            raise ValueError(f"router state at {directory} uses format v1; migrate a copy with `uv run router_migrate --library <source> --output <copy>`")
         mismatched = [name for name, value in expected.items() if int(meta.get(name, -1)) != int(value)]
-        if int(meta.get("format_version", 0)) != ROUTER_FORMAT_VERSION or mismatched:
+        if format_version != ROUTER_FORMAT_VERSION or mismatched:
             message = f"router state at {directory} does not match config (format/{','.join(mismatched) or 'version'})"
             if self.persist_strict:
                 raise ValueError(message)
@@ -736,19 +937,26 @@ class RouterService:
                 logger.warning("persisted router vertex %s no longer decodes; dropping its rows", key)
                 dropped.add(sanitized)
                 continue
-            self.net.register_vertex(vertex)
+            self.net.register_vertex(vertex, lazy=self.lazy_residency)
         for item in meta["input_adapter_keys"]:
-            self.net.input_adapters[item["key"]] = _bottleneck_linear(int(item["width"]), self.net.d_model, self.net.adapter_rank)
             self.net.input_adapter_widths[item["key"]] = int(item["width"])
         for item in meta["output_head_keys"]:
-            self.net.output_heads[item["key"]] = nn.Linear(self.net.d_model, int(item["width"]))
             self.net.output_head_widths[item["key"]] = int(item["width"])
             self.net.output_signature_embeddings[item["key"]] = nn.Parameter(torch.zeros(self.net.d_model))
         state = torch.load(directory / "router_state.pt", weights_only=True)
         if dropped:
             vertex_dicts = ("vertex_embeddings", "vertex_in_adapters", "vertex_out_adapters", "vertex_edge_out", "vertex_edge_in")
-            state = {name: tensor for name, tensor in state.items() if not (name.split(".")[0] in vertex_dicts and name.split(".")[1] in dropped)}
-        self.net.load_state_dict(state, strict=True)
+            state = {name: tensor for name, tensor in state.items() if not (name.split(".")[0] in vertex_dicts and len(name.split(".")) > 1 and name.split(".")[1] in dropped)}
+        incompatible = self.net.load_state_dict(state, strict=False)
+        if incompatible.unexpected_keys:
+            raise ValueError(f"unexpected router core keys: {incompatible.unexpected_keys}")
+        if not self.lazy_residency:
+            for name in self.net._vertex_order:
+                self._load_shard("vertex", name)
+            for key in self.net.input_adapter_widths:
+                self._load_shard("input", key)
+            for key in self.net.output_head_widths:
+                self._load_shard("output", key)
         self.version = int(meta.get("version", 0))
         self.train_history = list(meta.get("train_history", []))
         known = set(self.net._vertex_order)
@@ -758,7 +966,7 @@ class RouterService:
         }
         # Optional key so pre-ledger meta files load clean; no format bump (a bump stales every router dir).
         self.step_usage_totals = {name: [float(value) for value in values] for name, values in (meta.get("step_usage_totals") or {}).items() if name in known}
-        self.net.sync_with_library(self.library, max_inline_depth=self.max_inline_depth)  # append anything admitted since the last save
+        self.net.sync_with_library(self.library, max_inline_depth=self.max_inline_depth, lazy_residency=self.lazy_residency)  # append anything admitted since the last save
 
 
 @dataclass
@@ -795,6 +1003,7 @@ class RoutedStrategy:
     ponder_epsilon: float = 0.01
     ponder_cost: float = 0.001
     edge_bias: bool = False
+    lazy_residency: bool = True
     name: str = "routed"
     service: RouterService | None = None
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
@@ -817,6 +1026,7 @@ class RoutedStrategy:
                 persist_dir=(Path(self.library_dir) / "router") if self.persist else None,
                 persist_strict=self.persist_strict,
                 image_dir=Path(self.library_dir) / "images",  # overmind.png lands beside the entry renders
+                lazy_residency=self.lazy_residency,
             )
         return self.service
 
@@ -864,7 +1074,8 @@ class RoutedStrategy:
         service.record_traffic()  # once per task, from its final evaluation's gate decisions
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
-        if runtime.accepted(self._metrics_view(metrics)):
+        accepted = runtime.accepted(self._metrics_view(metrics))
+        if accepted:
             return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost)
         return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost, runtime=runtime)
 
@@ -884,6 +1095,7 @@ class RoutedStrategy:
             loss = support_loss(view, spec.encoded) + self.load_balance_weight * view.net.last_aux_loss
             if not torch.isfinite(loss):
                 break  # the `gradient` op's non-finite bail: keep the last finite state
+            self._sync_optimizer_parameters(optimizer, view.net)
             loss.backward()
             optimizer.step()
             steps_run = step + 1
@@ -906,8 +1118,18 @@ class RoutedStrategy:
         optimizer.zero_grad()
         loss = support_loss(replay_view, encoded)
         if torch.isfinite(loss):
+            self._sync_optimizer_parameters(optimizer, net)
             loss.backward()
             optimizer.step()
+
+    @staticmethod
+    def _sync_optimizer_parameters(optimizer: torch.optim.Optimizer, net: RoutedNet) -> None:
+        """Add parameters materialized by the just-finished lazy forward before its backward."""
+
+        known = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
+        activated = [parameter for parameter in net.parameters() if parameter.requires_grad and id(parameter) not in known]
+        if activated:
+            optimizer.add_param_group({"params": activated})
 
     def _remember_for_replay(self, spec: CompTaskSpec, input_key: str, head_key: str, support_input: torch.Tensor) -> None:
         if self.replay_tasks <= 0:
@@ -955,7 +1177,7 @@ class RoutedStrategy:
             service.record_task(
                 {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": True}
             )
-            service.save()
+            service.checkpoint_and_evict()
             return StrategyResult(
                 strategy=self.name,
                 metric=float(distilled_metric),
@@ -964,6 +1186,12 @@ class RoutedStrategy:
                 champion_metrics=stamped,
                 size_metrics=comp_size_metrics(assessed.comp),
                 resource_metrics=dict(self._last_distill_resource_metrics),
+                strategy_metrics={
+                    "router_score": float(metric),
+                    "distilled_score": float(distilled_metric),
+                    "distillation_gap": float(metric - distilled_metric),
+                    "handoff_count": 0.0,
+                },
             )
 
         # Adapter bypass or a pathway below the solve bar: what the system can KEEP is the metric
@@ -980,6 +1208,7 @@ class RoutedStrategy:
         service.record_task(
             {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": False}
         )
+        service.checkpoint_and_evict()
         logger.info("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
         return StrategyResult(
             strategy=self.name,
@@ -989,6 +1218,12 @@ class RoutedStrategy:
             champion_metrics=stamped,
             size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
             resource_metrics=dict(self._last_distill_resource_metrics),
+            strategy_metrics={
+                "router_score": float(metric),
+                "distilled_score": float(distilled_metric),
+                "distillation_gap": float(metric - distilled_metric),
+                "handoff_count": 0.0,
+            },
         )
 
     def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
@@ -1126,21 +1361,29 @@ class RoutedStrategy:
             steps_used=steps_used,
             expert_usage=dict(view.net.last_gate_stats),
         )
-        if runtime.accepted(self._metrics_view(metrics)):
-            service.record_task(
-                {
-                    "task": task.meta.name,
-                    "rung": task.meta.rung,
-                    "zero_shot": zero_shot,
-                    "zero_shot_metric": solution.zero_shot_metric,
-                    "metric": float(metric),
-                    "steps": steps_used,
-                }
-            )
-            service.save()
+        accepted = runtime.accepted(self._metrics_view(metrics))
+        service.record_task(
+            {
+                "task": task.meta.name,
+                "rung": task.meta.rung,
+                "zero_shot": zero_shot,
+                "zero_shot_metric": solution.zero_shot_metric,
+                "metric": float(metric),
+                "steps": steps_used,
+                "kept": accepted,
+            }
+        )
+        service.checkpoint_and_evict()
         stamped = dict(metrics)
         stamped["routed_steps_used"] = float(steps_used)
-        return StrategyResult(strategy=self.name, metric=float(metric), generations_used=generations_used, champion_routed=solution, champion_metrics=stamped)
+        return StrategyResult(
+            strategy=self.name,
+            metric=float(metric),
+            generations_used=generations_used,
+            champion_routed=solution if (accepted or not self.distill) else None,
+            champion_metrics=stamped,
+            strategy_metrics={"router_score": float(metric), "handoff_count": 0.0},
+        )
 
 
 def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
@@ -1172,4 +1415,5 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         ponder_epsilon=float(table.get("ponder_epsilon", 0.01)),
         ponder_cost=float(table.get("ponder_cost", 0.001)),
         edge_bias=bool(table.get("edge_bias", False)),
+        lazy_residency=bool(table.get("lazy_residency", True)),
     )

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 app = "ardevo.main:main"
+run_report = "ardevo.tools.run_report:main"
 rung_doctor = "ardevo.tools.rung_doctor:main"
 render = "ardevo.tools.net_gallery:main"
 benchmark = "ardevo.tools.bench_throughput:main"
@@ -27,6 +28,7 @@ cppn_spike = "ardevo.tools.cppn_spike:main"
 run_matrix = "ardevo.tools.run_matrix:main"
 ablation_suite = "ardevo.tools.ablation_suite:main"
 experiment_archive = "ardevo.tools.experiment_archive:main"
+router_migrate = "ardevo.tools.router_migrate:main"
 runtime_inventory = "ardevo.tools.runtime_inventory:main"
 
 [build-system]

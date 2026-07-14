@@ -36,6 +36,26 @@ BIAS_REF = "__bias__"
 GlueValues: TypeAlias = tuple[float, ...] | array
 
 
+@dataclass(frozen=True, slots=True)
+class IndexRun:
+    """One compact contiguous gather/scatter run on a fixed composition edge."""
+
+    source_start: int
+    target_start: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True)
+class PortMap:
+    """Immutable axis-derived wiring, stored as runs rather than a zero-heavy matrix."""
+
+    runs: tuple[IndexRun, ...]
+
+    @property
+    def selected_count(self) -> int:
+        return sum(run.length for run in self.runs)
+
+
 class CompNodeKind(Enum):
     INPUT = "input"
     MODULE = "module"
@@ -65,6 +85,8 @@ class CompEdgeGene:
     # floats; rank 8 is 12.5k).
     glue: GlueValues
     glue_rank: int = 0
+    # A mapped edge has empty glue and never becomes a trainable Parameter.
+    port_map: PortMap | None = None
 
 
 @dataclass
@@ -161,6 +183,8 @@ def comp_to_dict(comp: CompositionGenome) -> dict[str, Any]:
             "innovation": edge.innovation,
             "glue_rank": edge.glue_rank,
         }
+        if edge.port_map is not None:
+            encoded["port_map"] = [{"source_start": run.source_start, "target_start": run.target_start, "length": run.length} for run in edge.port_map.runs]
         if isinstance(edge.glue, array):
             encoded["glue_f32_b64"] = base64.b64encode(memoryview(edge.glue).cast("B")).decode("ascii")
             encoded["glue_count"] = len(edge.glue)
@@ -181,7 +205,7 @@ def comp_from_dict(data: dict[str, Any]) -> CompositionGenome:
     def edge_glue(value: dict[str, Any]) -> GlueValues:
         payload = value.get("glue_f32_b64")
         if payload is None:
-            return tuple(float(item) for item in value["glue"])
+            return tuple(float(item) for item in value.get("glue", []))
         decoded = array("f")
         decoded.frombytes(base64.b64decode(str(payload), validate=True))
         expected = int(value.get("glue_count", len(decoded)))
@@ -195,7 +219,13 @@ def comp_from_dict(data: dict[str, Any]) -> CompositionGenome:
         )
         for n in data["nodes"]
     }
-    edges = [CompEdgeGene(int(e["in"]), int(e["out"]), bool(e["enabled"]), int(e["innovation"]), edge_glue(e), int(e.get("glue_rank", 0))) for e in data["edges"]]
+    edges = []
+    for e in data["edges"]:
+        raw_map = e.get("port_map")
+        port_map = None
+        if raw_map is not None:
+            port_map = PortMap(tuple(IndexRun(int(run["source_start"]), int(run["target_start"]), int(run["length"])) for run in raw_map))
+        edges.append(CompEdgeGene(int(e["in"]), int(e["out"]), bool(e["enabled"]), int(e["innovation"]), edge_glue(e), int(e.get("glue_rank", 0)), port_map))
     return CompositionGenome(nodes=nodes, edges=edges)
 
 
@@ -392,11 +422,29 @@ class ComposedNet(SubstrateModule):
         self.glue = nn.ParameterDict()
         self.glue_u = nn.ParameterDict()  # factored edges: the effective map is glue_u[key] @ glue_v[key]
         self.glue_v = nn.ParameterDict()
+        self._port_indices: dict[str, tuple[str, str]] = {}
         self._incoming: dict[int, list[tuple[int, str]]] = {}
         for edge in comp.enabled_edges():
             source, target = comp.nodes[edge.in_id], comp.nodes[edge.out_id]
             key = f"{edge.in_id}->{edge.out_id}"
-            if edge.glue_rank > 0:
+            if edge.port_map is not None:
+                if edge.glue_rank or len(edge.glue):
+                    raise CompositionAssemblyError(f"fixed port map on {key} must not carry trainable glue")
+                source_indices: list[int] = []
+                target_indices: list[int] = []
+                for run in edge.port_map.runs:
+                    if run.length <= 0 or run.source_start < 0 or run.target_start < 0:
+                        raise CompositionAssemblyError(f"invalid fixed port-map run on {key}: {run}")
+                    if run.source_start + run.length > source.out_width or run.target_start + run.length > target.in_width:
+                        raise CompositionAssemblyError(f"fixed port map on {key} exceeds {source.out_width}->{target.in_width} ports")
+                    source_indices.extend(range(run.source_start, run.source_start + run.length))
+                    target_indices.extend(range(run.target_start, run.target_start + run.length))
+                source_name = f"port_source_{edge.in_id}_{edge.out_id}"
+                target_name = f"port_target_{edge.in_id}_{edge.out_id}"
+                self.register_buffer(source_name, torch.tensor(source_indices, dtype=torch.long), persistent=False)
+                self.register_buffer(target_name, torch.tensor(target_indices, dtype=torch.long), persistent=False)
+                self._port_indices[key] = (source_name, target_name)
+            elif edge.glue_rank > 0:
                 rank = edge.glue_rank
                 expected = source.out_width * rank + rank * target.in_width
                 if len(edge.glue) != expected:
@@ -422,9 +470,20 @@ class ComposedNet(SubstrateModule):
                 else:
                     values[node_id] = x.index_select(1, self._columns[node_id])
                 continue
-            contributions = [
-                (values[in_id] @ self.glue_u[key]) @ self.glue_v[key] if key in self.glue_u else values[in_id] @ self.glue[key] for in_id, key in self._incoming.get(node_id, [])
-            ]
+            contributions = []
+            for in_id, key in self._incoming.get(node_id, []):
+                if key in self._port_indices:
+                    source_name, target_name = self._port_indices[key]
+                    source_indices = getattr(self, source_name)
+                    target_indices = getattr(self, target_name)
+                    gathered = values[in_id].index_select(1, source_indices)
+                    placed = torch.zeros(x.shape[0], node.in_width, dtype=x.dtype, device=x.device)
+                    placed.scatter_add_(1, target_indices.unsqueeze(0).expand(x.shape[0], -1), gathered)
+                    contributions.append(placed)
+                elif key in self.glue_u:
+                    contributions.append((values[in_id] @ self.glue_u[key]) @ self.glue_v[key])
+                else:
+                    contributions.append(values[in_id] @ self.glue[key])
             if not contributions:
                 combined = torch.zeros(x.shape[0], node.in_width, dtype=x.dtype, device=x.device)
             elif node.aggregation == "product":
@@ -473,6 +532,14 @@ def coerce_glue_storage(values: GlueValues, storage: str) -> GlueValues:
     return tuple(values)
 
 
+def edge_storage_value_count(edge: CompEdgeGene) -> int:
+    """Float-equivalent resident estimate including expanded gather/scatter index buffers."""
+
+    if edge.port_map is not None:
+        return 8 * edge.port_map.selected_count  # indices plus gather/scatter working buffers
+    return len(edge.glue)
+
+
 def writeback_composition(comp: CompositionGenome, net: ComposedNet) -> CompositionGenome:
     """Copy the net's trained glue back onto the matching enabled edge genes (Lamarckian glue)."""
     child = comp.clone()
@@ -480,7 +547,9 @@ def writeback_composition(comp: CompositionGenome, net: ComposedNet) -> Composit
     for edge in child.edges:
         key = f"{edge.in_id}->{edge.out_id}"
         storage = "f32" if isinstance(edge.glue, array) else "tuple"
-        if edge.enabled and key in net.glue_u:
+        if edge.port_map is not None:
+            updated.append(edge)
+        elif edge.enabled and key in net.glue_u:
             factors = torch.cat((net.glue_u[key].detach().reshape(-1), net.glue_v[key].detach().reshape(-1)))
             updated.append(replace(edge, glue=_glue_from_tensor(factors, storage=storage)))
         elif edge.enabled and key in net.glue:
@@ -729,7 +798,7 @@ def perturb_glue(comp: CompositionGenome, ctx: CompMutationContext, *, rng: rand
     child = comp.clone()
     updated: list[CompEdgeGene] = []
     for edge in child.edges:
-        if rng.random() >= prob:
+        if rng.random() >= prob or edge.port_map is not None:
             updated.append(edge)
             continue
         if isinstance(edge.glue, array):
@@ -767,7 +836,7 @@ def comp_neat(parent_a: CompositionGenome, parent_b: CompositionGenome, *, rng: 
     child_edges: list[CompEdgeGene] = []
     for edge_a in parent_a.edges:
         edge_b = by_innovation_b.get(edge_a.innovation)
-        if edge_b is None or edge_b.glue_rank != edge_a.glue_rank or len(edge_b.glue) != len(edge_a.glue) or rng.random() < 0.5:
+        if edge_b is None or edge_b.glue_rank != edge_a.glue_rank or edge_b.port_map != edge_a.port_map or len(edge_b.glue) != len(edge_a.glue) or rng.random() < 0.5:
             child_edges.append(edge_a)
         else:
             child_edges.append(edge_b)

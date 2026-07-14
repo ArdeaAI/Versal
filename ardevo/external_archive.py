@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
 SCHEMA_VERSION = 1
+CONTENT_SCHEMA_VERSION = 2
 ACTIVE_LOCK_NAME = ".ardevo-active.lock"
 
 
@@ -257,6 +258,57 @@ def build_snapshot(run_dir: Path, library_dir: Path, destination: Path, *, snaps
     }
 
 
+def build_content_snapshot(
+    run_dir: Path,
+    library_dir: Path,
+    destination: Path,
+    store: ObjectStore,
+    *,
+    snapshot_id: str,
+    task_cursor: int,
+    status: str,
+) -> dict[str, Any]:
+    """Publish immutable content objects and build a small snapshot envelope."""
+
+    entries: list[dict[str, Any]] = []
+    uploaded = reused = 0
+    staging = destination.parent / "objects"
+    staging.mkdir(parents=True, exist_ok=True)
+    for ordinal, (name, source) in enumerate(_snapshot_files(run_dir, library_dir)):
+        stable = staging / f"{ordinal:08d}"
+        shutil.copyfile(source, stable)
+        digest = _sha256(stable)
+        size = stable.stat().st_size
+        object_key = f"objects/sha256/{digest[:2]}/{digest}"
+        if store.list_keys(object_key):
+            reused += 1
+        else:
+            store.put_file(stable, object_key)
+            uploaded += 1
+        entries.append({"path": name, "size": size, "sha256": digest, "object": object_key})
+    envelope = {
+        "schema_version": CONTENT_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "objects": [{"path": entry["path"], "size": entry["size"], "sha256": entry["sha256"], "object": entry["object"]} for entry in entries],
+    }
+    destination.write_bytes((json.dumps(envelope, sort_keys=True) + "\n").encode())
+    return {
+        "schema_version": CONTENT_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "created_unix": time.time(),
+        "task_cursor": int(task_cursor),
+        "status": status,
+        "run_name": run_dir.name,
+        "library_name": library_dir.name,
+        "payload": "snapshot.tar.gz",
+        "payload_size": destination.stat().st_size,
+        "payload_sha256": _sha256(destination),
+        "files": entries,
+        "objects_uploaded": uploaded,
+        "objects_reused": reused,
+    }
+
+
 @dataclass
 class ArchiveManager:
     store: ObjectStore
@@ -330,11 +382,19 @@ class ArchiveManager:
         _atomic_json(self.state_path, state)
         with tempfile.TemporaryDirectory(prefix="ardevo_snapshot_") as temporary:
             payload = Path(temporary) / "snapshot.tar.gz"
-            manifest = build_snapshot(self.run_dir, self.library_dir, payload, snapshot_id=snapshot_id, task_cursor=task_cursor, status=status)
-            manifest["run_key"] = self.run_key
             prefix = f"{self.remote_prefix}/snapshots/{snapshot_id}"
-            incomplete = json.dumps({"snapshot_id": snapshot_id, "created_unix": manifest["created_unix"]}, sort_keys=True).encode("utf-8")
+            incomplete = json.dumps({"snapshot_id": snapshot_id, "created_unix": time.time()}, sort_keys=True).encode("utf-8")
             self.store.put_bytes(incomplete, f"{prefix}/INCOMPLETE.json")
+            manifest = build_content_snapshot(
+                self.run_dir,
+                self.library_dir,
+                payload,
+                self.store,
+                snapshot_id=snapshot_id,
+                task_cursor=task_cursor,
+                status=status,
+            )
+            manifest["run_key"] = self.run_key
             self.store.put_file(payload, f"{prefix}/snapshot.tar.gz")
             self.store.put_bytes((json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"), f"{prefix}/manifest.json")
             self.store.delete(f"{prefix}/INCOMPLETE.json")
@@ -464,7 +524,8 @@ def restore_snapshot(uri: str, destination: Path, *, run_key: str, snapshot_id: 
         raise FileExistsError(f"restore destination is not empty: {destination}")
     store = object_store(uri)
     manifest = _manifest(store, run_key, snapshot_id)
-    if int(manifest.get("schema_version", 0)) != SCHEMA_VERSION or manifest.get("snapshot_id") is None:
+    schema_version = int(manifest.get("schema_version", 0))
+    if schema_version not in (SCHEMA_VERSION, CONTENT_SCHEMA_VERSION) or manifest.get("snapshot_id") is None:
         raise ValueError("invalid or unsupported snapshot manifest")
     if manifest.get("run_key") not in (None, run_key):
         raise ValueError(f"snapshot manifest belongs to run {manifest.get('run_key')!r}, not {run_key!r}")
@@ -479,8 +540,17 @@ def restore_snapshot(uri: str, destination: Path, *, run_key: str, snapshot_id: 
             raise ValueError("snapshot payload size mismatch")
         extracted = Path(temporary) / "extracted"
         extracted.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(payload, "r:gz") as archive:
-            archive.extractall(extracted, filter="data")
+        if schema_version == SCHEMA_VERSION:
+            with tarfile.open(payload, "r:gz") as archive:
+                archive.extractall(extracted, filter="data")
+        else:
+            envelope = json.loads(payload.read_text())
+            envelope_files = {(str(item["path"]), str(item["sha256"]), int(item["size"]), str(item["object"])) for item in envelope.get("objects", [])}
+            manifest_files = {(str(item["path"]), str(item["sha256"]), int(item["size"]), str(item["object"])) for item in manifest["files"]}
+            if envelope.get("snapshot_id") != snapshot_id or envelope_files != manifest_files:
+                raise ValueError("content-addressed snapshot envelope does not match manifest")
+            for entry in manifest["files"]:
+                store.get_file(str(entry["object"]), extracted / PurePosixPath(entry["path"]))
         expected_paths = {str(entry["path"]) for entry in manifest["files"]}
         actual_paths = {path.relative_to(extracted).as_posix() for path in extracted.rglob("*") if path.is_file()}
         if actual_paths != expected_paths:
