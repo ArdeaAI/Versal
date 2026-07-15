@@ -11,6 +11,7 @@ import torch
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.composition import comp_to_dict, minimal_composition
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from ardevo.evolution.loop import AssessedComposition
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
 from ardevo.orchestrator import comp_task_spec
 from ardevo.routing import RoutedNet, RoutedTaskView, RouterService, build_vertex, sanitize_key
@@ -110,6 +111,30 @@ def test_persistence_round_trip_and_growth(tmp_path: Path, xor_task: Task, solvi
     grown_state = grown.net.state_dict()
     assert all(torch.equal(original_state[key], grown_state[key]) for key in original_state)  # old rows untouched
     assert len(grown.net._vertex_order) == len(service.net._vertex_order) + 1
+
+
+def test_router_construction_sync_and_reload_honor_reference_depth(tmp_path: Path, solving_genome: Genome) -> None:
+    from tests.test_macro_nodes import _macro_chain
+
+    library = ModuleLibrary(tmp_path / "lib")
+    keys = _macro_chain(library, solving_genome, links=5)
+    top = library.load(keys[-1])
+    assert build_vertex(top, library, max_inline_depth=3) is None
+    assert build_vertex(top, library, max_inline_depth=4) is not None  # the selected entry root is free
+
+    router_dir = tmp_path / "lib" / "router"
+    shallow = RouterService(library, d_model=8, top_k=1, max_steps=1, persist_dir=router_dir, max_inline_depth=3)
+    assert shallow.sync() == 4  # subtree depths 0..3
+    shallow.save()
+    deep = RouterService(library, d_model=8, top_k=1, max_steps=1, persist_dir=router_dir, max_inline_depth=4)
+    assert len(deep.net._vertex_order) == 5  # reload rebuilds old roots, then admits the depth-4 root
+
+
+def test_routed_strategy_reads_authoritative_composition_depth() -> None:
+    from ardevo.routing import build_routed_strategy
+
+    strategy = build_routed_strategy({"evolution": {"composition": {"max_inline_depth": 7}}})
+    assert strategy.max_inline_depth == 7
 
 
 def test_persistence_mismatch_starts_fresh_or_raises(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
@@ -217,6 +242,76 @@ def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, s
     assert result.metric == 0.0 and result.champion_comp is None and result.champion_routed is None
     assert result.champion_metrics["routed_undistillable"] == 1.0
     assert result.champion_metrics["routed_metric"] >= 0.2  # the router-space win is kept as a diagnostic
+    assert "support_accuracy" not in result.champion_metrics
+    assert not orchestrator._accepts_result(result)
+
+
+def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    from ardevo.routing import RoutedStrategy
+
+    torch.manual_seed(0)
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.95, "decompose": []})
+    planted = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    strategy = RoutedStrategy(library_dir=str(tmp_path / "lib"), d_model=16, top_k=1, max_steps=2, train_steps=1, persist=False)
+    service = strategy._service(orchestrator.library)
+    service.sync(include_compositions=True, exclude_temporal=True)
+    view, _x, _width = _task_view(service.net, xor_task)
+    spec = comp_task_spec(xor_task)
+    comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, orchestrator.state.comp_innovations, orchestrator.state.rng)
+    payload_metrics = {"support_accuracy": 0.25, "support_loss": 1.0, "query_accuracy": 0.25, "query_loss": 1.0}
+    assessed = AssessedComposition(comp=comp, metrics=payload_metrics, fitness=0.25, net=None)
+    monkeypatch.setattr(strategy, "_dominant_pathway", lambda _view: [[planted]])
+    monkeypatch.setattr(strategy, "_verify_distilled", lambda _pathway, _spec, _runtime: assessed)
+
+    result = strategy._resolve_win(
+        xor_task,
+        spec,
+        orchestrator._runtime(),
+        service,
+        view,
+        {"support_accuracy": 1.0, "support_loss": 0.0, "query_accuracy": 1.0, "query_loss": 0.0},
+        1.0,
+        zero_shot=False,
+        steps_used=1,
+        generations_used=10,
+    )
+
+    assert result.champion_comp is assessed
+    assert result.metric == 0.25
+    assert result.champion_metrics["support_accuracy"] == 0.25
+    assert result.champion_metrics["routed_metric"] == 1.0
+    assert result.champion_metrics["routed_distilled_metric"] == 0.25
+    assert not orchestrator._accepts_result(result)
+
+
+def test_routed_distillation_declines_oversized_glue_before_allocation(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
+    import ardevo.routing as routing_module
+    from ardevo.routing import RoutedStrategy
+
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.2, "decompose": []})
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    strategy = RoutedStrategy(library_dir=str(tmp_path / "lib"), d_model=16, top_k=1, max_steps=2, train_steps=1, persist=False)
+    strategy._service(orchestrator.library).sync(include_compositions=True, exclude_temporal=True)
+    runtime = orchestrator._runtime()
+    runtime.loop.max_initial_glue_values = 1
+    next_node_id = runtime.state.comp_innovations._next_node_id
+    assess_resources = runtime.loop.assess_glue_resources
+    resource_devices: list[str | None] = []
+
+    def capture_resources(*args, **kwargs):
+        resource_devices.append(kwargs.get("device"))
+        return assess_resources(*args, **kwargs)
+
+    def unexpected_allocation(*_args, **_kwargs):
+        raise AssertionError("the distillation guard must run before composition glue construction")
+
+    monkeypatch.setattr(routing_module, "minimal_composition", unexpected_allocation)
+    monkeypatch.setattr(routing_module, "_glue_for", unexpected_allocation)
+    monkeypatch.setattr(runtime.loop, "assess_glue_resources", capture_resources)
+
+    assert strategy._verify_distilled([[key]], comp_task_spec(xor_task), runtime) is None
+    assert runtime.state.comp_innovations._next_node_id == next_node_id
+    assert resource_devices == ["cpu"]
 
 
 def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
@@ -302,12 +397,39 @@ def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solvi
     service = RouterService(library, d_model=16, top_k=2, max_steps=2, persist_dir=tmp_path / "lib" / "router", image_dir=image_dir)
     service.sync()  # one vertex -> first render
     overmind = image_dir / "overmind.png"
-    assert overmind.exists()
+    pruned = image_dir / "overmind_pruned.png"
+    assert overmind.exists() and pruned.exists()
     first_mtime = overmind.stat().st_mtime_ns
     # A new library entry is a "significant addition": the portrait refreshes.
     library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
     assert service.sync() == 1
     assert overmind.stat().st_mtime_ns >= first_mtime  # rewritten on growth
+
+
+def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(
+    tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ardevo.rendering as rendering
+
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    evicted_key = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    service = RouterService(library, d_model=16, top_k=1, max_steps=1, image_dir=tmp_path / "lib" / "images")
+    service.sync()
+    evicted_name = sanitize_key(evicted_key)
+    service.evicted[evicted_key] = {"route_epoch": 2, "reuse_epoch": 1}
+    service._remove_vertex(evicted_name)
+    captured: list[rendering.OvermindView] = []
+
+    def capture(_render, _path, view, **_kwargs):
+        captured.append(view)
+
+    monkeypatch.setattr(rendering, "submit_render", capture)
+    service.render_overmind()
+
+    assert captured
+    historical = next(vertex for vertex in captured[-1].vertices if vertex.key == evicted_key)
+    assert historical.retired is True
+    assert "route evicted" in historical.label
 
 
 def test_build_overmind_spec_embeds_experts_and_degrades(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
@@ -362,11 +484,25 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
             runtime.library = library  # score against the seeded library, not the orchestrator's empty one
             result = strategy(task, comp_task_spec(task), runtime, budget=1)
             assert result.champion_routed is not None and math.isfinite(result.metric)
-            assert result.champion_metrics["routed_steps_used"] == 60.0
+            assert result.champion_metrics["routed_steps_used"] == 6.0  # one tenth of generation_cost=10
             results[(task_name, ablation, rank)] = result.champion_metrics["support_accuracy"]
     for task_name, _task, rank in variants:
         real, zeroed = results[(task_name, "none", rank)], results[(task_name, "zero", rank)]
         print(f"expert-ablation diagnostic on {task_name} (adapter_rank={rank}): real={real:.3f} zeroed={zeroed:.3f}")
+
+
+def test_routed_training_budget_scales_steps_and_never_overcharges() -> None:
+    from ardevo.routing import RoutedStrategy
+
+    strategy = RoutedStrategy(library_dir="unused", train_steps=200, generation_cost=10, persist=False)
+    assert strategy._step_cap(0) == 0
+    assert strategy._step_cap(1) == 20
+    assert strategy._step_cap(5) == 100
+    assert strategy._step_cap(10) == 200
+    assert strategy._generations_for_steps(0, 1) == 0
+    assert strategy._generations_for_steps(20, 1) == 1
+    assert strategy._generations_for_steps(75, 5) == 4
+    assert strategy._generations_for_steps(200, 10) == 10
 
 
 def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
@@ -388,6 +524,65 @@ def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_ta
     for name, steps in service.step_usage_totals.items():
         assert 1 <= len(steps) <= 3
         assert sum(steps) == pytest.approx(service.usage_totals[name])
+
+
+def test_route_life_ages_once_per_routed_task_and_reuse_revives_the_expert(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    inactive_key = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    active_key = next(key for key in library.keys() if key != inactive_key)
+    library.configure_lifecycle(library_patience_tasks=48)
+    router_dir = tmp_path / "lib" / "router"
+    service = RouterService(
+        library,
+        d_model=16,
+        top_k=1,
+        max_steps=1,
+        persist_dir=router_dir,
+        lifecycle_enabled=True,
+        route_patience_tasks=2,
+        route_traffic_decay=0.5,
+    )
+    assert service.sync() == 2
+    active_name = sanitize_key(active_key)
+    inactive_name = sanitize_key(inactive_key)
+
+    def record_active_route() -> dict[str, float]:
+        active_index = service.net._vertex_order.index(active_name)
+        service.net.last_selections = [torch.tensor([[active_index]], dtype=torch.long)]
+        service.net.last_probs = [torch.tensor([[1.0]])]
+        service.net.last_gate_stats = {active_name: 1.0}
+        return service.record_traffic()
+
+    assert record_active_route() == {}
+    assert service.route_epoch == 1
+    assert service.route_life[inactive_name] == 1
+    metrics = record_active_route()
+    assert metrics["router_vertices_expired"] == 1.0
+    assert service.route_epoch == 2
+    assert inactive_name not in service.net._vertex_order
+    assert inactive_key in service.evicted
+    assert service.usage_totals[active_name] == pytest.approx(1.5)  # previous traffic decayed before this task
+
+    service.save()
+    reloaded = RouterService(
+        library,
+        d_model=16,
+        top_k=1,
+        max_steps=1,
+        persist_dir=router_dir,
+        lifecycle_enabled=True,
+        route_patience_tasks=2,
+        route_traffic_decay=0.5,
+    )
+    assert reloaded.route_epoch == 2
+    assert inactive_name not in reloaded.net._vertex_order
+    assert inactive_key in reloaded.evicted
+
+    assert not library.note_reuse(inactive_key, channel="lookup")  # live in the library, absent only from routing
+    assert reloaded.sync() == 1
+    assert inactive_name in reloaded.net._vertex_order
+    assert inactive_key not in reloaded.evicted
+    assert reloaded.last_lifecycle_metrics == {"router_vertices_revived": 1.0}
 
 
 def test_traffic_persists_through_meta_round_trip(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:

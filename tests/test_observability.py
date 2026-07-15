@@ -2,8 +2,11 @@
 diagnosable, and the rolling checkpoint restores the exact latest state. The fix for runs that
 used to leave empty directories whenever nothing new was shelved."""
 
+import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.multitask import task_entry
@@ -46,6 +49,8 @@ def test_attempts_carry_wall_clock_and_stage_forensics(xor_task: Task, tmp_path:
     assert attempt.seconds > 0.0
     assert attempt.stage_seconds  # at least one strategy timed
     assert all(value >= 0.0 for value in attempt.stage_seconds.values())
+    assert attempt.support_status == "evaluated" and attempt.support_accuracy is not None
+    assert attempt.query_status == "evaluated" and attempt.query_accuracy is not None
     row = attempt.to_dict()
     assert row["seconds"] == attempt.seconds and row["stage_seconds"] == attempt.stage_seconds
     assert Attempt.from_dict(row).stage_seconds == attempt.stage_seconds
@@ -56,6 +61,46 @@ def test_attempts_from_old_checkpoints_without_timing_still_restore() -> None:
     attempt = Attempt.from_dict(legacy)
     assert attempt.seconds == 0.0 and attempt.stage_seconds == {}
     assert "seconds" not in attempt.to_dict()  # zero stays absent: old summaries byte-identical
+
+
+def test_literal_accuracy_round_trip_distinguishes_zero_from_missing() -> None:
+    attempt = Attempt(
+        task="xor",
+        depth=0,
+        outcome="failed",
+        metric=0.7,
+        generations=2,
+        support_accuracy=0.0,
+        query_accuracy=None,
+        support_status="evaluated",
+        query_status="time_limit_before_evaluation",
+    )
+    row = attempt.to_dict()
+    assert row["support_accuracy"] == 0.0 and row["query_accuracy"] is None
+    restored = Attempt.from_dict(row)
+    assert restored.support_accuracy == 0.0 and restored.support_status == "evaluated"
+    assert restored.query_accuracy is None and restored.query_status == "time_limit_before_evaluation"
+
+    legacy = Attempt.from_dict({"task": "xor", "depth": 0, "outcome": "failed", "metric": 0.0, "generations": 0})
+    assert legacy.support_status == "legacy_missing" and "support_accuracy" not in legacy.to_dict()
+
+
+def test_diagnostic_observation_round_trips_without_becoming_parent_accuracy() -> None:
+    diagnostic = {"score": 0.618, "metric": "router_score", "task": "darcy.h0", "depth": 1, "strategy": "routed", "executable": False}
+    attempt = Attempt(
+        task="darcy",
+        depth=0,
+        outcome="failed",
+        metric=0.0,
+        generations=0,
+        support_status="no_executable_champion",
+        query_status="time_limit_before_evaluation",
+        diagnostic_observation=diagnostic,
+    )
+
+    restored = Attempt.from_dict(attempt.to_dict())
+    assert restored.diagnostic_observation == diagnostic
+    assert restored.support_accuracy is None and restored.query_accuracy is None
 
 
 def test_attempt_sample_metrics_round_trip_and_absent_when_empty() -> None:
@@ -135,16 +180,47 @@ def test_run_summary_records_a_task_that_admits_nothing(tmp_path: Path, xor_task
     assert row["outcome"] == "failed" and row["strategy"] == "direct" and row["new_library_keys"] == []
 
 
+def test_run_summary_task_row_preserves_literal_zero_and_unavailable_reason(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    entry = task_entry(xor_task)
+    attempt = Attempt(
+        task=entry.name,
+        depth=0,
+        outcome="failed",
+        metric=0.5,
+        generations=1,
+        support_accuracy=0.0,
+        query_accuracy=None,
+        support_status="evaluated",
+        query_status="evaluation_unavailable",
+    )
+    trial._record_task(entry, attempt, [], 0)
+    assert trial.task_records[0]["support_accuracy"] == 0.0
+    assert trial.task_records[0]["query_accuracy"] is None
+    assert trial.task_records[0]["query_status"] == "evaluation_unavailable"
+
+
 def test_run_summary_carries_config_provenance(tmp_path: Path, xor_task: Task) -> None:
     """A results directory identifies its exact config, seed, and library; a reviewer (or the
     matrix driver) never has to match a run to a config by schedule shape again."""
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
-    trial.config = dict(trial.config, config_path="configs/recon_ladder.toml", config_sha256="ab" * 32, seed=3)
+    sources = [{"path": "configs/base.toml", "sha256": "cd" * 32}]
+    trial.config = dict(
+        trial.config,
+        config_path="configs/canary.toml",
+        config_sha256="ab" * 32,
+        config_effective_sha256="ef" * 32,
+        config_sources=sources,
+        seed=3,
+    )
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
-    assert summary["config_path"] == "configs/recon_ladder.toml"
+    assert summary["config_path"] == "configs/canary.toml"
     assert summary["config_sha256"] == "ab" * 32
+    assert summary["config_effective_sha256"] == "ef" * 32
+    assert summary["config_sources"] == sources
     assert summary["seed"] == 3
     assert summary["library_dir"] == str(trial.library.root)
 
@@ -154,7 +230,8 @@ def test_run_summary_tolerates_configs_without_provenance(tmp_path: Path) -> Non
     trial = _trial(tmp_path, orchestrator)  # the stub config has no provenance keys
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
-    assert summary["config_path"] == "" and summary["config_sha256"] == "" and summary["seed"] == 0
+    assert summary["config_path"] == "" and summary["config_sha256"] == "" and summary["config_effective_sha256"] == ""
+    assert summary["config_sources"] == [] and summary["seed"] == 0
 
 
 def test_crash_leaves_a_diagnosable_summary(tmp_path: Path) -> None:
@@ -163,6 +240,23 @@ def test_crash_leaves_a_diagnosable_summary(tmp_path: Path) -> None:
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: ValueError: boom")
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
     assert summary["status"].startswith("crashed") and "boom" in summary["status"]
+
+
+def test_interruption_history_is_separate_and_keeps_task_retryable(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    trial.interruptions = []
+    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve network", provisional_support=0.75))
+    entry = task_entry(xor_task)
+    trial._record_interruption(entry, task_cursor=0, error=RuntimeError("boom"), elapsed=2.5)
+    trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: RuntimeError: boom")
+
+    summary = json.loads((trial.run_dir / "run_summary.json").read_text())
+    assert summary["tasks_attempted"] == 0 and summary["tasks"] == []
+    assert summary["interruptions"][0]["task"] == entry.name
+    assert summary["interruptions"][0]["support_accuracy"] == 0.75
+    assert summary["interruptions"][0]["query_status"] == "task_crashed"
+    assert trial._load_prior_interruptions() == summary["interruptions"]
 
 
 def test_rolling_checkpoint_restores_exact_state(tmp_path: Path) -> None:
@@ -199,6 +293,46 @@ def test_load_prior_records_tolerates_missing_summary(tmp_path: Path) -> None:
     assert trial._load_prior_records() == []
 
 
+def test_fresh_per_task_freezes_the_starting_library_once(tmp_path: Path) -> None:
+    from ardevo.library import ModuleLibrary
+
+    trial = object.__new__(OrchestratedTrial)
+    trial.fresh_per_task = True
+    trial.run_dir = tmp_path / "run"
+    trial.run_dir.mkdir()
+    trial.library = ModuleLibrary(tmp_path / "library")
+    trial.frozen_library_dir = None
+    trial.library.root.mkdir(parents=True, exist_ok=True)
+    (trial.library.root / "before.txt").write_text("before")
+
+    trial._prepare_frozen_library()
+    assert trial.frozen_library_dir == trial.run_dir / "frozen_library"
+    frozen_library_dir = trial.frozen_library_dir
+    assert frozen_library_dir is not None
+    assert (frozen_library_dir / "before.txt").read_text() == "before"
+
+    (trial.library.root / "after.txt").write_text("after")
+    trial._prepare_frozen_library()
+    assert not (frozen_library_dir / "after.txt").exists()
+
+
+def test_new_run_snapshots_exact_config_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "source.toml"
+    source.write_bytes(b"[run]\nseed = 7\n")
+    trial = object.__new__(OrchestratedTrial)
+    trial.run_dir = tmp_path / "run"
+    trial.run_dir.mkdir()
+    trial.config = {"config_path": str(source), "config_sha256": "stale", "seed": 9, "orchestrator": {"library_dir": "override"}}
+    trial._snapshot_config()
+    assert (trial.run_dir / "config.toml").read_bytes() == source.read_bytes()
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert (trial.run_dir / "config.toml.sha256").read_text() == f"{source_hash}  config.toml\n"
+    effective = json.loads((trial.run_dir / "config.effective.json").read_text())
+    assert effective["seed"] == 9 and effective["orchestrator"]["library_dir"] == "override"
+    effective_hash = hashlib.sha256((trial.run_dir / "config.effective.json").read_bytes()).hexdigest()
+    assert (trial.run_dir / "config.effective.json.sha256").read_text() == f"{effective_hash}  config.effective.json\n"
+
+
 def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
     """A rung that fails to LOAD aborts the run when require_all_rungs is set; the default stays
     tolerant (the pre-existing skip-and-report behavior)."""
@@ -221,6 +355,25 @@ def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, mo
     config["schedule"]["require_all_rungs"] = False
     trial = OrchestratedTrial(config)  # tolerant default: skips are reported, not fatal
     assert [skipped.rung for skipped in trial.skipped_rungs] == [7]
+
+
+def test_schedule_task_name_filters_are_deterministic(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from ardevo.evolution import multitask
+    from ardevo.trials import orchestrated_trial
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    train = replace(xor_task, meta=replace(xor_task.meta, name="arc.train.one"))
+    evaluation = replace(xor_task, meta=replace(xor_task.meta, name="arc.eval.one"))
+    report = multitask.PoolReport(entries=[task_entry(train), task_entry(evaluation)], skipped=[])
+    monkeypatch.setattr(orchestrated_trial, "build_pool_report", lambda **_kwargs: report)
+    config = _loop_config()
+    config.update({"dataset": "synthetic", "n_samples": 4, "seed": 0})
+    config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "lib")}
+    config["schedule"] = {"kind": "interleave_rungs", "rungs": [18], "task_include": ["arc.*"], "task_exclude": ["*.train.*"]}
+    trial = OrchestratedTrial(config)
+    assert [entry.name for entry in trial.pool] == ["arc.eval.one"]
 
 
 def test_library_gc_cli_dry_run_and_checkpoint_protection(tmp_path: Path, monkeypatch) -> None:

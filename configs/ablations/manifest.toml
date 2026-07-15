@@ -1,0 +1,106 @@
+version = 1
+
+[suite]
+name = "paper_core_ablations"
+description = "Rungs 1-5 mechanism ablations against the flagship cluster methodology."
+baseline = "full"
+results_root = "results/ablations/paper_core"
+
+[seeds]
+p0 = [0, 1, 2, 3, 4]
+p1 = [0, 1, 2]
+
+[slurm]
+job_name = "ardevo-ablate"
+time = "24:00:00"
+cpus_per_task = 16
+mem = "64G"
+gpus = 1
+
+[[arms]]
+name = "full"
+priority = "P0"
+config = "full.toml"
+lever = "all mechanisms enabled"
+claim = "reference system"
+measure = "solve rate, metric, cost, admissions"
+
+[[arms]]
+name = "no_routing"
+priority = "P0"
+config = "no_routing.toml"
+lever = "remove learned routing over reusable experts"
+claim = "routed substrate cost and transfer benefit"
+measure = "solve rate, routed counters, wall time"
+
+[[arms]]
+name = "no_decomposition"
+priority = "P0"
+config = "no_decomposition.toml"
+lever = "remove recursive decomposition"
+claim = "recursive task decomposition"
+measure = "upper-rung bounded failures, solve rate, cost"
+
+[[arms]]
+name = "no_hierarchy"
+priority = "P0"
+config = "no_hierarchy.toml"
+lever = "composition and grammar hierarchy removed; routing, direct search, and decomposition retained"
+claim = "composition and hierarchical grammar search"
+measure = "solve rate, library levels, cost"
+
+[[arms]]
+name = "no_refinement"
+priority = "P0"
+config = "no_refinement.toml"
+lever = "remove bounded improvement of library hits"
+claim = "bounded refinement on library hits"
+measure = "hit drift, refinement counters, tombstones"
+
+[[arms]]
+name = "no_library_reuse"
+priority = "P0"
+config = "no_library_reuse.toml"
+lever = "prevent learned structures from crossing task boundaries"
+claim = "cross-task compounding memory"
+measure = "cost-to-first-solve vs revisit, solve rate, library growth"
+
+[[arms]]
+name = "no_curriculum"
+priority = "P1"
+config = "no_curriculum.toml"
+lever = "replace rung-interleaved progression with ordinary round-robin sampling"
+claim = "rung-interleaved curriculum ordering"
+measure = "per-rung solve rate and time-to-first-solve"
+
+[[arms]]
+name = "no_self_adaptive"
+priority = "P1"
+config = "no_self_adaptive.toml"
+lever = "replace inherited mutation-rate adaptation with fixed rates"
+claim = "self-adaptive mutation rates"
+measure = "solve rate, complexity, wall time"
+
+[[arms]]
+name = "no_archive_diversity"
+priority = "P1"
+config = "no_archive_diversity.toml"
+lever = "default admission, novelty disabled, scalar tournament"
+claim = "MAP-Elites/QD and behavioral diversity"
+measure = "library diversity, downstream reuse, solve rate"
+
+[[arms]]
+name = "freeze_only"
+priority = "P1"
+config = "freeze_only.toml"
+lever = "shared and direct inner-loop trainers set to none"
+claim = "gradient-owned glue and weights (freeze-only control)"
+measure = "solve rate, metric, wall time"
+
+[[arms]]
+name = "no_motifs_macros"
+priority = "P1"
+config = "no_motifs_macros.toml"
+lever = "grammar and macro/shared-motif mutation operators removed"
+claim = "reusable motifs and frozen macro nodes"
+measure = "level-2+ emergence, motif census, warm trajectory"

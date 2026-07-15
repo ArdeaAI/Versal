@@ -1,0 +1,38 @@
+% GENERATED from paper/preprint.md by paper/tools/build_paper.py. DO NOT EDIT THE GENERATED TEX.
+% Manuscript SHA256: $source-sha256$
+$passoptions.latex()$
+\documentclass{article}
+\usepackage$if(style-options)$[$style-options$]$endif${neurips_2026}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+$common.latex()$
+$for(header-includes)$
+$header-includes$
+$endfor$
+$after-header-includes.latex()$
+$hypersetup.latex()$
+\setcounter{secnumdepth}{-\maxdimen}
+
+\title{$title$}
+\author{%
+  $author-name$ \\
+  $author-affiliation$ \\
+  \texttt{$author-email$}
+}
+\date{}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+$abstract$
+\end{abstract}
+
+$body$
+
+$if(include-checklist)$
+\clearpage
+\input{checklist.tex}
+$endif$
+\end{document}

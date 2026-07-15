@@ -1,4 +1,7 @@
 import argparse
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 from ardevo.trials.orchestrated_trial import OrchestratedTrial
@@ -10,7 +13,7 @@ from ardevo.utils.pipelines import Pipeline
 def require_orchestrator(config: dict[str, Any]) -> None:
     """The orchestrated trial is the only run mode; fail fast on a config that cannot drive it."""
     if not config.get("orchestrator"):
-        raise SystemExit("config has no [orchestrator] table; the supported run config is configs/orchestrated_overmind.toml")
+        raise SystemExit("config has no [orchestrator] table; the default run config is configs/smoke.toml")
 
 
 def configure_assess_pool(config: dict[str, Any]) -> None:
@@ -42,15 +45,42 @@ def configure_precision(config: dict[str, Any]) -> None:
         Logger.get_logger().info("TF32 enabled for CUDA matmuls ([run] tf32 = true)")
 
 
+def load_run_config(config_path: str | None, resume: str | None) -> Config:
+    """Load a requested config, or the exact effective snapshot for an implicit resume."""
+
+    if resume and config_path is None:
+        run_dir = Path(resume)
+        source_snapshot = run_dir / "config.toml"
+        effective_snapshot = run_dir / "config.effective.json"
+        if effective_snapshot.exists():
+            restored = json.loads(effective_snapshot.read_text())
+            if not isinstance(restored, dict):
+                raise ValueError(f"invalid effective config snapshot: {effective_snapshot}")
+            # Construct without parsing config.toml: an inherited leaf retains a relative `extends`
+            # path that is intentionally invalid after the leaf is copied into the run directory.
+            config = Config.__new__(Config)
+            config.toml = Config._load_toml()
+            config.current = restored
+            if source_snapshot.exists():
+                payload = source_snapshot.read_bytes()
+                config.current["config_path"] = str(source_snapshot)
+                config.current["config_sha256"] = hashlib.sha256(payload).hexdigest()
+            return config
+        return Config(conf_path=source_snapshot if source_snapshot.exists() else None)
+    return Config(conf_path=config_path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ArdEVO: the orchestrated overmind evolver on the Icarus ladder.")
-    parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/orchestrated_overmind.toml).")
+    parser.add_argument("--config", type=str, default=None, help="Path to a run config (defaults to configs/smoke.toml).")
     parser.add_argument("--resume", type=str, default=None, help="Resume a run from its directory (e.g. results/<ts>_orchestrated).")
     parser.add_argument("--seed", type=int, default=None, help="Override [run] seed (the multi-seed matrix driver's seam; the config file stays frozen).")
     parser.add_argument("--library-dir", type=str, default=None, help="Override [orchestrator] library_dir (cold/warm arms without editing the config).")
+    parser.add_argument("--verbose", action="store_true", help="Show concise operational diagnostics in addition to the Rich run display.")
     args = parser.parse_args()
+    Logger.configure(verbose=args.verbose)
 
-    config = Config(conf_path=args.config)
+    config = load_run_config(args.config, args.resume)
     require_orchestrator(config.current)
     if args.resume:
         config.current["resume"] = args.resume
@@ -63,7 +93,7 @@ def main() -> None:
     logger = Logger.get_logger()
 
     pipe = Pipeline(config.current, load_data=False)
-    logger.info("pipeline: %s", pipe.get_pipeline_info())
+    logger.debug("pipeline: %s", pipe.get_pipeline_info())
     pipe.add_trial(OrchestratedTrial)
     pipe.run_task()
 

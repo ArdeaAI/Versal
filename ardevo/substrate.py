@@ -21,6 +21,7 @@ import torch
 from torch import nn
 
 from ardevo.evolution.genome import Genome, macro_implied_edges, topological_order
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 
 
 def _gaussian(value: torch.Tensor) -> torch.Tensor:
@@ -51,7 +52,9 @@ def activation_names() -> list[str]:
 # `macro_resolver=` arguments override it (the hierarchical/orchestrated paths pass theirs).
 MacroResolver = Callable[[str], Genome]
 _DEFAULT_MACRO_RESOLVER: MacroResolver | None = None
-_MAX_MACRO_DEPTH = 4
+# Compatibility alias for code that imported the historical hard-coded cap. New runtime code must
+# pass ``max_inline_depth`` from [evolution.composition] instead of consulting this constant.
+_MAX_MACRO_DEPTH = DEFAULT_MAX_INLINE_DEPTH
 
 
 def set_macro_resolver(resolver: MacroResolver | None) -> None:
@@ -84,7 +87,17 @@ class SubstrateModule(nn.Module):
 class GraphNet(SubstrateModule):
     """Executable form of a genome: a topologically-layered weighted DAG evaluated level by level."""
 
-    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None, _macro_depth: int = 0) -> None:
+    def __init__(
+        self,
+        genome: Genome,
+        n_inputs: int,
+        n_outputs: int,
+        *,
+        macro_resolver: MacroResolver | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        _reference_depth: int = 0,
+        _reference_stack: tuple[str, ...] = (),
+    ) -> None:
         super().__init__()
         input_ids, bias_ids, output_ids = genome.input_ids, genome.bias_ids, genome.output_ids
         if len(input_ids) != n_inputs:
@@ -239,17 +252,28 @@ class GraphNet(SubstrateModule):
             resolver = macro_resolver or _DEFAULT_MACRO_RESOLVER
             if resolver is None:
                 raise ValueError("genome has macro nodes but no macro resolver is configured (set_macro_resolver or pass macro_resolver=)")
-            if _macro_depth >= _MAX_MACRO_DEPTH:
-                raise ValueError(f"macro nesting exceeds depth {_MAX_MACRO_DEPTH}")
             level_index_of = {int(level_positions[i]): (level, i) for level, (level_positions, _cols, _groups) in enumerate(self._levels) for i in range(len(level_positions))}
             for macro in genome.macros:
-                inner_genome = resolver(macro.ref.removeprefix("library:"))
+                key = macro.ref.removeprefix("library:")
+                if key in _reference_stack:
+                    raise ValueError(f"macro reference cycle through library entry {key!r}")
+                if _reference_depth >= max_inline_depth:
+                    raise ValueError(f"macro reference nesting exceeds max_inline_depth={max_inline_depth}")
+                inner_genome = resolver(key)
                 if len(inner_genome.input_ids) != len(macro.input_node_ids) or len(inner_genome.output_ids) != len(macro.output_node_ids):
                     raise ValueError(
                         f"macro {macro.ref} shape mismatch: inner {len(inner_genome.input_ids)}->{len(inner_genome.output_ids)}, "
                         f"placement {len(macro.input_node_ids)}->{len(macro.output_node_ids)}"
                     )
-                inner = GraphNet(inner_genome, len(inner_genome.input_ids), len(inner_genome.output_ids), macro_resolver=resolver, _macro_depth=_macro_depth + 1)
+                inner = GraphNet(
+                    inner_genome,
+                    len(inner_genome.input_ids),
+                    len(inner_genome.output_ids),
+                    macro_resolver=resolver,
+                    max_inline_depth=max_inline_depth,
+                    _reference_depth=_reference_depth + 1,
+                    _reference_stack=(*_reference_stack, key),
+                )
                 if not macro.trainable:
                     for parameter in inner.parameters():
                         parameter.requires_grad_(False)
@@ -330,8 +354,27 @@ class RecurrentGraphNet(GraphNet):
     from the sequence each step.
     """
 
-    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last", *, macro_resolver: MacroResolver | None = None) -> None:
-        super().__init__(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
+    def __init__(
+        self,
+        genome: Genome,
+        n_inputs: int,
+        n_outputs: int,
+        mode: str = "last",
+        *,
+        macro_resolver: MacroResolver | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        _reference_depth: int = 0,
+        _reference_stack: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(
+            genome,
+            n_inputs,
+            n_outputs,
+            macro_resolver=macro_resolver,
+            max_inline_depth=max_inline_depth,
+            _reference_depth=_reference_depth,
+            _reference_stack=_reference_stack,
+        )
         if mode not in ("last", "all"):
             raise ValueError(f"unknown recurrent output mode {mode!r}; expected 'last' or 'all'")
         self.mode = mode
@@ -438,8 +481,28 @@ class RefineGraphNet(RecurrentGraphNet):
     and the flat path stays byte-identical. Refinement only does work once the genome evolves
     recurrent edges to thread state between passes (`add_recurrent_connection`)."""
 
-    def __init__(self, genome: Genome, n_inputs: int, n_outputs: int, steps: int, *, macro_resolver: MacroResolver | None = None) -> None:
-        super().__init__(genome, n_inputs, n_outputs, "last", macro_resolver=macro_resolver)
+    def __init__(
+        self,
+        genome: Genome,
+        n_inputs: int,
+        n_outputs: int,
+        steps: int,
+        *,
+        macro_resolver: MacroResolver | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        _reference_depth: int = 0,
+        _reference_stack: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(
+            genome,
+            n_inputs,
+            n_outputs,
+            "last",
+            macro_resolver=macro_resolver,
+            max_inline_depth=max_inline_depth,
+            _reference_depth=_reference_depth,
+            _reference_stack=_reference_stack,
+        )
         if steps < 1:
             raise ValueError(f"refine steps must be >= 1, got {steps}")
         self.steps = steps
@@ -464,27 +527,107 @@ class RefineGraphNet(RecurrentGraphNet):
         return flat.reshape(x.shape[0], self.steps, self.output_pos.numel())
 
 
-def decode(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
+def decode(
+    genome: Genome,
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    macro_resolver: MacroResolver | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+    _reference_depth: int = 0,
+    _reference_stack: tuple[str, ...] = (),
+) -> GraphNet:
     """Build the torch module for a genome."""
-    return GraphNet(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
+    return GraphNet(
+        genome,
+        n_inputs,
+        n_outputs,
+        macro_resolver=macro_resolver,
+        max_inline_depth=max_inline_depth,
+        _reference_depth=_reference_depth,
+        _reference_stack=_reference_stack,
+    )
 
 
-def decode_recurrent(genome: Genome, n_inputs: int, n_outputs: int, mode: str = "last", *, macro_resolver: MacroResolver | None = None) -> RecurrentGraphNet:
+def decode_recurrent(
+    genome: Genome,
+    n_inputs: int,
+    n_outputs: int,
+    mode: str = "last",
+    *,
+    macro_resolver: MacroResolver | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+    _reference_depth: int = 0,
+    _reference_stack: tuple[str, ...] = (),
+) -> RecurrentGraphNet:
     """Build the stepped (time-axis) torch module for a genome."""
-    return RecurrentGraphNet(genome, n_inputs, n_outputs, mode, macro_resolver=macro_resolver)
+    return RecurrentGraphNet(
+        genome,
+        n_inputs,
+        n_outputs,
+        mode,
+        macro_resolver=macro_resolver,
+        max_inline_depth=max_inline_depth,
+        _reference_depth=_reference_depth,
+        _reference_stack=_reference_stack,
+    )
 
 
-def decode_refine(genome: Genome, n_inputs: int, n_outputs: int, *, steps: int | None = None, macro_resolver: MacroResolver | None = None) -> RefineGraphNet:
+def decode_refine(
+    genome: Genome,
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    steps: int | None = None,
+    macro_resolver: MacroResolver | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+    _reference_depth: int = 0,
+    _reference_stack: tuple[str, ...] = (),
+) -> RefineGraphNet:
     """Build the iterative-refinement module for a genome (static input, re-applied `steps` times)."""
     resolved = genome.refine_steps if steps is None else steps
-    return RefineGraphNet(genome, n_inputs, n_outputs, resolved, macro_resolver=macro_resolver)
+    return RefineGraphNet(
+        genome,
+        n_inputs,
+        n_outputs,
+        resolved,
+        macro_resolver=macro_resolver,
+        max_inline_depth=max_inline_depth,
+        _reference_depth=_reference_depth,
+        _reference_stack=_reference_stack,
+    )
 
 
-def decode_module(genome: Genome, n_inputs: int, n_outputs: int, *, macro_resolver: MacroResolver | None = None) -> GraphNet:
+def decode_module(
+    genome: Genome,
+    n_inputs: int,
+    n_outputs: int,
+    *,
+    macro_resolver: MacroResolver | None = None,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+    _reference_depth: int = 0,
+    _reference_stack: tuple[str, ...] = (),
+) -> GraphNet:
     """Decode honoring the genome's evolved refinement depth: refine substrate when refine_steps > 1,
     plain feedforward otherwise. Use this at every STATIC-task decode site that evaluates or reuses a
     genome (adapter, library lookup re-eval, composition inner), so a module that needs its refine
     passes keeps working wherever it is reused, never silently collapsing to a single pass."""
     if genome.refine_steps > 1:
-        return decode_refine(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
-    return decode(genome, n_inputs, n_outputs, macro_resolver=macro_resolver)
+        return decode_refine(
+            genome,
+            n_inputs,
+            n_outputs,
+            macro_resolver=macro_resolver,
+            max_inline_depth=max_inline_depth,
+            _reference_depth=_reference_depth,
+            _reference_stack=_reference_stack,
+        )
+    return decode(
+        genome,
+        n_inputs,
+        n_outputs,
+        macro_resolver=macro_resolver,
+        max_inline_depth=max_inline_depth,
+        _reference_depth=_reference_depth,
+        _reference_stack=_reference_stack,
+    )

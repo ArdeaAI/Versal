@@ -1,0 +1,15 @@
+extends = "../full_cluster.toml"
+
+# Reduced comparison scope for cluster ablations. Each arm inherits the flagship methodology and
+# changes only its named mechanism across the first five rungs.
+
+[run]
+experiment = "ablation_suite_rungs_1_5"
+
+[schedule]
+rungs = [1, 2, 3, 4, 5]
+tasks_per_rung = 20
+
+[orchestrator]
+tasks = 100
+library_dir = "library/ablations"

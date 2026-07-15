@@ -50,7 +50,7 @@ def test_orchestrated_config_wires_geometry_refine_and_spatial() -> None:
     from ardevo.evolution.registry import build_loop
     from ardevo.utils.config import Config
 
-    config = Config(conf_path="configs/orchestrated_overmind.toml").current
+    config = Config(conf_path="configs/canary.toml").current
     operators = set(config["evolution"]["mutation"]["operators"])
     assert {"add_local_node", "add_local_connection", "add_shared_motif", "tweak_refine_steps"} <= operators
     assert "spatial_patches" in config["orchestrator"]["decompose"]

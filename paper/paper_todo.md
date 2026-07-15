@@ -1,14 +1,16 @@
 # paper_todo.md: from draft to publishable
 
-Companion to `paper/paper.md` (draft of 2026-07-06, polish pass completed later the same day). The
+Companion to `paper/preprint.md` (method revision 2026-07-12). The
 draft is honest about its evidence, which means the gap to publishable is enumerable. This file is
 that enumeration: a checklist with the plan baked in. Items marked **P0** block any submission;
 **P1** block a strong submission; **P2** are polish/stretch. No em dashes anywhere in the paper;
 keep it that way.
 
-**2026-07-06 status: everything below that does not require a long run is done** (figures, citation
-verification, related-work sweep, numbers/claims/terminology audits, dataset documentation,
-reproducibility + compute appendices, LaTeX conversion, artifact freeze, runner + provenance).
+**2026-07-12 status: the implementation and evidence/build infrastructure are current.** Blind ARC
+evaluation, graph-grammar search, calibrated hardware execution, no-memory isolation, exact config
+snapshots, and an official NeurIPS 2026 build are implemented. Statistical claims, baselines, and
+page-budget work remain submission blockers. The evidence-checked working preprint currently builds
+to 34 pages; submission mode refuses 32 unanswered checklist macros before typesetting.
 `ai/instructions_for_publish.md` holds the exact commands and integration protocol for every
 remaining run-gated item; work from that file.
 
@@ -38,10 +40,10 @@ distributions.
 - [ ] **Independent-attempt arm.** The gate runs are 20 accumulated assaults (wall ledger on). Add a
       control with `[orchestrator.wall] ledger = false` so attempts are independent samples; report
       both. This also doubles as the wall-ledger ablation.
-- [x] **Decide and document the metric protocol**: DONE in the draft as it stands: the accept bar
-      (0.95 query accuracy, support fallback) and "solved" (outcomes library_hit/refined/evolved)
-      are stated in S4.1/S7.1, interrupted runs are reported with their status and never silently
-      mixed with completed ones (S7.3, Appendix C). Revisit only if a reviewer pushes.
+- [x] **Decide and document the metric protocol**: DONE. Search is support-only; dense support
+      accuracy drives progress; structured admission requires whole-task support exactness; the
+      selected payload receives one separately stored held-out report. Archived experiments retain
+      their historical query-selection protocol and are labeled as such.
 
 ## 2. Ablation matrix (P0 for the ones supporting central claims)
 
@@ -83,8 +85,9 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
 - [ ] **WANN-style**: weight_samples evaluate as the ONLY metric (no training), rungs 1-3.
 - [ ] **Random structural search**: mutation-only, no selection pressure (or random tournament),
       same operator menu. Separates "evolution works" from "the operators are enough".
-- [ ] **No-memory control**: full system, `library_dir` pointed at a throwaway per task. This is the
-      compounding baseline and the cheapest high-value run in this file.
+- [ ] **No-memory control run**: the implementation is DONE (`[library] fresh_per_task = true`
+      freezes the initial library, detaches persistent workers, and discards task-local state).
+      Run it under matched seeds and budgets; this remains the compounding baseline.
 - [ ] Optional P2: regularized evolution over a fixed cell space on rungs 6-7, as the
       NAS-literature anchor. Cite-and-decline is defensible if scoped out.
 
@@ -108,10 +111,10 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
       (`results/20260706_090102_orchestrated`, 11/24 tasks). Scorecard it on completion and add
       seeds; rung 6's 0.900-vs-0.95 gap remains the cheap, high-value tuning probe. Instructions
       item I.
-- [ ] **Rungs 11-14 unblock or descope** (P1): one of (a) cppn init at scale (its designed payoff;
-      measure genes-at-init vs minimal), (b) output-side factorization design pass, (c) explicit
-      descope in the paper. Currently the draft says "blocked outright", which is honest but invites
-      "why not the init you built for exactly this".
+- [ ] **Rungs 11-18 capability campaign** (P1): scale-safe initialization/guards, adaptive slicing,
+      structured grid metrics, tied motifs, and grammar search are implemented. Run matched cold
+      campaigns and report exact-grid ARC results with baseline and coverage columns; no solve is
+      currently claimed.
 - [ ] **Motif census at scale** (P2): the 35-entry flagship census is DONE and in the paper (358
       motifs, gated structure recovered); the 100+ entry census waits on a bigger library.
 - [ ] **Library scale stress** (P2): synthetic 1k-entry library; measure index rewrite, query, GC;
@@ -148,16 +151,11 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
       mismatches fixed (tombstone accounting, 112-task failure breakdown, sin-node claim,
       diagnostic denominator, test count 513, test lines 8.7k). Re-run after each new campaign
       (protocol in `ai/instructions_for_publish.md` section 3).
-- [x] **LaTeX conversion**: DONE 2026-07-06 (`paper/latex/`, venue-neutral article + generated
-      references.bib; swap in the venue class at decision time).
-- [ ] **Venue decision**: options with different framings:
-      (a) NeurIPS/ICML main: needs items 1-3 complete plus at least one resolved headline (probe GO,
-      or routed-at-scale);
-      (b) NeurIPS Datasets & Benchmarks: lead with Icarus + the diagnostic protocol; system becomes
-      the reference implementation; lower results bar, needs dataset documentation (below);
-      (c) GECCO/ALIFE: system + case-study framing fits as-is after items 1-2;
-      (d) arXiv preprint now, venue later.
-      Recommendation: (d) immediately after items 1-2 land, then (a) or (b) by results.
+- [x] **LaTeX conversion**: DONE. The 2026-07-06 venue-neutral conversion is retained only for
+      comparison; `paper/tools/build_paper.py` now owns the authenticated NeurIPS 2026 build.
+- [x] **Venue target**: NeurIPS 2026 selected and the official template is pinned. The current draft
+      is a working preprint, not submission-ready until items 1-3 land and the main text fits the
+      nine-page limit.
 - [x] **Icarus dataset documentation** (P0 if venue (b)): MOSTLY DONE 2026-07-06: per-rung task
       counts and I/O widths verified live for all 18 rungs (paper S3.2 table complete; corrected
       rung 11 to 10,800 x 100), new S3.4 covers generation, hosting, licensing, the underscore
@@ -175,14 +173,17 @@ All under matched budgets (same task pool, same accept bar, comparable evaluatio
 
 - [x] **Multi-seed multi-config runner**: DONE (`uv run run_matrix`: config x seeds x cold/warm
       arms as crash-isolated subprocesses, CSV aggregation, per-rung tier scorecard).
+- [x] **Evidence-locked manuscript build**: DONE (`paper/preprint.md` is canonical; the claim/figure
+      manifest pins artifact SHA256 values; the generated preprint uses the authenticated official
+      NeurIPS 2026 style and refuses unresolved submission checklists or overfull boxes).
 - [x] **Plotting script** for Figs 1-4: DONE (`paper/figures/make_figures.py`, deterministic,
       documented in `paper/figures/README.md`; extend for CI bands when sweeps land).
 - [ ] **Remote execution hygiene**: push before enqueue (agent clones the repo; untracked files
       never arrive), configs committed per experiment tag. LatticeCUDA also resolves the batched
       trainer crossover claim (bench T4/T5 on cuda) which S8 currently leaves as "expected".
       Run-gated; instructions item J.
-- [x] **Run-provenance stamp**: DONE (`config_path` + `config_sha256` in every new
-      run_summary.json; the flagship run predates it, documented in Appendix C).
+- [x] **Run-provenance stamp**: DONE. New runs snapshot source TOML and effective JSON with SHA256,
+      record hardware/execution policy, and implicit resume loads the run-local effective snapshot.
 - [x] **Freeze artifacts per experiment.** DONE for everything the paper cites:
       `ai/archive/20260706_flagship/` (run summary, post-GC library, census regenerated against
       exactly that library, rung-doctor transcript, config copy, SHA256SUMS) plus the existing

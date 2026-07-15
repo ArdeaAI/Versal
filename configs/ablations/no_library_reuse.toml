@@ -1,0 +1,10 @@
+# P0: every task receives a disposable copy of the cold starting library. This is the existing
+# independent-attempt control and prevents cross-task memory from accumulating.
+extends = "base.toml"
+
+[library]
+fresh_per_task = true
+
+[evolution.modules]
+seed_fraction = 0.0
+absorb_top_k = 0

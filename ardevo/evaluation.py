@@ -36,6 +36,16 @@ class DecodingEncoder(Protocol):
     def decode(self, prediction: torch.Tensor, descriptor: FieldDescriptor) -> torch.Tensor: ...
 
 
+class EncodedSupport(Protocol):
+    """Support tensors shared by ordinary and structured task encodings."""
+
+    @property
+    def support_input(self) -> tuple[torch.Tensor, FieldDescriptor]: ...
+
+    @property
+    def support_target(self) -> tuple[torch.Tensor, torch.Tensor | None, FieldDescriptor]: ...
+
+
 # Regression "correct" tolerance: an output counts as correct if it lands within this fraction of the
 # target's spread. Exact float equality (the class path) is always wrong for CONTINUOUS targets, which
 # would leave continuous rungs (pole/double_pole) with a flat-zero accuracy and no fitness signal.
@@ -79,13 +89,29 @@ def fit_query_target(encoded: EncodedTask) -> EncodedTask:
     )
 
 
-def input_width(encoded: EncodedTask) -> int:
+def without_query(encoded: EncodedTask) -> EncodedTask:
+    """Return the search-time view of a task, with held-out query tensors inaccessible.
+
+    Callers opt into this view through orchestrator configuration.  Keeping it as a distinct
+    object makes accidental query evaluation impossible rather than merely promising not to read
+    the resulting metric.
+    """
+
+    return EncodedTask(
+        support_input=encoded.support_input,
+        support_target=encoded.support_target,
+        query_input=None,
+        query_target=None,
+    )
+
+
+def input_width(encoded: EncodedSupport) -> int:
     """Width of the encoded input vector (the substrate's input-node count)."""
     tensor, _descriptor = encoded.support_input
     return int(tensor.shape[1])
 
 
-def output_features(encoded: EncodedTask) -> int:
+def output_features(encoded: EncodedSupport) -> int:
     """Number of output units the substrate must emit for this task's target."""
     target, _mask, descriptor = encoded.support_target
     return model_output_features(descriptor, target_positions(target))
@@ -151,6 +177,10 @@ def _split_metrics(module: torch.nn.Module, encoded_input: tuple, encoded_target
 def evaluate(module: torch.nn.Module, encoded: EncodedTask, encoder: DecodingEncoder) -> dict[str, float]:
     """Support- and query-set metrics. Support fit rewards capacity (structure improves it even when
     the held-out query, being tiny/non-generalizable, cannot); query fit measures generalization."""
+    from ardevo.structured import StructuredGridEncoded, evaluate_structured_grid
+
+    if isinstance(encoded, StructuredGridEncoded):
+        return evaluate_structured_grid(module, encoded, encoder)
     with torch.no_grad():
         support_accuracy, support_loss_value = _split_metrics(module, encoded.support_input, encoded.support_target, encoder)
         if encoded.query_input is not None and encoded.query_target is not None:

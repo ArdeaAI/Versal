@@ -1,9 +1,17 @@
-"""net_gallery CLI seam: per-entry renders report honest rows and respect the index filters."""
+"""net_gallery CLI seam: render selection is explicit and persistent state stays isolated."""
 
+import json
+import sys
 from pathlib import Path
+from typing import Any, cast
 
+import pytest
+
+import ardevo.rendering as rendering
+import ardevo.routing as routing
 from ardevo.evolution.genome import Genome, genome_to_dict
 from ardevo.library import MODULE, ModuleLibrary
+from ardevo.tools import net_gallery
 from ardevo.tools.net_gallery import render_all_entries
 
 _FIXTURE_LIBRARY = Path(__file__).parent / "fixtures" / "library_v1"
@@ -29,3 +37,233 @@ def test_render_all_entries_filters_retired(tmp_path: Path, solving_genome: Geno
     assert [row["key"] for row in rows] == [kept]
     rows_all = render_all_entries(library, tmp_path / "renders_all", include_retired=True)
     assert {row["key"] for row in rows_all} == {kept, retired}
+
+
+class _LibrarySpy:
+    roots: list[Path] = []
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        self.roots.append(self.root)
+
+    def __len__(self) -> int:
+        return 0
+
+
+def _write_config(path: Path, library_root: Path) -> None:
+    path.write_text(
+        "\n".join(
+            (
+                "[orchestrator]",
+                f"library_dir = {json.dumps(str(library_root))}",
+                "[orchestrator.routed]",
+                "d_model = 16",
+                "top_k = 1",
+                "max_steps = 2",
+            )
+        )
+    )
+
+
+@pytest.fixture
+def isolated_cli(monkeypatch: pytest.MonkeyPatch) -> type[_LibrarySpy]:
+    """Replace filesystem/render dependencies so CLI tests cannot touch a live campaign."""
+    _LibrarySpy.roots.clear()
+    monkeypatch.setattr(net_gallery, "ModuleLibrary", _LibrarySpy)
+    monkeypatch.setattr(net_gallery, "render_all_entries", lambda *_args, **_kwargs: [])
+    return _LibrarySpy
+
+
+def test_cli_uses_configured_library_when_library_flag_is_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli: type[_LibrarySpy],
+) -> None:
+    configured = tmp_path / "configured-library"
+    configured.mkdir()
+    config = tmp_path / "run.toml"
+    _write_config(config, configured)
+    monkeypatch.setattr(sys, "argv", ["render", "--config", str(config)])
+
+    net_gallery.main()
+
+    assert isolated_cli.roots == [configured]
+
+
+def test_cli_explicit_library_overrides_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli: type[_LibrarySpy],
+) -> None:
+    configured = tmp_path / "configured-library"
+    configured.mkdir()
+    explicit = tmp_path / "explicit-library"
+    explicit.mkdir()
+    config = tmp_path / "run.toml"
+    _write_config(config, configured)
+    monkeypatch.setattr(sys, "argv", ["render", "--config", str(config), "--library", str(explicit)])
+
+    net_gallery.main()
+
+    assert isolated_cli.roots == [explicit]
+
+
+def test_cold_overmind_only_skips_entry_gallery_and_persisted_router(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli: type[_LibrarySpy],
+) -> None:
+    library_root = tmp_path / "library"
+    router_dir = library_root / "router"
+    router_dir.mkdir(parents=True)
+    # Deliberately invalid: --cold-overmind must not even parse persisted metadata.
+    (router_dir / "router_meta.json").write_text("not json")
+    config = tmp_path / "run.toml"
+    _write_config(config, library_root)
+    images = tmp_path / "preview"
+    calls: dict[str, Any] = {"renders": 0, "syncs": 0}
+
+    def forbidden_entry_render(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("--overmind-only must skip per-entry rendering")
+
+    class RouterSpy:
+        instances: list["RouterSpy"] = []
+
+        def __init__(self, _library: Any, **kwargs: Any) -> None:
+            calls["persist_dir"] = kwargs["persist_dir"]
+            self.image_dir = kwargs["image_dir"]
+            self.net = type("NetSpy", (), {"_vertex_order": ["module"]})()
+            self.instances.append(self)
+
+        def sync(self, **_kwargs: Any) -> int:
+            calls["syncs"] += 1
+            return 1
+
+        def render_overmind(self) -> None:
+            calls["renders"] += 1
+
+    monkeypatch.setattr(net_gallery, "render_all_entries", forbidden_entry_render)
+    monkeypatch.setattr(routing, "RouterService", RouterSpy)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["render", "--config", str(config), "--images", str(images), "--overmind-only", "--cold-overmind"],
+    )
+
+    net_gallery.main()
+
+    assert isolated_cli.roots == [library_root]
+    assert calls == {"renders": 1, "syncs": 1, "persist_dir": None}
+    assert RouterSpy.instances[0].image_dir == images
+
+
+def test_metadata_overmind_is_isolated_from_entry_and_router_state_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli: type[_LibrarySpy],
+) -> None:
+    library_root = tmp_path / "library"
+    router_dir = library_root / "router"
+    router_dir.mkdir(parents=True)
+    metadata = {"d_model": 64, "vertex_order": ["m1_fixture"]}
+    metadata_path = router_dir / "router_meta.json"
+    metadata_path.write_text(json.dumps(metadata))
+    # Metadata rendering must remain usable even when the heavyweight tensor state is unreadable.
+    (router_dir / "router_state.pt").write_text("not a torch checkpoint")
+    config = tmp_path / "run.toml"
+    _write_config(config, library_root)
+    images = tmp_path / "preview"
+    calls: dict[str, Any] = {}
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("metadata-only rendering entered a heavyweight render path")
+
+    def metadata_renderer(_library: Any, source: Path, destination: Path) -> Path:
+        calls["metadata"] = json.loads(source.read_text())
+        calls["source"] = source
+        calls["destination"] = destination
+        return destination
+
+    monkeypatch.setattr(net_gallery, "render_all_entries", forbidden)
+    monkeypatch.setattr(net_gallery, "render_library_gallery", forbidden)
+    monkeypatch.setattr(net_gallery, "render_overmind_from_metadata", metadata_renderer, raising=False)
+    monkeypatch.setattr(routing, "RouterService", forbidden)
+    monkeypatch.setattr(routing.torch, "load", forbidden)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["render", "--config", str(config), "--images", str(images), "--metadata-overmind"],
+    )
+
+    net_gallery.main()
+
+    assert isolated_cli.roots == [library_root]
+    assert calls == {
+        "metadata": metadata,
+        "source": metadata_path,
+        "destination": images / "overmind.png",
+    }
+
+
+def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    summaries = [
+        {"key": "m1_alpha", "retired": False},
+        {"key": "m1_beta", "retired": False},
+        {"key": "m1_retired", "retired": True},
+        {"key": "m1_evicted", "retired": False},
+    ]
+
+    class MetadataLibrarySpy:
+        def summaries(self, *, include_retired: bool = False) -> list[dict[str, Any]]:
+            assert include_retired is True
+            return summaries
+
+    meta = {
+        "d_model": 64,
+        "top_k": 2,
+        "max_steps": 4,
+        "vertex_keys": ["m1_alpha", "m1_beta", "m1_retired", "m1_missing"],
+        "input_adapter_keys": [{"key": "BINARY|K:2", "width": 2}, "REAL|K:3"],
+        "output_head_keys": [{"key": "BINARY|K:1", "width": 1}],
+        "usage_totals": {"m1_alpha": 2.0, "m1_beta": 6.0, "m1_retired": 2.0},
+        "step_usage_totals": {
+            "m1_alpha": [0.0, 2.0],
+            "m1_beta": [4.0, 0.0],
+            "m1_retired": [1.0, 1.0],
+        },
+        "transition_totals": {
+            "m1_alpha": {"m1_beta": 3.0, "m1_retired": 1.0},
+            "m1_beta": {"m1_alpha": 6.0},
+            "m1_missing": {"m1_beta": 100.0},
+        },
+        "evicted": {"m1_evicted": {"route_epoch": 8, "reuse_epoch": 4}},
+    }
+    metadata_path = tmp_path / "router_meta.json"
+    metadata_path.write_text(json.dumps(meta))
+    out_path = tmp_path / "preview" / "overmind.png"
+    captured: dict[str, Any] = {}
+
+    def capture_render(path: Path, view: rendering.OvermindView, *, library: Any) -> Path:
+        captured.update(path=path, view=view, library=library)
+        return path
+
+    monkeypatch.setattr(rendering, "render_overmind", capture_render)
+    library_spy = MetadataLibrarySpy()
+    library = cast(ModuleLibrary, library_spy)
+
+    result = net_gallery.render_overmind_from_metadata(library, metadata_path, out_path)
+
+    assert result == out_path
+    assert captured["path"] == out_path
+    assert captured["library"] is library_spy
+    view = captured["view"]
+    assert [vertex.key for vertex in view.vertices] == ["m1_beta", "m1_alpha", "m1_retired", "m1_evicted"]
+    assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.6, 0.2, 0.2, 0.0])
+    assert [vertex.mean_step for vertex in view.vertices[:3]] == pytest.approx([0.0, 1.0, 0.5])
+    assert view.vertices[-1].mean_step is None
+    assert view.vertices[-2].retired is True and view.vertices[-1].retired is True
+    assert "route evicted" in view.vertices[-1].label
+    assert view.input_signatures == ["BINARY|K:2", "REAL|K:3"]
+    assert view.output_signatures == ["BINARY|K:1"]
+    assert view.pathways == pytest.approx([(1, 0, 0.5), (1, 2, 1.0 / 6.0), (0, 1, 1.0)])
+    assert (view.d_model, view.top_k, view.max_steps) == (64, 2, 4)

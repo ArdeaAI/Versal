@@ -245,6 +245,8 @@ def gradient_batched(
     adam_fused: bool = False,
     torch_compile: bool = False,
     score_candidates: bool = False,
+    microbatch_size: int = 0,
+    adaptive_microbatch: bool = True,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
     params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
@@ -265,7 +267,61 @@ def gradient_batched(
         adam_fused=adam_fused,
         torch_compile=torch_compile,
         score_candidates=score_candidates,
+        microbatch_size=microbatch_size,
+        adaptive_microbatch=adaptive_microbatch,
         serial_op=gradient,
+    )
+
+
+@TRAIN_POPULATION.register("gradient_scheduled")
+def gradient_scheduled_population(
+    genomes: list[Genome],
+    modules: list[SubstrateModule],
+    encoded: EncodedTask,
+    *,
+    rng: random.Random,
+    steps: int = 200,
+    lr: float = 0.01,
+    warmup_fraction: float = 0.05,
+    final_lr_fraction: float = 0.05,
+    writeback: bool = True,
+    weight_decay: float = 0.0,
+    device: str = "auto",
+    max_padded_nodes: int = 1024,
+    min_batch_nodes: int = 0,
+    adam_fused: bool = False,
+    torch_compile: bool = False,
+    score_candidates: bool = False,
+    microbatch_size: int = 0,
+    adaptive_microbatch: bool = True,
+) -> list[tuple[Genome, SubstrateModule]]:
+    """Population form of `gradient_scheduled`, with the identical warmup/cosine rates.
+
+    Non-batchable and OOM-fallback candidates call the original sequential operator with the same
+    schedule parameters. Existing `gradient_scheduled` configs remain serial unless they opt in
+    with `batched = true` or a calibrated compute policy selects a population mode.
+    """
+    rates = _scheduled_learning_rates(steps, lr, warmup_fraction=warmup_fraction, final_lr_fraction=final_lr_fraction)
+    return _gradient_batched_impl(
+        genomes,
+        modules,
+        encoded,
+        rng=rng,
+        steps=steps,
+        lr=lr,
+        writeback=writeback,
+        weight_decay=weight_decay,
+        device=device,
+        max_padded_nodes=max_padded_nodes,
+        min_batch_nodes=min_batch_nodes,
+        adam_fused=adam_fused,
+        torch_compile=torch_compile,
+        score_candidates=score_candidates,
+        microbatch_size=microbatch_size,
+        adaptive_microbatch=adaptive_microbatch,
+        step_learning_rates=rates,
+        serial_op=gradient_scheduled,
+        serial_params={"warmup_fraction": warmup_fraction, "final_lr_fraction": final_lr_fraction},
     )
 
 
@@ -286,6 +342,8 @@ def gradient_refine_population(
     adam_fused: bool = False,
     torch_compile: bool = False,
     score_candidates: bool = False,
+    microbatch_size: int = 0,
+    adaptive_microbatch: bool = True,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Population form of `gradient_refine`. Correct by exclusion: `core()` keeps every refine/
     recurrent/product/macro module OUT of the batch (they train through sequential
@@ -308,6 +366,8 @@ def gradient_refine_population(
         adam_fused=adam_fused,
         torch_compile=torch_compile,
         score_candidates=score_candidates,
+        microbatch_size=microbatch_size,
+        adaptive_microbatch=adaptive_microbatch,
         serial_op=gradient_refine,
     )
 
@@ -329,73 +389,151 @@ def _gradient_batched_impl(
     adam_fused: bool = False,
     torch_compile: bool = False,
     score_candidates: bool = False,
+    microbatch_size: int = 0,
+    adaptive_microbatch: bool = True,
+    step_learning_rates: list[float] | None = None,
+    serial_params: dict[str, object] | None = None,
 ) -> list[tuple[Genome, SubstrateModule]]:
     from ardevo.substrate_batched import BatchedGraphNet
+
+    if microbatch_size < 0:
+        raise ValueError("microbatch_size must be >= 0")
+    if step_learning_rates is not None and len(step_learning_rates) != max(steps, 0):
+        raise ValueError("step_learning_rates must contain exactly one rate per training step")
 
     started = time.perf_counter()
     cores = [module.core() for module in modules]
     batch_indices, serial_indices = partition_batchable(cores, steps=steps, max_padded_nodes=max_padded_nodes, min_batch_nodes=min_batch_nodes)
 
     results: list[tuple[Genome, SubstrateModule] | None] = [None] * len(modules)
-    for index in serial_indices:
-        # score_candidates threads to the serial subset only; batch-trained candidates skip growth
-        # hints (the tensor program has no per-candidate replay), which is honest and documented.
+    serial_extras = serial_params or {}
+
+    def train_serial(index: int) -> None:
         results[index] = serial_op(
-            genomes[index], modules[index], encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates
+            genomes[index],
+            modules[index],
+            encoded,
+            rng=rng,
+            steps=steps,
+            lr=lr,
+            writeback=writeback,
+            weight_decay=weight_decay,
+            score_candidates=score_candidates,
+            **serial_extras,
         )
 
-    n_max = 0.0
-    pad_efficiency = 0.0
-    if batch_indices:
-        from ardevo.utils.device import auto_device
+    for index in serial_indices:
+        train_serial(index)
 
-        nets = [net for index in batch_indices if (net := cores[index][0]) is not None]
+    n_max = 0.0
+    weighted_pad_efficiency = 0.0
+    trained_in_batches = 0
+    microbatch_count = 0
+    largest_microbatch = 0
+    oom_retries = 0
+    oom_fallbacks = 0
+    if batch_indices:
+        from ardevo.utils.device import auto_device, clear_device_cache, is_out_of_memory_error
+
         resolved = auto_device() if device == "auto" else torch.device(device)
-        batched = BatchedGraphNet(nets, device=resolved)
         x, _descriptor = encoded.support_input
         target, mask, descriptor = encoded.support_target
-        x_device = x.to(resolved)
-        target_device, mask_device = target.to(resolved), (mask.to(resolved) if mask is not None else None)
-        ref_head = cores[batch_indices[0]][1]
-        columns = ref_head.to(resolved) if ref_head is not None else None
-        population = len(nets)
+        try:
+            x_device = x.to(resolved)
+            target_device, mask_device = target.to(resolved), (mask.to(resolved) if mask is not None else None)
+            ref_head = cores[batch_indices[0]][1]
+            columns = ref_head.to(resolved) if ref_head is not None else None
+        except RuntimeError as exc:
+            if not adaptive_microbatch or not is_out_of_memory_error(exc):
+                raise
+            # Inputs are shared by every population slice, so splitting cannot reduce this part of
+            # the footprint. Preserve the method by running the affected candidates serially on CPU.
+            oom_retries += 1
+            exc.__traceback__ = None
+            clear_device_cache(resolved)
+            for index in batch_indices:
+                train_serial(index)
+            oom_fallbacks += len(batch_indices)
+            batch_indices = []
 
-        if batched.mask.any():
-            # Both knobs default OFF: fused Adam is cuda-only and not bit-equal to the unfused
-            # step; torch.compile recompiles as the population shape churns generation to
-            # generation, so it must prove itself on `uv run benchmark` before use.
-            fused = bool(adam_fused and resolved.type == "cuda")
-            optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay, fused=fused)
-            program = torch.compile(batched, dynamic=True) if torch_compile else batched
-            for _ in range(steps):
-                optimizer.zero_grad()
-                out = program(x_device)  # [P, B, n_out]
-                if columns is not None:
-                    out = out.index_select(2, columns)
-                folded = out.reshape(population * x_device.shape[0], -1)
-                raw = as_logits(folded, descriptor, target_positions(target_device))
+        def train_group(indices: list[int]) -> tuple[float, float]:
+            nets = [net for index in indices if (net := cores[index][0]) is not None]
+            batched = BatchedGraphNet(nets, device=resolved)
+            population = len(nets)
+            if batched.mask.any():
+                # Both knobs default OFF: fused Adam is cuda-only and not bit-equal to the unfused
+                # step; torch.compile recompiles as the population shape churns generation to
+                # generation, so it must prove itself on `uv run benchmark` before use.
+                fused = bool(adam_fused and resolved.type == "cuda")
+                optimizer = torch.optim.Adam(batched.parameters(), lr=lr, weight_decay=weight_decay, fused=fused)
+                program = torch.compile(batched, dynamic=True) if torch_compile else batched
                 target_repeated = target_device.repeat(population, *([1] * (target_device.dim() - 1)))
                 mask_repeated = mask_device.repeat(population, *([1] * (mask_device.dim() - 1))) if mask_device is not None else None
-                # The P multiplier turns the folded MEAN into the SUM of per-candidate losses: each
-                # candidate's gradient (and Adam update) is exactly what the sequential path computes.
-                loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
-                if not loss.requires_grad or not torch.isfinite(loss):
-                    break
-                loss.backward()
-                optimizer.step()
-            batched.unstack_into(nets)
-        n_max = float(batched.n_max)
-        pad_efficiency = batched.pad_efficiency()
-        for index in batch_indices:
-            tuned = _writeback(genomes[index], modules[index]) if writeback else genomes[index]
-            results[index] = (tuned, modules[index])
+                for step in range(steps):
+                    if step_learning_rates is not None:
+                        for group in optimizer.param_groups:
+                            group["lr"] = step_learning_rates[step]
+                    optimizer.zero_grad()
+                    out = program(x_device)  # [P, B, n_out]
+                    if columns is not None:
+                        out = out.index_select(2, columns)
+                    folded = out.reshape(population * x_device.shape[0], -1)
+                    raw = as_logits(folded, descriptor, target_positions(target_device))
+                    # The P multiplier turns the folded MEAN into the SUM of per-candidate losses:
+                    # each candidate's gradient and Adam update match its sequential computation.
+                    loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
+                    if not loss.requires_grad or not torch.isfinite(loss):
+                        break
+                    loss.backward()
+                    optimizer.step()
+                batched.unstack_into(nets)
+            return float(batched.n_max), batched.pad_efficiency()
+
+        size = microbatch_size or max(len(batch_indices), 1)
+        pending = [batch_indices[start : start + size] for start in range(0, len(batch_indices), size)]
+        while pending:
+            indices = pending.pop(0)
+            try:
+                group_n_max, group_pad_efficiency = train_group(indices)
+            except RuntimeError as exc:
+                if not adaptive_microbatch or not is_out_of_memory_error(exc):
+                    raise
+                oom_retries += 1
+                # Drop the traceback's references to the failed tensor program before asking the
+                # allocator to release cached blocks; otherwise the retry can inherit its peak.
+                exc.__traceback__ = None
+                clear_device_cache(resolved)
+                if len(indices) > 1:
+                    midpoint = len(indices) // 2
+                    pending[0:0] = [indices[:midpoint], indices[midpoint:]]
+                    continue
+                train_serial(indices[0])
+                oom_fallbacks += 1
+                continue
+
+            microbatch_count += 1
+            largest_microbatch = max(largest_microbatch, len(indices))
+            n_max = max(n_max, group_n_max)
+            weighted_pad_efficiency += group_pad_efficiency * len(indices)
+            trained_in_batches += len(indices)
+            for index in indices:
+                tuned = _writeback(genomes[index], modules[index]) if writeback else genomes[index]
+                if score_candidates:
+                    from ardevo.evolution.growth import attach_growth_hints
+
+                    tuned = attach_growth_hints(tuned, modules[index], encoded, cloned=writeback)
+                results[index] = (tuned, modules[index])
 
     last_batch_stats.update(
         {
-            "fallback": len(serial_indices) / max(len(modules), 1),
+            "fallback": (len(serial_indices) + oom_fallbacks) / max(len(modules), 1),
             "train_seconds": time.perf_counter() - started,
             "n_max": n_max,
-            "pad_efficiency": pad_efficiency,
+            "pad_efficiency": weighted_pad_efficiency / max(trained_in_batches, 1),
+            "microbatches": float(microbatch_count),
+            "largest_microbatch": float(largest_microbatch),
+            "oom_retries": float(oom_retries),
+            "oom_fallbacks": float(oom_fallbacks),
         }
     )
     return [item for item in results if item is not None]

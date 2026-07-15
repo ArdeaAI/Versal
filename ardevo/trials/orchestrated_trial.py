@@ -8,10 +8,16 @@ capped, so checkpoints are written only when a task admits novel library entries
 """
 
 import datetime
+import fnmatch
+import hashlib
 import json
+import os
 import random
+import shutil
+import tempfile
 import time
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,10 +31,15 @@ from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_fro
 from ardevo.evolution.multitask import TaskEntry, build_pool_report
 from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
+from ardevo.external_archive import ArchiveManager, ExperimentLock
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from ardevo.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
+from ardevo.reporting import write_run_report
+from ardevo.utils.device import capture_hardware_profile
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
+from ardevo.utils.runtime_display import RuntimeDisplay
+from ardevo.utils.shutdown import EscapeShutdown
 from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
@@ -58,17 +69,29 @@ class OrchestratedTrial(Proctor):
         # the per-task run_summary record is always written regardless of this cadence.
         self.checkpoint_every = max(1, int(table.get("checkpoint_every", 1)))
         self.task_records: list[dict[str, Any]] = []
+        self.interruptions: list[dict[str, Any]] = []
+        self.display = RuntimeDisplay(console)
+        self.shutdown = EscapeShutdown(lambda: BOARD.event("Escape pressed · stopping at the next safe boundary and writing final reports"))
 
         report = build_pool_report(
             source=config["dataset"],
             rungs=self.rungs,
             n_samples=int(config["n_samples"]),
             support_fraction=float(config.get("support_fraction", 0.8)),
+            min_fixed_query_samples=int(config.get("min_fixed_query_samples", 0)),
             tasks_per_rung=int(schedule_cfg.get("tasks_per_rung", 100)),
             shuffle=bool(schedule_cfg.get("shuffle", True)),
             seed=int(config.get("seed", 0)),
         )
         self.pool: list[TaskEntry] = report.entries
+        include = schedule_cfg.get("task_include", [])
+        exclude = schedule_cfg.get("task_exclude", [])
+        include_patterns = [str(pattern) for pattern in ([include] if isinstance(include, str) else include)]
+        exclude_patterns = [str(pattern) for pattern in ([exclude] if isinstance(exclude, str) else exclude)]
+        if include_patterns:
+            self.pool = [entry for entry in self.pool if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in include_patterns)]
+        if exclude_patterns:
+            self.pool = [entry for entry in self.pool if not any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in exclude_patterns)]
         self.skipped_rungs = report.skipped
         for skipped in self.skipped_rungs:
             console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
@@ -96,94 +119,215 @@ class OrchestratedTrial(Proctor):
         self.resume_dir = config.get("resume")
         self.run_dir = Path(results.DEFAULT_ROOT)
         self.gc_enabled = bool(config.get("library", {}).get("gc", False))
+        self.fresh_per_task = bool(config.get("library", {}).get("fresh_per_task", False))
+        self.frozen_library_dir: Path | None = None
         self.gc_removed: list[str] | None = None  # set by the run-end sweep, reported in run_summary
+        self.archive_manager: ArchiveManager | None = None
+        self.experiment_lock: ExperimentLock | None = None
+        self.hardware_profile = capture_hardware_profile().to_dict()
 
     def run(self) -> dict[str, Any]:
+        run_started = time.perf_counter()
         if self.resume_dir:
             self.run_dir = Path(self.resume_dir)
             state, task_cursor, attempts, counters = self._restore()
             self.task_records = self._load_prior_records()
-            console.rule(f"[bold]Resuming orchestrated run at task {task_cursor} ({self.run_dir})")
+            self.interruptions = self._load_prior_interruptions()
         else:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.run_dir = Path(results.DEFAULT_ROOT) / f"{timestamp}_orchestrated"
             self.run_dir.mkdir(parents=True, exist_ok=True)
+            self._snapshot_config()
+            self._prepare_frozen_library()
             state = self.loop.fresh_state(random.Random(int(self.config.get("seed", 0))))
             task_cursor, attempts, counters = 0, [], None
             self.task_records = []
-            console.rule(f"[bold]Orchestrated run: rungs {self.rungs}, {len(self.pool)} tasks, library {self.library.root} -> {self.run_dir}")
+            self.interruptions = []
 
-        if bool(self.config.get("render_async", False)):
-            rendering.enable_async_rendering()
-        if bool(self.config.get("live_status", True)):
-            BOARD.enable(console)  # quietly refuses off-terminal (pipes, agents, CI)
-
+        self.experiment_lock = ExperimentLock(self.run_dir, self.library.root)
+        self.experiment_lock.acquire()
         # A durable record exists before the first task so a crash during setup or task 0 leaves a
         # diagnosable run_summary.json instead of an empty directory (the silent-failure mode we kill).
         orchestrator: Orchestrator | None = None
+        active_entry: TaskEntry | None = None
+        active_task_started: float | None = None
         try:
-            orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
+            if bool(self.config.get("render_async", False)):
+                rendering.enable_async_rendering()
+            self.display.enable(bool(self.config.get("live_status", True)))
+            self.shutdown.start()
+            orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
             orchestrator.attempts = attempts
             if counters:
                 orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
+            self.archive_manager = ArchiveManager.from_config(self.config, self.run_dir, self.library.root)
             self._write_run_summary(orchestrator, state, task_cursor, status="running")
             while task_cursor < self.tasks_to_run:
+                if self.shutdown.requested:
+                    break
                 index = self.scheduler.next_index(self.pool, state.rng)
                 entry = self.pool[index]
-                console.print(f"[cyan]task {task_cursor + 1}/{self.tasks_to_run}[/cyan] rung {entry.rung} {entry.name}")
-                BOARD.task(task_cursor + 1, self.tasks_to_run, entry.rung, entry.name)
+                active_entry = entry
+                self.display.task_started(task_cursor + 1, self.tasks_to_run, entry.rung, entry.name)
                 library_keys_before = set(self.library.keys())
                 task_started = time.perf_counter()
-                solution = orchestrator.solve(entry.task)
+                active_task_started = task_started
+                isolated = self._solve_isolated(entry, task_cursor, orchestrator) if self.fresh_per_task else None
+                if isolated is None:
+                    solution = orchestrator.solve(entry.task)
+                    attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
+                    module_pool_sizes = self._module_pool_sizes(state)
+                else:
+                    solution, attempt, isolated_generations = isolated
+                    state.generation += isolated_generations
+                    module_pool_sizes = {}
                 task_seconds = time.perf_counter() - task_started
                 task_cursor += 1
+                orchestrator.finish_root_task(attempt)
                 self.library.flush_stats()  # deferred bump_stats writes land at the task boundary
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
-                attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
-                outcome = attempt.outcome if attempt is not None else "unknown"
                 if hasattr(self.scheduler, "observe"):  # feedback-driven schedulers (regret); others untouched
                     self.scheduler.observe(entry.rung, attempt.metric if attempt is not None else 0.0, solution is not None)
-                label = f"[green]{outcome}[/green]" if solution is not None else f"[red]{outcome}[/red]"
-                stages = dict(getattr(attempt, "stage_seconds", None) or {})
-                stage_note = f" [{', '.join(f'{k} {v:.0f}s' for k, v in stages.items())}]" if stages else ""
-                console.print(f"  -> {label} (library size {len(self.library)}, {task_seconds:.0f}s{stage_note})")
-                module_pool_sizes = self._module_pool_sizes(state)
                 self._log_task(orchestrator, state, task_cursor, task_seconds, module_pool_sizes)
                 # Durable record EVERY task, regardless of admission: a run is now measurable and
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
                 self._record_task(entry, attempt, new_library_keys, len(self.library), module_pool_sizes)
+                self.display.task_finished(
+                    task_cursor,
+                    self.tasks_to_run,
+                    entry.rung,
+                    entry.name,
+                    attempt,
+                    solved=solution is not None,
+                    task_seconds=task_seconds,
+                    new_library_keys=new_library_keys,
+                    library_size=len(self.library),
+                )
+                active_entry = None
+                active_task_started = None
                 self._write_run_summary(orchestrator, state, task_cursor, status="running")
-                if task_cursor % self.checkpoint_every == 0:
-                    self._persist_resume_state(orchestrator, state, task_cursor)
                 if new_library_keys:
                     self._checkpoint(orchestrator, state, task_cursor, new_library_keys, solution)
+                if self.archive_manager is not None and self.archive_manager.due(task_cursor):
+                    self._archive_boundary(orchestrator, state, task_cursor)
+                elif task_cursor % self.checkpoint_every == 0:
+                    self._persist_resume_state(orchestrator, state, task_cursor)
+                if self.shutdown.requested:
+                    break
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
-            BOARD.close()  # release the terminal first so the traceback and summaries print clean
-            self.library.flush_stats()  # a crash still leaves the stats it had
-            rendering.flush_renders()  # pending async renders finish (their own failures only log)
-            self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
-            if orchestrator is not None:
-                self._persist_resume_state(orchestrator, state, task_cursor)
+            try:
+                if active_entry is not None and active_task_started is not None:
+                    elapsed = time.perf_counter() - active_task_started
+                    self._record_interruption(active_entry, task_cursor, error, elapsed)
+                    self.display.task_interrupted(
+                        active_entry.name,
+                        error,
+                        support_accuracy=self.display.provisional_support,
+                        active_stage=self.display.active_stage,
+                        elapsed=elapsed,
+                    )
+                self.shutdown.stop()  # restore terminal input before releasing Rich or printing a traceback
+                self.display.close()
+                self.library.flush_stats()  # a crash still leaves the stats it had
+                rendering.flush_renders()  # pending async renders finish (their own failures only log)
+                self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
+                if orchestrator is not None:
+                    self._persist_resume_state(orchestrator, state, task_cursor)
+                self._archive_boundary(orchestrator, state, task_cursor, status=f"crashed-{type(error).__name__}", force=True, best_effort=True)
+            finally:
+                self._release_experiment_lock()
             raise
 
-        BOARD.close()
-        self.library.flush_stats()
-        rendering.flush_renders()  # renders land before GC can delete images and before finalize
-        self._persist_resume_state(orchestrator, state, task_cursor)
-        if self.gc_enabled:
-            self._run_gc(state)
-        self._write_run_summary(orchestrator, state, task_cursor, status="done")
-        self.results = {
-            "tasks_attempted": task_cursor,
-            "library_size": len(self.library),
-            "counters": dict(orchestrator.counters),
-            "module_pool": len(state.modules),
-            "generations_run": state.generation,
-            "run_dir": str(self.run_dir),
-        }
-        console.print(f"[bold green]Done[/bold green]: {task_cursor} tasks, library {len(self.library)} entries, counters {orchestrator.counters}")
-        self.finalize()
-        return self.results
+        try:
+            gracefully_stopped = self.shutdown.requested
+            self.shutdown.stop()
+            self.display.close()
+            self.library.flush_stats()
+            rendering.flush_renders()  # renders land before GC can delete images and before finalize
+            self._persist_resume_state(orchestrator, state, task_cursor)
+            if self.gc_enabled and not self.fresh_per_task:
+                self._run_gc(state)
+            final_status = "stopped" if gracefully_stopped else "done"
+            self._write_run_summary(orchestrator, state, task_cursor, status=final_status)
+            self._publish_final_archive(orchestrator, state, task_cursor, status=final_status)
+            self.results = {
+                "status": final_status,
+                "tasks_attempted": task_cursor,
+                "library_size": len(self.library),
+                "counters": dict(orchestrator.counters),
+                "module_pool": len(state.modules),
+                "generations_run": state.generation,
+                "run_dir": str(self.run_dir),
+            }
+            self.display.run_finished(self.task_records, seconds=time.perf_counter() - run_started, library_size=len(self.library), status=final_status)
+            self.finalize()
+            return self.results
+        finally:
+            self._release_experiment_lock()
+
+    def _release_experiment_lock(self) -> None:
+        lock = getattr(self, "experiment_lock", None)
+        if lock is not None:
+            lock.release()
+            self.experiment_lock = None
+
+    def _prepare_frozen_library(self) -> None:
+        if not self.fresh_per_task:
+            return
+        frozen = self.run_dir / "frozen_library"
+        if frozen.exists():
+            self.frozen_library_dir = frozen
+            return
+        self.library.root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(self.library.root, frozen, ignore=shutil.ignore_patterns("encoded_cache", "images"))
+        self.frozen_library_dir = frozen
+
+    def _solve_isolated(
+        self,
+        entry: TaskEntry,
+        task_cursor: int,
+        aggregate: Orchestrator,
+    ) -> tuple[Solution | None, Any, int] | None:
+        """Solve one task against a disposable copy of the frozen starting library."""
+
+        if self.frozen_library_dir is None:
+            self._prepare_frozen_library()
+        if self.frozen_library_dir is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="ardevo_task_") as tmp:
+            root = Path(tmp) / "library"
+            shutil.copytree(self.frozen_library_dir, root)
+            library = ModuleLibrary(root)
+            loop = build_loop(self.config)
+            if not isinstance(loop, HierarchicalLoop):
+                raise ValueError('the orchestrated trial requires [evolution] loop = "hierarchical"')
+            loop.attach_library(library)
+            from ardevo.evolution.evolver import get_shared_pool, set_shared_pool
+            from ardevo.substrate import set_macro_resolver
+
+            shared_pool = get_shared_pool()
+            set_shared_pool(None)
+            set_macro_resolver(macro_resolver(library))
+            try:
+                seed = int(self.config.get("seed", 0)) * 1_000_003 + task_cursor
+                state = loop.fresh_state(random.Random(seed))
+                isolated = Orchestrator(self.config, loop, library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
+                solution = isolated.solve(entry.task)
+                library.flush_stats()
+                attempt = isolated.attempts[-1] if isolated.attempts else None
+                # The task-local directory is deleted on return. Never publish keys that will point
+                # at vanished entries in checkpoints, summaries, or the returned Solution.
+                for row in isolated.attempts:
+                    row.library_key = None
+                if solution is not None:
+                    solution = replace(solution, key=None)
+                aggregate.attempts.extend(isolated.attempts)
+                for key, value in isolated.counters.items():
+                    aggregate.counters[key] = aggregate.counters.get(key, 0) + value
+                return solution, attempt, state.generation
+            finally:
+                set_macro_resolver(macro_resolver(self.library))
+                set_shared_pool(shared_pool)
 
     def _run_gc(self, state: HierarchicalState) -> None:
         """Run-end sweep of unreferenced tombstones ([library] gc = true). Rooted in the LIVE state:
@@ -235,6 +379,35 @@ class OrchestratedTrial(Proctor):
         except (ValueError, OSError):
             return []
 
+    def _load_prior_interruptions(self) -> list[dict[str, Any]]:
+        """Preserve crash history across resumes while leaving the task cursor retryable."""
+
+        summary_path = self.run_dir / "run_summary.json"
+        if not summary_path.exists():
+            return []
+        try:
+            return list(json.loads(summary_path.read_text()).get("interruptions", []))
+        except (ValueError, OSError):
+            return []
+
+    def _record_interruption(self, entry: TaskEntry, task_cursor: int, error: BaseException, elapsed: float) -> None:
+        self.interruptions.append(
+            {
+                "task_cursor": task_cursor,
+                "rung": entry.rung,
+                "task": entry.name,
+                "elapsed_seconds": round(elapsed, 3),
+                "active_stage": self.display.active_stage,
+                "support_accuracy": self.display.provisional_support,
+                "query_accuracy": None,
+                "support_status": "evaluated" if self.display.provisional_support is not None else "task_crashed",
+                "query_status": "task_crashed",
+                "exception_type": type(error).__name__,
+                "exception": str(error),
+                "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        )
+
     @staticmethod
     def _module_pool_sizes(state: HierarchicalState) -> dict[str, float]:
         """Median/max genome size across the persistent module pool: the cross-task bloat
@@ -274,6 +447,30 @@ class OrchestratedTrial(Proctor):
             record["sample_metrics"] = dict(attempt.sample_metrics)
         if attempt is not None and getattr(attempt, "size_metrics", None):  # champion/population genome size: the bloat readout
             record["size_metrics"] = dict(attempt.size_metrics)
+        if attempt is not None and getattr(attempt, "report_metric", None) is not None:
+            record["report_metric"] = float(attempt.report_metric)
+        if attempt is not None and getattr(attempt, "task_metrics", None):
+            record["task_metrics"] = dict(attempt.task_metrics)
+        if attempt is not None and getattr(attempt, "resource_metrics", None):
+            record["resource_metrics"] = dict(attempt.resource_metrics)
+        if attempt is not None and getattr(attempt, "strategy_metrics", None):
+            record["strategy_metrics"] = dict(attempt.strategy_metrics)
+        if attempt is not None and getattr(attempt, "diagnostic_observation", None):
+            record["diagnostic_observation"] = dict(attempt.diagnostic_observation)
+        if attempt is not None and (
+            getattr(attempt, "support_status", "legacy_missing") != "legacy_missing"
+            or getattr(attempt, "query_status", "legacy_missing") != "legacy_missing"
+            or getattr(attempt, "support_accuracy", None) is not None
+            or getattr(attempt, "query_accuracy", None) is not None
+        ):
+            record.update(
+                {
+                    "support_accuracy": getattr(attempt, "support_accuracy", None),
+                    "query_accuracy": getattr(attempt, "query_accuracy", None),
+                    "support_status": getattr(attempt, "support_status", "legacy_missing"),
+                    "query_status": getattr(attempt, "query_status", "legacy_missing"),
+                }
+            )
         if module_pool_sizes:
             record["module_pool"] = dict(module_pool_sizes)
         self.task_records.append(record)
@@ -288,6 +485,8 @@ class OrchestratedTrial(Proctor):
             "status": status,
             "config_path": self.config.get("config_path", ""),
             "config_sha256": self.config.get("config_sha256", ""),
+            "config_effective_sha256": self.config.get("config_effective_sha256", ""),
+            "config_sources": list(self.config.get("config_sources", [])),
             "seed": int(self.config.get("seed", 0)),
             "library_dir": str(self.library.root),
             "rungs": self.rungs,
@@ -300,11 +499,67 @@ class OrchestratedTrial(Proctor):
             "generations_run": state.generation,
             "skipped_rungs": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
             "tasks": self.task_records,
+            "interruptions": list(getattr(self, "interruptions", [])),
         }
+        hardware_profile = getattr(self, "hardware_profile", None)
+        if hardware_profile is not None:
+            summary["hardware_profile"] = hardware_profile
+            summary["execution"] = {
+                "hierarchical": getattr(self.loop.evolver, "execution_mode", "serial"),
+                "assess_workers": int(getattr(self.loop.evolver, "assess_workers", 0)),
+            }
+            if orchestrator is not None:
+                summary["execution"]["strategies"] = {name: getattr(getattr(strategy, "evolver", None), "execution_mode", "n/a") for name, strategy in orchestrator.strategies}
         gc_removed = getattr(self, "gc_removed", None)  # tolerate partially-constructed trials (white-box tests)
         if gc_removed is not None:
             summary["gc_removed"] = len(gc_removed)
-        (self.run_dir / "run_summary.json").write_text(json.dumps(summary, indent=2))
+        if orchestrator is not None and getattr(orchestrator, "blind_query", False):
+            summary["search_metric"] = orchestrator.search_metric
+            summary["report_metric"] = orchestrator.report_metric
+        path = self.run_dir / "run_summary.json"
+        payload = (json.dumps(summary, indent=2) + "\n").encode()
+        descriptor, temporary = tempfile.mkstemp(prefix=".run_summary.json.", dir=self.run_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+        # Reports share the summary's durability boundary.  A report failure is a run failure:
+        # silently stale analysis is more dangerous than a visibly resumable crash.
+        write_run_report(self.run_dir, self.library.root)
+
+    def _snapshot_config(self) -> None:
+        """Copy the exact run config beside the checkpoint before task zero.
+
+        A hash without bytes is insufficient once a working config evolves. Snapshotting is local
+        run state (``results/`` is gitignored) and makes every crash or interrupted campaign
+        independently reconstructable.
+        """
+
+        source_text = str(self.config.get("config_path", ""))
+        if not source_text:
+            return
+        source = Path(source_text)
+        if not source.exists():
+            return
+        payload = source.read_bytes()
+        source_hash = hashlib.sha256(payload).hexdigest()
+        self.config["config_sha256"] = source_hash
+        (self.run_dir / "config.toml").write_bytes(payload)
+        (self.run_dir / "config.toml.sha256").write_text(f"{source_hash}  config.toml\n")
+
+        effective = json.dumps(self.config, indent=2, sort_keys=True, default=str) + "\n"
+        effective_payload = effective.encode("utf-8")
+        effective_hash = hashlib.sha256(effective_payload).hexdigest()
+        (self.run_dir / "config.effective.json").write_bytes(effective_payload)
+        (self.run_dir / "config.effective.json.sha256").write_text(f"{effective_hash}  config.effective.json\n")
 
     def _persist_resume_state(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
         """Rolling resumable checkpoint at the run root, written every task (not gated on admission),
@@ -321,6 +576,40 @@ class OrchestratedTrial(Proctor):
                 counters=orchestrator.counters,
             ),
         )
+
+    def _archive_boundary(
+        self,
+        orchestrator: Orchestrator | None,
+        state: HierarchicalState,
+        task_cursor: int,
+        *,
+        status: str = "running",
+        force: bool = False,
+        best_effort: bool = False,
+    ) -> dict[str, Any] | None:
+        """Publish only a render-complete, checkpointed between-task state."""
+        manager = getattr(self, "archive_manager", None)
+        if manager is None or (not force and not manager.due(task_cursor)):
+            return None
+        try:
+            rendering.flush_renders()
+            if orchestrator is not None:
+                self._persist_resume_state(orchestrator, state, task_cursor)
+            return manager.snapshot(task_cursor, status=status)
+        except BaseException:
+            if not best_effort:
+                raise
+            logger.exception("best-effort external archive snapshot failed at task %d", task_cursor)
+            return None
+
+    def _publish_final_archive(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, *, status: str = "done") -> None:
+        """Publish the terminal state; make a failed authoritative upload visibly resumable."""
+
+        try:
+            self._archive_boundary(orchestrator, state, task_cursor, status=status, force=True)
+        except BaseException as error:
+            self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: external archive: {type(error).__name__}: {error}")
+            raise
 
     def _log_task(
         self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, task_seconds: float = 0.0, module_pool_sizes: dict[str, float] | None = None
@@ -340,6 +629,8 @@ class OrchestratedTrial(Proctor):
         attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
         for series, value in (getattr(attempt, "size_metrics", None) or {}).items():
             self.log_scalar("Size", series, value, task_cursor)
+        for series, value in (getattr(attempt, "resource_metrics", None) or {}).items():
+            self.log_scalar("Resources", series, value, task_cursor)
         # Wall-clock + memory per task: a wedged stage or a leaking process must be visible in
         # the run record, not only via sampling a live process.
         if task_seconds:
@@ -386,9 +677,23 @@ class OrchestratedTrial(Proctor):
         entry = self.library.load(key)
         title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
         if entry.entry_type == MODULE:
-            rendering.submit_render(rendering.render_network, directory, genome_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(
+                rendering.render_network,
+                directory,
+                genome_from_dict(entry.payload),
+                title=title,
+                library=self.library,
+                max_inline_depth=self.loop.max_inline_depth,
+            )
         elif entry.entry_type == COMPOSITION:
-            rendering.submit_render(rendering.render_composition_network, directory, comp_from_dict(entry.payload), title=title, library=self.library)
+            rendering.submit_render(
+                rendering.render_composition_network,
+                directory,
+                comp_from_dict(entry.payload),
+                title=title,
+                library=self.library,
+                max_inline_depth=self.loop.max_inline_depth,
+            )
         else:
             raise ValueError(f"unknown library entry type {entry.entry_type!r}")
 
@@ -413,6 +718,11 @@ class OrchestratedTrial(Proctor):
                 "schedule": self.config.get("schedule", {}),
                 "evolution": self.config.get("evolution", {}),
                 "fitness": self.config.get("fitness", {}),
-                "dataset": {"source": self.config.get("dataset"), "n_samples": self.config.get("n_samples"), "support_fraction": self.config.get("support_fraction")},
+                "dataset": {
+                    "source": self.config.get("dataset"),
+                    "n_samples": self.config.get("n_samples"),
+                    "support_fraction": self.config.get("support_fraction"),
+                    "min_fixed_query_samples": self.config.get("min_fixed_query_samples"),
+                },
             },
         }

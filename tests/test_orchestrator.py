@@ -4,13 +4,14 @@ import json
 import math
 import random
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
 
 from ardevo import checkpoint
 from ardevo.dataset.icarus import Task
-from ardevo.evolution.composition import AssemblyContext, assemble, comp_from_dict, minimal_composition
+from ardevo.evolution.composition import AssemblyContext, ComposedNet, assemble, comp_from_dict, minimal_composition
 from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, state_from_dict, state_to_dict
 from ardevo.evolution.registry import build_loop
@@ -75,6 +76,20 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
     assert calls == []  # not one generation spent
     assert orchestrator.attempts[-1].outcome == "library_hit"
     assert orchestrator.counters["library_hits"] == 1
+
+
+def test_shutdown_request_records_graceful_stop_without_deadline_accounting(tmp_path: Path, xor_task: Task) -> None:
+    requested = True
+    orchestrator = _orchestrator(tmp_path, shutdown_requested=lambda: requested)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.strategy == "shutdown"
+    assert attempt.failure_stage == "shutdown_requested"
+    assert attempt.support_status == "not_reached"
+    assert attempt.query_status == "shutdown_before_evaluation"
+    assert "time_budget_hits" not in orchestrator.counters
 
 
 def test_stall_triggers_decompose_recurse_and_level2_admission(tmp_path: Path, decomposable_task: Task) -> None:
@@ -146,6 +161,37 @@ def test_attempts_carry_champion_sample_metrics(tmp_path: Path, xor_task: Task) 
     assert plain.attempts[-1].sample_metrics == {}  # standard-eval metrics fabricate nothing
 
 
+def test_held_out_report_cannot_replace_search_robustness(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    spec = comp_task_spec(xor_task)
+    comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, orchestrator.state.comp_innovations, orchestrator.state.rng)
+    search = AssessedComposition(comp=comp, metrics={"support_accuracy": 0.8, "weight_robustness": 0.25}, fitness=0.8, net=cast(ComposedNet, object()))
+    result = StrategyResult("composition", metric=0.8, generations_used=1, champion_comp=search, champion_metrics=dict(search.metrics))
+    reported = AssessedComposition(comp=comp, metrics={"query_accuracy": 1.0, "query_loss": 0.0, "weight_robustness": 0.99}, fitness=1.0, net=cast(ComposedNet, object()))
+    setattr(orchestrator.loop, "assess_composition", lambda *_args, **_kwargs: reported)
+
+    attached = orchestrator._attach_report_metrics(result, spec)
+
+    assert attached.champion_metrics["weight_robustness"] == 0.25
+    assert attached.report_metrics["weight_robustness"] == 0.99
+    assert attached.champion_comp is search
+
+
+def test_passing_metrics_without_an_executable_payload_are_never_accepted() -> None:
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator.accept_metric = "support_task_appropriate"
+    orchestrator.accept_threshold = 0.95
+    result = StrategyResult(
+        "routed",
+        metric=0.1,
+        generations_used=10,
+        champion_metrics={"support_accuracy": 1.0, "support_task_exact": 1.0, "routed_undistillable": 1.0},
+    )
+
+    assert not result.has_admissible_champion
+    assert not orchestrator._accepts_result(result)
+
+
 def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     calls: list[str] = []
@@ -199,6 +245,31 @@ def test_port_wired_skeleton_assembles_and_routes(tmp_path: Path, decomposable_t
     net = assemble(skeleton, AssemblyContext(bank_columns=dict(spec.bank_columns), library=orchestrator.library), spec.n_inputs)
     out = net(torch.zeros(3, 8))
     assert out.shape == (3, 2)
+
+
+def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(monkeypatch, tmp_path: Path, decomposable_task: Task) -> None:
+    import ardevo.orchestrator as orchestrator_module
+    from ardevo.decompose import output_slices
+    from ardevo.evolution.composition import comp_to_dict
+    from ardevo.orchestrator import Solution
+
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator.loop.max_initial_glue_values = 100
+    spec = comp_task_spec(decomposable_task)
+    solutions = []
+    for subtask in output_slices(decomposable_task, rng=random.Random(0), n_groups=2):
+        comp = minimal_composition([("BINARY|K", 8)], subtask.task.meta.name, 1, InnovationTracker(_next_node_id=0), random.Random(1))
+        key = orchestrator.library.add(entry_type=COMPOSITION, payload=comp_to_dict(comp), io=task_io(subtask.task), provenance={}, level=2)
+        solutions.append((subtask, Solution(key=key, entry_type=COMPOSITION, metric=1.0)))
+
+    def unexpected_allocation(*_args, **_kwargs):
+        raise AssertionError("the skeleton guard must run before dense glue construction")
+
+    monkeypatch.setattr(orchestrator_module, "_identity_glue", unexpected_allocation)
+    monkeypatch.setattr(orchestrator_module, "_placement_glue", unexpected_allocation)
+    monkeypatch.setattr(orchestrator_module, "_selection_glue", unexpected_allocation)
+
+    assert orchestrator._port_wired_skeleton(spec, solutions) is None
 
 
 def test_real_evolve_admit_then_revisit_is_a_hit(tmp_path: Path, xor_task: Task) -> None:
@@ -336,6 +407,9 @@ def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposab
         lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.3}),
     )
     assert orchestrator._subtasks_promising(subtasks) is False
+    diagnostic = orchestrator._best_diagnostic_observation
+    assert diagnostic is not None and diagnostic["score"] == 0.3
+    assert diagnostic["executable"] is False
 
     # Probe reports a fittable support -> the decomposition is allowed through.
     setattr(
@@ -344,6 +418,8 @@ def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposab
         lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.95}),
     )
     assert orchestrator._subtasks_promising(subtasks) is True
+    diagnostic = orchestrator._best_diagnostic_observation
+    assert diagnostic is not None and diagnostic["score"] == 0.95
 
 
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:
@@ -411,12 +487,12 @@ def test_refine_disabled_is_exactly_todays_hit(tmp_path: Path, xor_task: Task, s
     [
         (0.91, 0.0, 99, MODULE, True),  # metric win beats everything downstream
         (0.89, 0.9, 1, MODULE, False),  # metric loss loses regardless
-        (0.90, 0.52, 99, MODULE, True),  # metric tie, robustness win
-        (0.90, 0.48, 1, MODULE, False),  # metric tie, robustness loss
-        (0.90, 0.50, 9, MODULE, True),  # tie-tie, smaller topology wins (minimize over time)
+        (0.90, 0.52, 99, MODULE, False),  # inside metric band, bloat loses despite robustness
+        (0.90, 0.48, 1, MODULE, True),  # inside metric band, simplicity wins first
+        (0.90, 0.50, 9, MODULE, True),  # smaller topology wins (minimize over time)
         (0.90, 0.50, 10, MODULE, False),  # equal everything is a non-event
         (0.905, 0.50, 10, MODULE, False),  # epsilon boundary: not strictly beyond the band
-        (0.90, 0.50, 1, COMPOSITION, False),  # cross-type size comparison is meaningless
+        (0.90, 0.50, 1, COMPOSITION, True),  # expanded cost makes entry types comparable
         (math.nan, 0.9, 1, MODULE, False),  # non-finite candidate never wins
         (0.99, math.inf, 1, MODULE, False),
     ],
@@ -553,15 +629,22 @@ def test_refine_skipped_when_matching_strategy_not_configured(tmp_path: Path, xo
 
 def test_refine_retrained_clone_never_admits(tmp_path: Path, xor_task: Task, solving_genome) -> None:
     """The clone-factory guard: entry keys hash weights, so a topology-identical champion with
-    retrained weights always gets a fresh key; the structural fingerprint must catch it instead
+    retrained weights always gets a fresh key; exact topology identity must catch it even after ids
+    are restamped
     (the 2026-07-03 incident admitted 11 such clones and tombstoned their parents)."""
-    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    orchestrator = _orchestrator(tmp_path, table=_refine_table(deduplicate_topologies=True))
     old_key = orchestrator.library.add(
         entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
     )
     reweighted = genome_to_dict(solving_genome)
+    remap = {node["id"]: node["id"] + 100 for node in reweighted["nodes"]}
+    for node in reweighted["nodes"]:
+        node["id"] = remap[node["id"]]
     for connection in reweighted["connections"]:
+        connection["in"] = remap[connection["in"]]
+        connection["out"] = remap[connection["out"]]
         connection["weight"] += 0.5
+        connection["innovation"] += 1000
     calls: list[dict] = []
     # Metric tie at 1.0, robustness 0.9 vs stored 0.5: the comparator ALONE would admit this.
     orchestrator.strategies = [("direct", _fake_direct(1.0, 0.9, genome_from_dict(reweighted), calls))]
@@ -571,6 +654,7 @@ def test_refine_retrained_clone_never_admits(tmp_path: Path, xor_task: Task, sol
     assert len(orchestrator.library) == 1 and not orchestrator.library.is_retired(old_key)
     assert orchestrator.counters["refine_no_gain"] == 1 and orchestrator.counters["refine_improvements"] == 0
     assert orchestrator.library.load(old_key).stats["refine_failures_since_gain"] == 1  # decay bites
+    assert "topology_duplicates_skipped" in orchestrator.attempts[-1].strategy_metrics  # survives into JSON/report aggregation
 
 
 def test_refine_seed_metric_is_the_incumbent_baseline(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
@@ -629,7 +713,7 @@ def test_retire_guard_requires_strict_margin(tmp_path: Path, xor_task: Task, sol
     key = planted()
     simpler_other_type = RefinementRank(metric=1.0, robustness=0.005, complexity=4, entry_type=COMPOSITION)
     orchestrator._retire_if_dominated(key, simpler_other_type, incumbent)
-    assert not library.is_retired(key)  # cross-type size comparison stays meaningless
+    assert library.is_retired(key)  # expanded complexity makes cross-type comparison meaningful
 
 
 def test_refine_capability_gain_recharges_lineage_cooldown(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
@@ -669,6 +753,22 @@ def test_refine_compression_gain_spends_lineage_cooldown(tmp_path: Path, xor_tas
     )
     assert improved is None and generations == 0
     assert orchestrator.counters["refine_skipped_decayed"] == 1
+
+
+def test_refine_always_spends_reduced_budget_on_every_hit(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table(mode="always"))
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.5, 0.0, linear_genome, calls))]
+
+    for _ in range(6):
+        solution = orchestrator.solve(xor_task)
+        assert solution is not None and solution.key == key  # known-good fallback never regresses
+
+    assert [call["budget"] for call in calls] == [8] * 6
+    assert orchestrator.counters["refine_attempts"] == 6
+    assert orchestrator.counters["refine_no_gain"] == 6
+    assert orchestrator.counters["refine_skipped_decayed"] == 0
 
 
 def _wall_table(**overrides) -> dict:

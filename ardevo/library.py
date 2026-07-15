@@ -17,6 +17,7 @@ the Icarus dataset.
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -31,6 +32,7 @@ logger = Logger.get_logger()
 
 MODULE = "module"
 COMPOSITION = "composition"
+INVALID_EXPANDED_COMPLEXITY = 10**12
 
 AdmissionPolicy = Callable[..., "AdmissionDecision"]
 
@@ -209,6 +211,63 @@ def payload_refs(entry_type: str, payload: dict[str, Any]) -> set[str]:
     return refs
 
 
+def payload_shell_complexity(entry_type: str, payload: dict[str, Any]) -> int:
+    """The historical local-only structural cost, computed without constructing a genome."""
+
+    if entry_type == MODULE:
+        enabled = sum(bool(connection.get("enabled", True)) for connection in payload.get("connections", []))
+        hidden = sum(node.get("kind") == "hidden" for node in payload.get("nodes", []))
+        return enabled + hidden + len(payload.get("macros", []))
+    if entry_type == COMPOSITION:
+        enabled = sum(bool(edge.get("enabled", True)) for edge in payload.get("edges", []))
+        modules = sum(node.get("kind") == "module" for node in payload.get("nodes", []))
+        return enabled + modules
+    raise ValueError(f"unknown entry_type {entry_type!r}")
+
+
+def expanded_payload_complexity(
+    entry_type: str,
+    payload: dict[str, Any],
+    library: "ModuleLibrary",
+    *,
+    visiting: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> int:
+    """Static assembled-topology cost, including every persistent reference placement.
+
+    Repeated placements count repeatedly because each executes separately even when weights are
+    shared. Missing, cyclic, or implausibly deep references receive an effectively infinite cost;
+    malformed legacy state can therefore never masquerade as compression.
+    """
+
+    if depth > 64:
+        return INVALID_EXPANDED_COMPLEXITY
+    if entry_type == MODULE:
+        references = [macro.get("ref", "") for macro in payload.get("macros", [])]
+    elif entry_type == COMPOSITION:
+        references = [node.get("ref", "") for node in payload.get("nodes", []) if node.get("kind") == "module"]
+    else:
+        raise ValueError(f"unknown entry_type {entry_type!r}")
+    total = payload_shell_complexity(entry_type, payload)
+    for reference in references:
+        if not reference.startswith("library:"):
+            continue
+        key = reference.removeprefix("library:")
+        if key in visiting:
+            return INVALID_EXPANDED_COMPLEXITY
+        try:
+            entry = library.load(key)
+        except KeyError:
+            return INVALID_EXPANDED_COMPLEXITY
+        nested = expanded_payload_complexity(entry.entry_type, entry.payload, library, visiting=visiting | {key}, depth=depth + 1)
+        if nested >= INVALID_EXPANDED_COMPLEXITY:
+            return INVALID_EXPANDED_COMPLEXITY
+        total += nested
+        if total >= INVALID_EXPANDED_COMPLEXITY:
+            return INVALID_EXPANDED_COMPLEXITY
+    return total
+
+
 def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     """Weight-agnostic topology hash: two payloads share a fingerprint iff they are the same
     STRUCTURE (nodes, wiring, macro refs, refine depth), regardless of trained weights, glue
@@ -229,7 +288,16 @@ def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     else:
         skeleton = {
             "nodes": sorted((int(node["id"]), node["kind"], node["ref"], node.get("aggregation", "sum"), bool(node.get("trainable", True))) for node in payload["nodes"]),
-            "edges": sorted((int(edge["in"]), int(edge["out"]), bool(edge["enabled"]), int(edge.get("glue_rank", 0))) for edge in payload["edges"]),
+            "edges": sorted(
+                (
+                    int(edge["in"]),
+                    int(edge["out"]),
+                    bool(edge["enabled"]),
+                    int(edge.get("glue_rank", 0)),
+                    tuple((int(run["source_start"]), int(run["target_start"]), int(run["length"])) for run in edge.get("port_map", [])),
+                )
+                for edge in payload["edges"]
+            ),
         }
     return hashlib.sha1(json.dumps(skeleton, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -241,16 +309,26 @@ class ModuleLibrary:
         self.root = Path(root)
         self._entries_dir = self.root / "entries"
         self._index_path = self.root / "index.json"
+        self._lifecycle_path = self.root / "lifecycle.json"
         self._index: dict[str, dict[str, Any]] = {}
         self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
+        self._expanded_complexity_cache: dict[str, int] = {}
         # Parsed-entry cache: payloads are immutable and every mutation (dedupe provenance, stats)
         # goes through this object, so the cached instance IS the coherent one. Unbounded is fine at
         # hundreds of entries; revisit alongside the _write_index watchpoint when it reaches thousands.
         self._entry_cache: dict[str, LibraryEntry] = {}
         # Keys whose stats mutated in memory but not yet on disk (bump_stats defers; flush_stats writes).
         self._dirty_stats: set[str] = set()
+        self._lifecycle_enabled = False
+        self._library_patience_tasks = 0
+        self._task_epoch = 0
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
+        if self._lifecycle_path.exists():
+            try:
+                self._task_epoch = int(json.loads(self._lifecycle_path.read_text()).get("task_epoch", 0))
+            except (OSError, ValueError, json.JSONDecodeError):
+                self._task_epoch = 0
 
     def __len__(self) -> int:
         return len(self._index)
@@ -330,14 +408,26 @@ class ModuleLibrary:
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
         self._write_index()
 
-    def retire(self, key: str) -> None:
+    def retire(self, key: str, *, reason: str = "policy") -> None:
         """Tombstone an entry: hidden from query/catalog/lookup, but `load()` keeps working forever
         so existing composition refs never dangle. Entries are NEVER deleted."""
         summary = self._index.get(key)
         if summary is None:
             return
         summary["retired"] = True
+        summary["retired_reason"] = reason
         self._write_index()
+
+    def revive(self, key: str) -> bool:
+        """Revive only route-decay tombstones; quality and dominance decisions stay final."""
+
+        summary = self._index.get(key)
+        if summary is None or not summary.get("retired", False) or summary.get("retired_reason") != "route_decay":
+            return False
+        summary["retired"] = False
+        summary.pop("retired_reason", None)
+        self._write_index()
+        return True
 
     def is_retired(self, key: str) -> bool:
         summary = self._index.get(key)
@@ -376,12 +466,15 @@ class ModuleLibrary:
         self._entry_cache[key] = entry
         return entry
 
-    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
-        """Depth of the macro-reference chain under `key`: 0 = no macros, 1 + deepest target
-        otherwise. This is what the decode cap (`substrate._MAX_MACRO_DEPTH`) actually limits, so
-        macro-adding mutations consult it to never manufacture a genome that cannot decode (the
-        wall-ledger lesson: repeated seed-then-embed cycles deepen the chain one level per attempt).
-        A missing or cyclic ref reads as unboundedly deep: never a safe macro target."""
+    def reference_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Deepest persistent-reference path below ``key``.
+
+        A leaf has depth 0; otherwise the result is one plus the deepest referenced entry. The
+        root entry itself is not counted, matching ``max_inline_depth`` decode/assembly semantics.
+        Both composition module refs and genome macro refs participate through ``payload_refs``.
+        Missing and cyclic references return a deliberately unbounded sentinel so construction
+        filters never select them.
+        """
         cached = self._macro_depth_cache.get(key)
         if cached is not None:
             return cached
@@ -392,9 +485,24 @@ class ModuleLibrary:
         except KeyError:
             return 999
         refs = payload_refs(entry.entry_type, entry.payload)
-        depth = 0 if not refs else 1 + max(self.macro_subtree_depth(ref, _visiting | {key}) for ref in refs)
+        depth = 0 if not refs else 1 + max(self.reference_subtree_depth(ref, _visiting | {key}) for ref in refs)
         self._macro_depth_cache[key] = depth
         return depth
+
+    def expanded_complexity(self, key: str) -> int:
+        """Recursively expanded static topology cost for one immutable library entry."""
+
+        cached = self._expanded_complexity_cache.get(key)
+        if cached is not None:
+            return cached
+        entry = self.load(key)
+        value = expanded_payload_complexity(entry.entry_type, entry.payload, self, visiting=frozenset({key}))
+        self._expanded_complexity_cache[key] = value
+        return value
+
+    def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
+        """Compatibility name for the now type-agnostic reference-depth query."""
+        return self.reference_subtree_depth(key, _visiting)
 
     def collect_garbage(self, *, protect: Iterable[str] = (), dry_run: bool = False) -> list[str]:
         """Physically delete retired entries nothing retained still references. Mark-and-sweep:
@@ -423,6 +531,7 @@ class ModuleLibrary:
         for key in swept:
             del self._index[key]
             self._macro_depth_cache.pop(key, None)
+            self._expanded_complexity_cache.pop(key, None)
             self._entry_cache.pop(key, None)
             self._dirty_stats.discard(key)
             (self._entries_dir / f"{key}.json").unlink(missing_ok=True)
@@ -488,6 +597,75 @@ class ModuleLibrary:
         stats["use_count"] = int(stats.get("use_count", 0)) + 1
         stats["max_attributed_fitness"] = max(float(stats.get("max_attributed_fitness", 0.0)), attributed_fitness)
         self._dirty_stats.add(key)
+        self.note_reuse(key, channel="composition")
+
+    def configure_lifecycle(self, *, library_patience_tasks: int) -> None:
+        """Enable task-clock lifecycle accounting without rewriting existing state eagerly."""
+
+        self._lifecycle_enabled = library_patience_tasks > 0
+        self._library_patience_tasks = max(0, int(library_patience_tasks))
+
+    @property
+    def task_epoch(self) -> int:
+        return self._task_epoch
+
+    def note_reuse(self, key: str, *, channel: str) -> bool:
+        """Record current-task evidence and revive a route-decayed entry when possible."""
+
+        if not self._lifecycle_enabled:
+            return False
+        summary = self._index.get(key)
+        if summary is None:
+            return False
+        revived = self.revive(key)
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["last_reuse_epoch"] = self._task_epoch + 1
+        stats[f"last_{channel}_epoch"] = self._task_epoch + 1
+        stats["route_evicted_epoch"] = None
+        self._dirty_stats.add(key)
+        return revived
+
+    def mark_route_evicted(self, key: str) -> None:
+        if not self._lifecycle_enabled:
+            return
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats.setdefault("last_reuse_epoch", self._task_epoch)
+        stats["route_evicted_epoch"] = self._task_epoch + 1
+        self._dirty_stats.add(key)
+
+    def finish_root_task(self) -> list[str]:
+        """Advance the durable root-task clock and tombstone long-idle router evictees."""
+
+        if not self._lifecycle_enabled:
+            return []
+        self._task_epoch += 1
+        retired: list[str] = []
+        for key, summary in self._index.items():
+            if summary.get("retired", False):
+                continue
+            stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+            evicted = stats.get("route_evicted_epoch")
+            if evicted is None:
+                continue
+            last_reuse = int(stats.get("last_reuse_epoch", int(evicted)))
+            if self._task_epoch - max(int(evicted), last_reuse) < self._library_patience_tasks:
+                continue
+            summary["retired"] = True
+            summary["retired_reason"] = "route_decay"
+            retired.append(key)
+        if retired:
+            self._write_index()
+        self._write_lifecycle()
+        return sorted(retired)
+
+    def _write_lifecycle(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary = self._lifecycle_path.with_name(f".{self._lifecycle_path.name}.tmp")
+        temporary.write_text(json.dumps({"schema_version": 1, "task_epoch": self._task_epoch}, indent=2) + "\n")
+        os.replace(temporary, self._lifecycle_path)
 
     def flush_stats(self) -> None:
         """Persist deferred `bump_stats` mutations: rewrite each dirty entry's file, then the index

@@ -22,10 +22,14 @@ instead. With `[orchestrator.routed] distill = false` the pre-contract behavior 
 are solved-but-not-shelved records (RoutedSolution), the executable state living in the router.
 """
 
+import hashlib
 import json
+import math
 import os
 import re
+import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,18 +49,104 @@ from ardevo.evolution.composition import (
     assemble,
     comp_from_dict,
     comp_to_dict,
+    glue_value_count,
     minimal_composition,
 )
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import AssessedComposition, CompositionGenome, CompTaskSpec
 from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, structural_fingerprint, task_io
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH, configured_max_inline_depth
 from ardevo.substrate import SubstrateModule, decode_module
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import format_bytes
 
 logger = Logger.get_logger()
 
-ROUTER_FORMAT_VERSION = 1
+ROUTER_FORMAT_VERSION = 2
 _TRAIN_HISTORY_CAP = 200
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def migrate_router_library(source: Path | str, output: Path | str) -> dict[str, Any]:
+    """Copy a library and convert its router v1 state to verified v2 shards."""
+
+    source_path, output_path = Path(source).resolve(), Path(output).resolve()
+    if output_path.exists():
+        raise FileExistsError(f"migration output already exists: {output_path}")
+    router = source_path / "router"
+    meta_path, state_path = router / "router_meta.json", router / "router_state.pt"
+    meta = json.loads(meta_path.read_text())
+    if int(meta.get("format_version", 0)) != 1:
+        raise ValueError("router migration requires a format-v1 source")
+    source_hashes = {path.name: _file_sha256(path) for path in (meta_path, state_path)}
+    shutil.copytree(source_path, output_path)
+    target_router = output_path / "router"
+    state = torch.load(state_path, weights_only=True)
+    shard_root = target_router / "shards"
+    for kind in ("vertices", "inputs", "outputs"):
+        (shard_root / kind).mkdir(parents=True, exist_ok=True)
+
+    large_prefixes = ("vertex_in_adapters.", "vertex_out_adapters.", "input_adapters.", "output_heads.")
+    core = {name: tensor for name, tensor in state.items() if not name.startswith(large_prefixes)}
+    temporary = target_router / ".router_state.pt.tmp"
+    torch.save(core, temporary)
+    os.replace(temporary, target_router / "router_state.pt")
+
+    def substate(prefix: str, key: str) -> dict[str, torch.Tensor]:
+        marker = f"{prefix}.{key}."
+        return {name.removeprefix(marker): tensor for name, tensor in state.items() if name.startswith(marker)}
+
+    sanitized = [sanitize_key(str(key)) for key in meta.get("vertex_keys", [])]
+    for key in sanitized:
+        payload = {"input": substate("vertex_in_adapters", key), "output": substate("vertex_out_adapters", key)}
+        torch.save(payload, shard_root / "vertices" / f"{key}.pt")
+    for item in meta.get("input_adapter_keys", []):
+        key = str(item["key"])
+        torch.save(substate("input_adapters", key), shard_root / "inputs" / f"{key}.pt")
+    for item in meta.get("output_head_keys", []):
+        key = str(item["key"])
+        torch.save(substate("output_heads", key), shard_root / "outputs" / f"{key}.pt")
+
+    accounted = set(core)
+    for prefix, keys in (
+        ("vertex_in_adapters", sanitized),
+        ("vertex_out_adapters", sanitized),
+        ("input_adapters", [str(item["key"]) for item in meta.get("input_adapter_keys", [])]),
+        ("output_heads", [str(item["key"]) for item in meta.get("output_head_keys", [])]),
+    ):
+        for key in keys:
+            accounted.update(name for name in state if name.startswith(f"{prefix}.{key}."))
+    if accounted != set(state):
+        shutil.rmtree(output_path)
+        missing = sorted(set(state) - accounted)
+        raise ValueError(f"router migration did not account for state keys: {missing[:5]}")
+    migrated = dict(meta)
+    migrated["format_version"] = ROUTER_FORMAT_VERSION
+    migrated["migrated_from_format"] = 1
+    migrated["source_state_sha256"] = source_hashes["router_state.pt"]
+    meta_tmp = target_router / ".router_meta.json.tmp"
+    meta_tmp.write_text(json.dumps(migrated, indent=2) + "\n")
+    os.replace(meta_tmp, target_router / "router_meta.json")
+    if source_hashes != {path.name: _file_sha256(path) for path in (meta_path, state_path)}:
+        shutil.rmtree(output_path)
+        raise RuntimeError("source router changed during migration")
+    return {
+        "format_version": ROUTER_FORMAT_VERSION,
+        "source": str(source_path),
+        "output": str(output_path),
+        "core_tensors": len(core),
+        "vertex_shards": len(sanitized),
+        "input_shards": len(meta.get("input_adapter_keys", [])),
+        "output_shards": len(meta.get("output_head_keys", [])),
+        "source_hashes": source_hashes,
+    }
 
 
 def sanitize_key(raw: str) -> str:
@@ -85,16 +175,16 @@ def _bottleneck_linear(in_features: int, out_features: int, rank: int) -> nn.Mod
 
 @dataclass
 class RouterVertex:
-    """One expert: a frozen library entry decoded once and wired to the bus by its adapters."""
+    """One expert descriptor; lazy services decode its frozen module only when selected."""
 
     original_key: str
     sanitized_key: str
     in_width: int
     out_width: int
-    module: SubstrateModule
+    module: SubstrateModule | None
 
 
-def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = 4) -> RouterVertex | None:
+def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> RouterVertex | None:
     """Decode/assemble an entry into a frozen expert, or None when it cannot serve as one here
     (temporal, undecodable): the same tolerance `_quick_metric` extends to library candidates."""
     if _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
@@ -102,20 +192,27 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
     in_width, out_width = _entry_widths(entry)
     try:
         if entry.entry_type == MODULE:
-            module: SubstrateModule = decode_module(genome_from_dict(entry.payload), in_width, out_width, macro_resolver=macro_resolver(library))
+            module: SubstrateModule = decode_module(
+                genome_from_dict(entry.payload),
+                in_width,
+                out_width,
+                macro_resolver=macro_resolver(library),
+                max_inline_depth=max_inline_depth,
+                _reference_stack=(entry.key,),
+            )
         elif entry.entry_type == COMPOSITION:
             comp = comp_from_dict(entry.payload)
             # Positional bank columns: consecutive ranges per non-bias INPUT node in id order, the
             # exact `_nested_context` convention a referenced composition reads its input by.
-            columns: dict[str, list[int]] = {}
+            columns: dict[str, Sequence[int]] = {}
             cursor = 0
             for node_id in comp.input_ids:
                 node = comp.nodes[node_id]
                 if node.ref == BIAS_REF:
                     continue
-                columns[node.ref] = list(range(cursor, cursor + node.out_width))
+                columns[node.ref] = range(cursor, cursor + node.out_width)
                 cursor += node.out_width
-            ctx = AssemblyContext(bank_columns=columns, library=library, max_inline_depth=max_inline_depth)
+            ctx = AssemblyContext(bank_columns=columns, library=library, max_inline_depth=max_inline_depth, expansion_stack=[entry.key])
             module = assemble(comp, ctx, in_width)
         else:
             return None
@@ -149,6 +246,7 @@ class RoutedNet(nn.Module):
         ponder_cost: float = 0.001,
         edge_bias: bool = False,
         edge_dim: int = 8,
+        lazy_residency: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -161,6 +259,9 @@ class RoutedNet(nn.Module):
         self.ponder_cost = ponder_cost
         self.edge_bias = edge_bias
         self.edge_dim = edge_dim
+        self.lazy_residency = lazy_residency
+        self.shard_loader: Any | None = None
+        self.expert_loader: Any | None = None
         self.vertex_in_adapters = nn.ModuleDict()
         self.vertex_out_adapters = nn.ModuleDict()
         self.vertex_embeddings = nn.ParameterDict()
@@ -190,7 +291,7 @@ class RoutedNet(nn.Module):
 
     # --- vertex table -------------------------------------------------------------------------------
 
-    def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None) -> None:
+    def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None, lazy: bool = False) -> None:
         key = vertex.sanitized_key
         if key in self.vertex_embeddings:
             self._vertices[key] = vertex  # adapters/embedding already exist (e.g. rebuilt after load)
@@ -206,16 +307,27 @@ class RoutedNet(nn.Module):
             mean = torch.stack([self.vertex_embeddings[name].detach() for name in self._vertex_order]).mean(0)
             embedding = mean + torch.randn(self.d_model) * 0.02
         self.vertex_embeddings[key] = nn.Parameter(embedding)
-        self.vertex_in_adapters[key] = _bottleneck_linear(self.d_model, vertex.in_width, self.adapter_rank)
-        self.vertex_out_adapters[key] = _bottleneck_linear(vertex.out_width, self.d_model, self.adapter_rank)
+        if not lazy:
+            self.vertex_in_adapters[key] = _bottleneck_linear(self.d_model, vertex.in_width, self.adapter_rank)
+            self.vertex_out_adapters[key] = _bottleneck_linear(vertex.out_width, self.d_model, self.adapter_rank)
         if self.edge_bias:
             self.vertex_edge_out[key] = nn.Parameter(torch.randn(self.edge_dim) * 0.02)
             self.vertex_edge_in[key] = nn.Parameter(torch.randn(self.edge_dim) * 0.02)
+        if lazy:
+            vertex.module = None
         self._vertices[key] = vertex
         self._vertex_order.append(key)
 
     def sync_with_library(
-        self, library: ModuleLibrary, *, include_compositions: bool = True, exclude_temporal: bool = True, pending_embeddings: dict[str, torch.Tensor] | None = None
+        self,
+        library: ModuleLibrary,
+        *,
+        include_compositions: bool = True,
+        exclude_temporal: bool = True,
+        pending_embeddings: dict[str, torch.Tensor] | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        lazy_residency: bool = False,
+        excluded_keys: set[str] | None = None,
     ) -> int:
         """Append vertices for library keys not yet in the table; refresh the retired mask. Returns
         the number of new vertices. The vertex set only grows (entries tombstone, never delete).
@@ -225,6 +337,8 @@ class RoutedNet(nn.Module):
         known = {vertex.original_key for vertex in self._vertices.values()}
         for summary in library.summaries(include_retired=True):
             key = summary["key"]
+            if excluded_keys and key in excluded_keys:
+                continue
             sanitized = sanitize_key(key)
             if summary.get("retired", False):
                 if sanitized in self.vertex_embeddings:
@@ -238,7 +352,7 @@ class RoutedNet(nn.Module):
                 continue
             if exclude_temporal and _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
                 continue
-            vertex = build_vertex(entry, library)
+            vertex = build_vertex(entry, library, max_inline_depth=max_inline_depth)
             if vertex is None:
                 continue
             embedding = pending_embeddings.pop(structural_fingerprint(entry.entry_type, entry.payload), None) if pending_embeddings else None
@@ -246,26 +360,53 @@ class RoutedNet(nn.Module):
             added += 1
         return added
 
+    def remove_vertex(self, key: str) -> bool:
+        """Remove one expert from the complete routing candidate set at a task boundary."""
+
+        if key not in self._vertices:
+            return False
+        for container in (self.vertex_embeddings, self.vertex_in_adapters, self.vertex_out_adapters, self.vertex_edge_out, self.vertex_edge_in):
+            if key in container:
+                del container[key]
+        self._vertices.pop(key, None)
+        self._vertex_order = [name for name in self._vertex_order if name != key]
+        self._retired.discard(key)
+        self.last_gate_stats.pop(key, None)
+        return True
+
     # --- lazy per-signature surfaces ------------------------------------------------------------------
 
     def ensure_input_adapter(self, signature: str, width: int) -> str:
         key = sanitize_key(f"{signature}:{width}")
         if key not in self.input_adapters:
-            self.input_adapters[key] = _bottleneck_linear(width, self.d_model, self.adapter_rank)
-            self.input_adapter_widths[key] = width
+            if key in self.input_adapter_widths and self.shard_loader is not None:
+                self.shard_loader("input", key)
+            else:
+                self.input_adapters[key] = _bottleneck_linear(width, self.d_model, self.adapter_rank)
+                self.input_adapter_widths[key] = width
         return key
 
     def ensure_output_head(self, signature: str, width: int) -> str:
         key = sanitize_key(f"{signature}:{width}")
         if key not in self.output_heads:
-            self.output_heads[key] = nn.Linear(self.d_model, width)  # heads stay dense: they must express the output
-            self.output_head_widths[key] = width
-            self.output_signature_embeddings[key] = nn.Parameter(torch.randn(self.d_model) * 0.02)
+            if key in self.output_head_widths and self.shard_loader is not None:
+                self.shard_loader("output", key)
+            else:
+                self.output_heads[key] = nn.Linear(self.d_model, width)  # heads stay dense: they must express the output
+                self.output_head_widths[key] = width
+                self.output_signature_embeddings[key] = nn.Parameter(torch.randn(self.d_model) * 0.02)
         return key
 
     def task_embedding(self, support_input: torch.Tensor, input_key: str, head_key: str) -> torch.Tensor:
+        self._ensure_signature_resident(input_key, head_key)
         pooled = self.input_adapters[input_key](support_input).mean(dim=0)
         return torch.tanh(self.task_condition(torch.cat([pooled, self.output_signature_embeddings[head_key]])))
+
+    def _ensure_signature_resident(self, input_key: str, head_key: str) -> None:
+        if input_key not in self.input_adapters and input_key in self.input_adapter_widths and self.shard_loader is not None:
+            self.shard_loader("input", input_key)
+        if head_key not in self.output_heads and head_key in self.output_head_widths and self.shard_loader is not None:
+            self.shard_loader("output", head_key)
 
     # --- routing --------------------------------------------------------------------------------------
 
@@ -279,6 +420,7 @@ class RoutedNet(nn.Module):
         geometric halting head weights per-step readouts (stop mass p_t times the survival product)
         and execution EXITS EARLY once every sample has spent its halting mass: halting only ever
         shortens the unroll under the same hard cap."""
+        self._ensure_signature_resident(input_key, head_key)
         input_inject = self.input_adapters[input_key](x)
         h = input_inject
         aux_terms: list[torch.Tensor] = []
@@ -359,9 +501,15 @@ class RoutedNet(nn.Module):
         for vertex_position in torch.unique(top_indices):
             index = int(vertex_position)
             name = live_names[index]
+            if name not in self.vertex_in_adapters and self.shard_loader is not None:
+                self.shard_loader("vertex", name)
             selected = top_indices == index  # [B, k]
             weight = (top_probs * selected).sum(dim=1, keepdim=True)  # [B, 1], zero for non-selectors
             vertex = self._vertices[name]
+            if vertex.module is None and self.expert_loader is not None:
+                self.expert_loader(name)
+            if vertex.module is None:
+                raise RuntimeError(f"router expert {name!r} is not resident and has no loader")
             expert_in = self.vertex_in_adapters[name](h)
             expert_out = torch.zeros(batch, vertex.out_width, dtype=h.dtype) if self.expert_ablation == "zero" else vertex.module(expert_in)
             moe = moe + weight * self.vertex_out_adapters[name](expert_out)
@@ -440,12 +588,28 @@ class RouterService:
         persist_dir: Path | None = None,
         persist_strict: bool = False,
         image_dir: Path | None = None,
+        max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+        lazy_residency: bool = False,
+        lifecycle_enabled: bool = False,
+        route_patience_tasks: int = 24,
+        route_activity_floor: float = 0.01,
+        route_traffic_decay: float = 0.95,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
         self.persist_strict = persist_strict
-        self.image_dir = image_dir  # <library_dir>/images; where overmind.png lands
+        self.image_dir = image_dir  # <library_dir>/images; where full + pruned overmind portraits land
         self.adapter_rank = adapter_rank
+        self.max_inline_depth = max_inline_depth
+        self.lazy_residency = lazy_residency
+        self.lifecycle_enabled = lifecycle_enabled
+        self.route_patience_tasks = max(1, int(route_patience_tasks))
+        self.route_activity_floor = max(0.0, float(route_activity_floor))
+        self.route_traffic_decay = min(1.0, max(0.0, float(route_traffic_decay)))
+        self.route_epoch = 0
+        self.route_life: dict[str, int] = {}
+        self.evicted: dict[str, dict[str, int]] = {}
+        self.last_lifecycle_metrics: dict[str, float] = {}
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
@@ -459,7 +623,7 @@ class RouterService:
         self.usage_totals: dict[str, float] = {}
         self.transition_totals: dict[str, dict[str, float]] = {}
         self.step_usage_totals: dict[str, list[float]] = {}
-        self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
+        self._rendered_signature: tuple[tuple[str, bool], ...] | None = None
         self.net = RoutedNet(
             d_model=d_model,
             top_k=top_k,
@@ -470,30 +634,73 @@ class RouterService:
             ponder_epsilon=ponder_epsilon,
             ponder_cost=ponder_cost,
             edge_bias=edge_bias,
+            lazy_residency=lazy_residency,
         )
+        self.net.shard_loader = self._load_shard
+        self.net.expert_loader = self._load_expert
         if persist_dir is not None and (persist_dir / "router_meta.json").exists():
             self._load(persist_dir)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
-        added = self.net.sync_with_library(self.library, include_compositions=include_compositions, exclude_temporal=exclude_temporal, pending_embeddings=self.pending_embeddings)
-        if added:
-            self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
+        revived = 0
+        for key, record in list(self.evicted.items()):
+            summary = self.library.summary(key)
+            if summary is None or summary.get("retired", False):
+                continue
+            stats = summary.get("stats") or {}
+            if int(stats.get("last_reuse_epoch", 0)) > int(record.get("reuse_epoch", 0)):
+                self.evicted.pop(key, None)
+                revived += 1
+        added = self.net.sync_with_library(
+            self.library,
+            include_compositions=include_compositions,
+            exclude_temporal=exclude_temporal,
+            pending_embeddings=self.pending_embeddings,
+            max_inline_depth=self.max_inline_depth,
+            lazy_residency=self.lazy_residency,
+            excluded_keys=set(self.evicted),
+        )
+        for name in self.net._vertex_order:
+            self.route_life.setdefault(name, self.route_patience_tasks)
+        self.last_lifecycle_metrics = {"router_vertices_revived": float(revived)} if revived else {}
+        self.render_overmind()  # the internal signature guard catches additions, revival, and retirement
         return added
 
     def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
         self.pending_embeddings[fingerprint] = embedding.detach().clone()
 
-    def record_traffic(self) -> None:
+    def record_traffic(self) -> dict[str, float]:
         """Fold the LAST route()'s gate decisions into the lifetime traffic ledgers: per-vertex gate
         mass (usage_totals) and consecutive-step co-firing (transition_totals, directed). Called once
         per routed task after its final evaluation, so the ledgers reflect what the router actually
         did, batch-averaged, across its whole life."""
         net = self.net
         if not net.last_selections:
-            return
+            return dict(self.last_lifecycle_metrics)
         live_names = [name for name in net._vertex_order if name not in net._retired]
         if not live_names:
-            return
+            return dict(self.last_lifecycle_metrics)
+        expired_edges = 0
+        if self.lifecycle_enabled:
+            self.route_epoch += 1
+            for name in list(self.usage_totals):
+                self.usage_totals[name] *= self.route_traffic_decay
+                if self.usage_totals[name] < 1e-4:
+                    self.usage_totals.pop(name, None)
+            for name, values in list(self.step_usage_totals.items()):
+                decayed = [value * self.route_traffic_decay for value in values]
+                if max(decayed, default=0.0) < 1e-4:
+                    self.step_usage_totals.pop(name, None)
+                else:
+                    self.step_usage_totals[name] = decayed
+            for source, row in list(self.transition_totals.items()):
+                for target in list(row):
+                    row[target] *= self.route_traffic_decay
+                    if row[target] < 1e-4:
+                        row.pop(target, None)
+                        expired_edges += 1
+                if not row:
+                    self.transition_totals.pop(source, None)
         step_weights: list[torch.Tensor] = []
         for selections, probs in zip(net.last_selections, net.last_probs):
             weights = torch.zeros(len(live_names)).scatter_add_(0, selections.reshape(-1), probs.reshape(-1).to(torch.float32)) / selections.shape[0]
@@ -517,6 +724,51 @@ class RouterService:
                     if target_weight <= 1e-3:
                         continue
                     row[target] = row.get(target, 0.0) + source_weight * target_weight
+
+        expired: list[str] = []
+        if self.lifecycle_enabled:
+            active = {name for name, mass in net.last_gate_stats.items() if mass >= self.route_activity_floor}
+            for name in live_names:
+                vertex = net._vertices.get(name)
+                if vertex is None:
+                    continue
+                if name in active:
+                    self.route_life[name] = self.route_patience_tasks
+                    self.library.note_reuse(vertex.original_key, channel="route")
+                else:
+                    self.route_life[name] = self.route_life.get(name, self.route_patience_tasks) - 1
+                    if self.route_life[name] <= 0:
+                        expired.append(name)
+            for name in expired:
+                vertex = net._vertices.get(name)
+                if vertex is None:
+                    continue
+                original_key = vertex.original_key
+                self.library.mark_route_evicted(original_key)
+                summary = self.library.summary(original_key) or {}
+                reuse_epoch = int((summary.get("stats") or {}).get("last_reuse_epoch", self.library.task_epoch + 1))
+                self.evicted[original_key] = {"route_epoch": self.route_epoch, "reuse_epoch": reuse_epoch}
+                self._remove_vertex(name)
+        metrics = dict(self.last_lifecycle_metrics)
+        if expired:
+            metrics["router_vertices_expired"] = float(len(expired))
+        if expired_edges:
+            metrics["router_edges_expired"] = float(expired_edges)
+        self.last_lifecycle_metrics = metrics
+        if expired:
+            self.render_overmind()
+        return dict(metrics)
+
+    def _remove_vertex(self, name: str) -> None:
+        self.route_life.pop(name, None)
+        self.usage_totals.pop(name, None)
+        self.step_usage_totals.pop(name, None)
+        self.transition_totals.pop(name, None)
+        for row in self.transition_totals.values():
+            row.pop(name, None)
+        self.net.remove_vertex(name)
+        if self.persist_dir is not None:
+            (self.persist_dir / "shards" / "vertices" / f"{name}.pt").unlink(missing_ok=True)
 
     def _pathways(self, ordered_names: list[str], *, per_vertex: int = 3, floor: float = 1e-3) -> list[tuple[int, int, float]]:
         """Directed (source, target, weight) pathway edges over `ordered_names` indices: observed
@@ -569,13 +821,21 @@ class RouterService:
         return [name for _value, name in sorted(zip(projection, names), key=lambda pair: pair[0])]
 
     def render_overmind(self) -> None:
-        """Draw the WHOLE routed model (every expert embedded, wired to the shared bus) to
-        <library_dir>/images/overmind.png. Refreshed on structural growth; never raises, so a bad
-        render can no more kill a run than a library-entry render can."""
+        """Draw historical and current-only eight-column overmind portraits.
+
+        Route-evicted experts remain in the full image as retired historical cards while the
+        pruned companion omits them.  Refreshed on any structural lifecycle change; never raises.
+        """
         if self.image_dir is None:
             return
-        live = len(self.net._vertex_order)
-        if live == self._rendered_vertex_count:
+        current_keys = {self.net._vertices[name].original_key for name in self.net._vertex_order}
+        signature = tuple((self.net._vertices[name].original_key, name in self.net._retired) for name in self.net._vertex_order) + tuple(
+            (key, True) for key in sorted(self.evicted) if key not in current_keys
+        )
+        if not signature:
+            self._rendered_signature = signature
+            return
+        if signature == self._rendered_signature:
             return
         try:
             from ardevo.rendering import OvermindVertex, OvermindView, render_overmind, submit_render
@@ -616,6 +876,23 @@ class RouterService:
                         stepping_stone=stone,
                     )
                 )
+            # Route decay removes parameters from the active model, but its library payload still
+            # exists until ordinary library GC. Keep that history visible only in the full image.
+            for offset, key in enumerate(sorted(self.evicted)):
+                if key in current_keys:
+                    continue
+                summary = self.library.summary(key)
+                if summary is None:
+                    continue
+                retired_label = "retired" if summary.get("retired", False) else "route evicted"
+                vertices.append(
+                    OvermindVertex(
+                        key=key,
+                        label=f"{key}  {retired_label}",
+                        retired=True,
+                        embedding_rank=len(rank) + offset,
+                    )
+                )
             view = OvermindView(
                 vertices=vertices,
                 input_signatures=list(self.net.input_adapter_widths),
@@ -626,8 +903,8 @@ class RouterService:
                 pathways=self._pathways(ordered_names),
             )
             # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
-            submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library)
-            self._rendered_vertex_count = live
+            submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library, max_inline_depth=self.max_inline_depth)
+            self._rendered_signature = signature
         except Exception as error:  # a render must never break a run
             logger.debug("overmind render skipped: %s", error)
 
@@ -658,21 +935,103 @@ class RouterService:
             "usage_totals": {name: value for name, value in self.usage_totals.items() if name in known},
             "transition_totals": {source: {target: value for target, value in row.items() if target in known} for source, row in self.transition_totals.items() if source in known},
             "step_usage_totals": {name: values for name, values in self.step_usage_totals.items() if name in known},
+            "route_epoch": self.route_epoch,
+            "route_life": {name: value for name, value in self.route_life.items() if name in known},
+            "evicted": self.evicted,
         }
 
     def save(self) -> None:
-        # Scale watchpoint: the state_dict grows with vertices/signatures and is rewritten whole on
-        # every routed win; fine at hundreds of vertices, revisit (sharded/incremental save) at thousands.
+        """Persist format v2: a small complete gate core plus independently replaceable shards."""
+
         if self.persist_dir is None:
             return
         self.version += 1
         self.persist_dir.mkdir(parents=True, exist_ok=True)
+        shard_root = self.persist_dir / "shards"
+        for kind in ("vertices", "inputs", "outputs"):
+            (shard_root / kind).mkdir(parents=True, exist_ok=True)
+
+        state = self.net.state_dict()
+        large_prefixes = ("vertex_in_adapters.", "vertex_out_adapters.", "input_adapters.", "output_heads.")
+        core = {name: tensor for name, tensor in state.items() if not name.startswith(large_prefixes)}
         state_tmp = self.persist_dir / "router_state.pt.tmp"
-        torch.save(self.net.state_dict(), state_tmp)
+        torch.save(core, state_tmp)
         os.replace(state_tmp, self.persist_dir / "router_state.pt")
+
+        for key in self.net.vertex_in_adapters:
+            temporary = shard_root / "vertices" / f".{key}.pt.tmp"
+            torch.save({"input": self.net.vertex_in_adapters[key].state_dict(), "output": self.net.vertex_out_adapters[key].state_dict()}, temporary)
+            os.replace(temporary, shard_root / "vertices" / f"{key}.pt")
+        for key, module in self.net.input_adapters.items():
+            temporary = shard_root / "inputs" / f".{key}.pt.tmp"
+            torch.save(module.state_dict(), temporary)
+            os.replace(temporary, shard_root / "inputs" / f"{key}.pt")
+        for key, module in self.net.output_heads.items():
+            temporary = shard_root / "outputs" / f".{key}.pt.tmp"
+            torch.save(module.state_dict(), temporary)
+            os.replace(temporary, shard_root / "outputs" / f"{key}.pt")
         meta_tmp = self.persist_dir / "router_meta.json.tmp"
         meta_tmp.write_text(json.dumps(self._meta(), indent=2))
         os.replace(meta_tmp, self.persist_dir / "router_meta.json")
+
+    def evict_shards(self) -> None:
+        """Drop wide task/expert state after a durable boundary, never during an optimizer step."""
+
+        if not self.lazy_residency or self.persist_dir is None:
+            return
+        for key in list(self.net.vertex_in_adapters):
+            del self.net.vertex_in_adapters[key]
+            del self.net.vertex_out_adapters[key]
+        for key in list(self.net.input_adapters):
+            del self.net.input_adapters[key]
+        for key in list(self.net.output_heads):
+            del self.net.output_heads[key]
+        for vertex in self.net._vertices.values():
+            vertex.module = None
+
+    def checkpoint_and_evict(self) -> None:
+        """Persist resident shards/core, then evict at the between-task optimizer boundary."""
+
+        self.save()
+        self.evict_shards()
+
+    def _load_expert(self, key: str) -> None:
+        vertex = self.net._vertices[key]
+        entry = self.library.load(vertex.original_key)
+        loaded = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
+        if loaded is None or (loaded.in_width, loaded.out_width) != (vertex.in_width, vertex.out_width):
+            raise KeyError(f"library expert {vertex.original_key!r} no longer matches its router descriptor")
+        vertex.module = loaded.module
+
+    def _load_shard(self, kind: str, key: str) -> None:
+        if kind == "vertex":
+            vertex = self.net._vertices[key]
+            input_adapter = _bottleneck_linear(self.net.d_model, vertex.in_width, self.net.adapter_rank)
+            output_adapter = _bottleneck_linear(vertex.out_width, self.net.d_model, self.net.adapter_rank)
+            path = self.persist_dir / "shards" / "vertices" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                payload = torch.load(path, weights_only=True)
+                input_adapter.load_state_dict(payload["input"], strict=True)
+                output_adapter.load_state_dict(payload["output"], strict=True)
+            self.net.vertex_in_adapters[key] = input_adapter
+            self.net.vertex_out_adapters[key] = output_adapter
+            self._load_expert(key)
+            return
+        if kind == "input":
+            module = _bottleneck_linear(self.net.input_adapter_widths[key], self.net.d_model, self.net.adapter_rank)
+            path = self.persist_dir / "shards" / "inputs" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                module.load_state_dict(torch.load(path, weights_only=True), strict=True)
+            self.net.input_adapters[key] = module
+            return
+        if kind == "output":
+            module = nn.Linear(self.net.d_model, self.net.output_head_widths[key])
+            path = self.persist_dir / "shards" / "outputs" / f"{key}.pt" if self.persist_dir is not None else None
+            if path is not None and path.is_file():
+                module.load_state_dict(torch.load(path, weights_only=True), strict=True)
+            self.net.output_heads[key] = module
+            return
+        raise KeyError(f"unknown router shard kind {kind!r}")
 
     def _load(self, directory: Path) -> None:
         meta = json.loads((directory / "router_meta.json").read_text())
@@ -684,8 +1043,11 @@ class RouterService:
             "halting": self.net.halting,
             "edge_bias": self.net.edge_bias,
         }
+        format_version = int(meta.get("format_version", 0))
+        if format_version == 1:
+            raise ValueError(f"router state at {directory} uses format v1; migrate a copy with `uv run router_migrate --library <source> --output <copy>`")
         mismatched = [name for name, value in expected.items() if int(meta.get(name, -1)) != int(value)]
-        if int(meta.get("format_version", 0)) != ROUTER_FORMAT_VERSION or mismatched:
+        if format_version != ROUTER_FORMAT_VERSION or mismatched:
             message = f"router state at {directory} does not match config (format/{','.join(mismatched) or 'version'})"
             if self.persist_strict:
                 raise ValueError(message)
@@ -706,24 +1068,31 @@ class RouterService:
                 logger.warning("persisted router vertex %s no longer exists (garbage-collected); dropping its rows", key)
                 dropped.add(sanitized)
                 continue
-            vertex = build_vertex(entry, self.library)
+            vertex = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
             if vertex is None:
                 logger.warning("persisted router vertex %s no longer decodes; dropping its rows", key)
                 dropped.add(sanitized)
                 continue
-            self.net.register_vertex(vertex)
+            self.net.register_vertex(vertex, lazy=self.lazy_residency)
         for item in meta["input_adapter_keys"]:
-            self.net.input_adapters[item["key"]] = _bottleneck_linear(int(item["width"]), self.net.d_model, self.net.adapter_rank)
             self.net.input_adapter_widths[item["key"]] = int(item["width"])
         for item in meta["output_head_keys"]:
-            self.net.output_heads[item["key"]] = nn.Linear(self.net.d_model, int(item["width"]))
             self.net.output_head_widths[item["key"]] = int(item["width"])
             self.net.output_signature_embeddings[item["key"]] = nn.Parameter(torch.zeros(self.net.d_model))
         state = torch.load(directory / "router_state.pt", weights_only=True)
         if dropped:
             vertex_dicts = ("vertex_embeddings", "vertex_in_adapters", "vertex_out_adapters", "vertex_edge_out", "vertex_edge_in")
-            state = {name: tensor for name, tensor in state.items() if not (name.split(".")[0] in vertex_dicts and name.split(".")[1] in dropped)}
-        self.net.load_state_dict(state, strict=True)
+            state = {name: tensor for name, tensor in state.items() if not (name.split(".")[0] in vertex_dicts and len(name.split(".")) > 1 and name.split(".")[1] in dropped)}
+        incompatible = self.net.load_state_dict(state, strict=False)
+        if incompatible.unexpected_keys:
+            raise ValueError(f"unexpected router core keys: {incompatible.unexpected_keys}")
+        if not self.lazy_residency:
+            for name in self.net._vertex_order:
+                self._load_shard("vertex", name)
+            for key in self.net.input_adapter_widths:
+                self._load_shard("input", key)
+            for key in self.net.output_head_widths:
+                self._load_shard("output", key)
         self.version = int(meta.get("version", 0))
         self.train_history = list(meta.get("train_history", []))
         known = set(self.net._vertex_order)
@@ -733,7 +1102,12 @@ class RouterService:
         }
         # Optional key so pre-ledger meta files load clean; no format bump (a bump stales every router dir).
         self.step_usage_totals = {name: [float(value) for value in values] for name, values in (meta.get("step_usage_totals") or {}).items() if name in known}
-        self.net.sync_with_library(self.library)  # append anything admitted since the last save
+        self.route_epoch = int(meta.get("route_epoch", 0))
+        self.route_life = {name: int(value) for name, value in (meta.get("route_life") or {}).items() if name in known}
+        for name in known:
+            self.route_life.setdefault(name, self.route_patience_tasks)
+        self.evicted = {str(key): {str(name): int(value) for name, value in record.items()} for key, record in (meta.get("evicted") or {}).items()}
+        self.sync()  # append admissions and revive entries with newer external-use evidence
 
 
 @dataclass
@@ -745,6 +1119,7 @@ class RoutedStrategy:
     d_model: int = 64
     top_k: int = 2
     max_steps: int = 4
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
     train_steps: int = 200
     lr: float = 0.003
     weight_decay: float = 0.0001
@@ -769,9 +1144,15 @@ class RoutedStrategy:
     ponder_epsilon: float = 0.01
     ponder_cost: float = 0.001
     edge_bias: bool = False
+    lazy_residency: bool = True
+    lifecycle_enabled: bool = False
+    route_patience_tasks: int = 24
+    route_activity_floor: float = 0.01
+    route_traffic_decay: float = 0.95
     name: str = "routed"
     service: RouterService | None = None
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
+    _last_distill_resource_metrics: dict[str, float] = field(default_factory=dict)
 
     def _service(self, library: ModuleLibrary) -> RouterService:
         if self.service is None:
@@ -780,6 +1161,7 @@ class RoutedStrategy:
                 d_model=self.d_model,
                 top_k=self.top_k,
                 max_steps=self.max_steps,
+                max_inline_depth=self.max_inline_depth,
                 adapter_rank=self.adapter_rank,
                 expert_ablation=self.expert_ablation,
                 halting=self.halting,
@@ -789,6 +1171,11 @@ class RoutedStrategy:
                 persist_dir=(Path(self.library_dir) / "router") if self.persist else None,
                 persist_strict=self.persist_strict,
                 image_dir=Path(self.library_dir) / "images",  # overmind.png lands beside the entry renders
+                lazy_residency=self.lazy_residency,
+                lifecycle_enabled=self.lifecycle_enabled,
+                route_patience_tasks=self.route_patience_tasks,
+                route_activity_floor=self.route_activity_floor,
+                route_traffic_decay=self.route_traffic_decay,
             )
         return self.service
 
@@ -817,7 +1204,13 @@ class RoutedStrategy:
             # Nothing to route over: a "solve" here would be pure adapter memorization that leaves
             # no trace in the DSL. Fall straight through to the evolutionary strategies, which is
             # what populates the vertex set in the first place.
-            return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"routed_no_experts": 1.0})
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"routed_no_experts": 1.0},
+                strategy_metrics=dict(service.last_lifecycle_metrics),
+            )
         io = task_io(task)
         input_key = net.ensure_input_adapter(io["inputs"][0]["signature"], io["inputs"][0]["width"])
         head_key = net.ensure_output_head(io["output"]["signature"], io["output"]["width"])
@@ -826,34 +1219,51 @@ class RoutedStrategy:
 
         zero_shot_metrics = evaluate(view, spec.encoded, spec.encoder)
         zero_shot_metric = runtime.metric_of(self._metrics_view(zero_shot_metrics))
-        if self.zero_shot_accept and zero_shot_metric >= runtime.accept_threshold:
+        if self.zero_shot_accept and runtime.accepted(self._metrics_view(zero_shot_metrics)) and not runtime.should_shutdown():
             service.record_traffic()  # once per task, from its final evaluation's gate decisions
             return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
-        steps_used = self._train(view, spec, runtime)
-        metrics = evaluate(view, spec.encoded, spec.encoder)
+        allocated_generations = max(0, min(int(budget), max(0, self.generation_cost)))
+        step_cap = self._step_cap(allocated_generations)
+        steps_used = self._train(view, spec, runtime, step_cap=step_cap) if step_cap > 0 else 0
+        metrics = evaluate(view, spec.encoded, spec.encoder) if steps_used > 0 else dict(zero_shot_metrics)
         metric = runtime.metric_of(self._metrics_view(metrics))
         service.record_traffic()  # once per task, from its final evaluation's gate decisions
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
-        if metric >= runtime.accept_threshold:
-            return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost)
-        return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost, runtime=runtime)
+        accepted = runtime.accepted(self._metrics_view(metrics))
+        generations_used = self._generations_for_steps(steps_used, allocated_generations)
+        if accepted and not runtime.should_shutdown():
+            return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used)
+        return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
-    def _train(self, view: RoutedTaskView, spec: CompTaskSpec, runtime: Any) -> int:
+    def _step_cap(self, allocated_generations: int) -> int:
+        if allocated_generations <= 0 or self.train_steps <= 0 or self.generation_cost <= 0:
+            return 0
+        return min(self.train_steps, math.ceil(self.train_steps * allocated_generations / self.generation_cost))
+
+    def _generations_for_steps(self, steps_used: int, allocated_generations: int) -> int:
+        if steps_used <= 0 or self.train_steps <= 0 or self.generation_cost <= 0:
+            return 0
+        return min(allocated_generations, math.ceil(steps_used * self.generation_cost / self.train_steps))
+
+    def _train(self, view: RoutedTaskView, spec: CompTaskSpec, runtime: Any, *, step_cap: int) -> int:
         from ardevo.evaluation import evaluate, support_loss
 
         trainable = [parameter for parameter in view.net.parameters() if parameter.requires_grad]
         if not trainable:
             return 0
         optimizer = torch.optim.Adam(trainable, lr=self.lr, weight_decay=self.weight_decay)
-        milestone = max(1, self.train_steps // 4)
+        milestone = max(1, step_cap // 4)
         steps_run = 0
-        for step in range(self.train_steps):
+        for step in range(step_cap):
+            if runtime.should_stop():
+                break
             optimizer.zero_grad()
             loss = support_loss(view, spec.encoded) + self.load_balance_weight * view.net.last_aux_loss
             if not torch.isfinite(loss):
                 break  # the `gradient` op's non-finite bail: keep the last finite state
+            self._sync_optimizer_parameters(optimizer, view.net)
             loss.backward()
             optimizer.step()
             steps_run = step + 1
@@ -876,8 +1286,18 @@ class RoutedStrategy:
         optimizer.zero_grad()
         loss = support_loss(replay_view, encoded)
         if torch.isfinite(loss):
+            self._sync_optimizer_parameters(optimizer, net)
             loss.backward()
             optimizer.step()
+
+    @staticmethod
+    def _sync_optimizer_parameters(optimizer: torch.optim.Optimizer, net: RoutedNet) -> None:
+        """Add parameters materialized by the just-finished lazy forward before its backward."""
+
+        known = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
+        activated = [parameter for parameter in net.parameters() if parameter.requires_grad and id(parameter) not in known]
+        if activated:
+            optimizer.add_param_group({"params": activated})
 
     def _remember_for_replay(self, spec: CompTaskSpec, input_key: str, head_key: str, support_input: torch.Tensor) -> None:
         if self.replay_tasks <= 0:
@@ -908,13 +1328,15 @@ class RoutedStrategy:
             return self._result(task, service, view, metrics, metric, zero_shot=zero_shot, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
         pathway = self._dominant_pathway(view)
+        self._last_distill_resource_metrics = {}
         assessed = self._verify_distilled(pathway, spec, runtime) if pathway else None
         distilled_metric = runtime.metric_of(assessed) if assessed is not None else 0.0
-        if assessed is not None and distilled_metric >= runtime.accept_threshold:
+        if assessed is not None and runtime.accepted(assessed):
             fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(assessed.comp))
             task_embed = view.net.task_embedding(view.support_input, view.input_key, view.head_key)
             service.note_pending_embedding(fingerprint, task_embed)
             stamped = dict(assessed.metrics)
+            stamped.update(self._last_distill_resource_metrics)
             stamped["routed_metric"] = float(metric)
             stamped["routed_zero_shot_metric"] = float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0))
             stamped["routed_steps_used"] = float(steps_used)
@@ -923,7 +1345,7 @@ class RoutedStrategy:
             service.record_task(
                 {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": True}
             )
-            service.save()
+            service.checkpoint_and_evict()
             return StrategyResult(
                 strategy=self.name,
                 metric=float(distilled_metric),
@@ -931,19 +1353,48 @@ class RoutedStrategy:
                 champion_comp=assessed,
                 champion_metrics=stamped,
                 size_metrics=comp_size_metrics(assessed.comp),
+                resource_metrics=dict(self._last_distill_resource_metrics),
+                strategy_metrics={
+                    **service.last_lifecycle_metrics,
+                    "router_score": float(metric),
+                    "distilled_score": float(distilled_metric),
+                    "distillation_gap": float(metric - distilled_metric),
+                    "handoff_count": 0.0,
+                },
             )
 
-        # Adapter bypass or an unverifiable pathway: what the system can KEEP is the metric that
-        # counts, so this reports as a miss and the ladder escalates to the evolutionary strategies.
-        stamped = dict(metrics)
+        # Adapter bypass or a pathway below the solve bar: what the system can KEEP is the metric
+        # that counts, so this reports as a miss and the ladder escalates. If assembly succeeded,
+        # retain that real below-bar composition for loser ranking and the wall ledger; never expose
+        # the router adapter's winning support metrics as if they belonged to the distilled payload.
+        stamped = dict(assessed.metrics) if assessed is not None else {}
+        stamped.update(self._last_distill_resource_metrics)
         stamped["routed_undistillable"] = 1.0
         stamped["routed_metric"] = float(metric)
+        stamped["routed_distilled_metric"] = float(distilled_metric)
+        stamped["routed_zero_shot_metric"] = float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0))
         stamped["routed_steps_used"] = float(steps_used)
         service.record_task(
             {"task": task.meta.name, "rung": task.meta.rung, "zero_shot": zero_shot, "metric": float(metric), "distilled_metric": float(distilled_metric), "kept": False}
         )
-        logger.info("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
-        return StrategyResult(strategy=self.name, metric=float(distilled_metric), generations_used=generations_used, champion_metrics=stamped)
+        service.checkpoint_and_evict()
+        logger.debug("routed win on %s did not distill (router %.3f, distilled %.3f); escalating", task.meta.name, metric, distilled_metric)
+        return StrategyResult(
+            strategy=self.name,
+            metric=float(distilled_metric),
+            generations_used=generations_used,
+            champion_comp=assessed,
+            champion_metrics=stamped,
+            size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
+            resource_metrics=dict(self._last_distill_resource_metrics),
+            strategy_metrics={
+                **service.last_lifecycle_metrics,
+                "router_score": float(metric),
+                "distilled_score": float(distilled_metric),
+                "distillation_gap": float(metric - distilled_metric),
+                "handoff_count": 0.0,
+            },
+        )
 
     def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
         """Per routing step, the ORIGINAL library keys whose mean gate weight over the support batch
@@ -973,11 +1424,52 @@ class RoutedStrategy:
         the ordinary assess_composition rail. The returned assessment is the admittable artifact."""
         net = self._service(runtime.library).net
         widths = {vertex.original_key: (vertex.in_width, vertex.out_width) for vertex in net._vertices.values()}
+        loop = runtime.loop
+        previous_widths = [width for _signature, width in spec.input_specs]
+        glue_values = spec.output_width + sum(
+            glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for width in previous_widths
+        )
+        for step_keys in pathway:
+            layer_widths: list[int] = []
+            for key in step_keys:
+                in_width, out_width = widths[key]
+                glue_values += sum(
+                    glue_value_count(source_width, in_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for source_width in previous_widths
+                )
+                layer_widths.append(out_width)
+            previous_widths = layer_widths
+        glue_values += sum(glue_value_count(width, spec.output_width, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold) for width in previous_widths)
+        estimate = loop.assess_glue_resources(
+            glue_values,
+            stage="routed_distillation",
+            population_multiplicity=1,
+            concurrent_trainers=1,
+            device="cpu",
+        )
+        self._last_distill_resource_metrics = estimate.metrics("routed_distill_resource")
+        if not estimate.accepted:
+            logger.warning(
+                "routed distillation declined before allocation: candidate needs %s glue values (%s host, %s device; limit %s)",
+                f"{glue_values:,}",
+                format_bytes(estimate.host_required_bytes),
+                format_bytes(estimate.device_required_bytes),
+                f"{estimate.limit_values:,}",
+            )
+            self._last_distill_resource_metrics["routed_resource_declined"] = 1.0
+            return None
+
         tracker = runtime.state.comp_innovations
         rng = runtime.state.rng
-        loop = runtime.loop
         comp = minimal_composition(
-            spec.input_specs, spec.output_ref, spec.output_width, tracker, rng, glue_scale=loop.glue_scale, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold
+            spec.input_specs,
+            spec.output_ref,
+            spec.output_width,
+            tracker,
+            rng,
+            glue_scale=loop.glue_scale,
+            glue_rank=loop.glue_rank,
+            glue_rank_threshold=loop.glue_rank_threshold,
+            glue_storage=loop.glue_storage,
         )
         previous = [node_id for node_id in comp.input_ids if comp.nodes[node_id].ref != BIAS_REF]
         output_id = comp.output_ids[0]
@@ -989,14 +1481,26 @@ class RoutedStrategy:
                 comp.nodes[node_id] = CompNodeGene(node_id, CompNodeKind.MODULE, f"library:{key}", in_width, out_width)
                 for source in previous:
                     glue, rank = _glue_for(
-                        comp.nodes[source].out_width, in_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+                        comp.nodes[source].out_width,
+                        in_width,
+                        rng,
+                        glue_rank=loop.glue_rank,
+                        glue_rank_threshold=loop.glue_rank_threshold,
+                        glue_scale=loop.glue_scale,
+                        glue_storage=loop.glue_storage,
                     )
                     comp.edges.append(CompEdgeGene(source, node_id, True, tracker.innovation(source, node_id), glue, rank))
                 layer.append(node_id)
             previous = layer
         for source in previous:
             glue, rank = _glue_for(
-                comp.nodes[source].out_width, spec.output_width, rng, glue_rank=loop.glue_rank, glue_rank_threshold=loop.glue_rank_threshold, glue_scale=loop.glue_scale
+                comp.nodes[source].out_width,
+                spec.output_width,
+                rng,
+                glue_rank=loop.glue_rank,
+                glue_rank_threshold=loop.glue_rank_threshold,
+                glue_scale=loop.glue_scale,
+                glue_storage=loop.glue_storage,
             )
             comp.edges.append(CompEdgeGene(source, output_id, True, tracker.innovation(source, output_id), glue, rank))
         assessed = loop.assess_composition(comp, spec, runtime.state, train=True)
@@ -1027,30 +1531,40 @@ class RoutedStrategy:
             steps_used=steps_used,
             expert_usage=dict(view.net.last_gate_stats),
         )
-        if metric >= runtime.accept_threshold:
-            service.record_task(
-                {
-                    "task": task.meta.name,
-                    "rung": task.meta.rung,
-                    "zero_shot": zero_shot,
-                    "zero_shot_metric": solution.zero_shot_metric,
-                    "metric": float(metric),
-                    "steps": steps_used,
-                }
-            )
-            service.save()
+        accepted = runtime.accepted(self._metrics_view(metrics))
+        service.record_task(
+            {
+                "task": task.meta.name,
+                "rung": task.meta.rung,
+                "zero_shot": zero_shot,
+                "zero_shot_metric": solution.zero_shot_metric,
+                "metric": float(metric),
+                "steps": steps_used,
+                "kept": accepted,
+            }
+        )
+        service.checkpoint_and_evict()
         stamped = dict(metrics)
         stamped["routed_steps_used"] = float(steps_used)
-        return StrategyResult(strategy=self.name, metric=float(metric), generations_used=generations_used, champion_routed=solution, champion_metrics=stamped)
+        return StrategyResult(
+            strategy=self.name,
+            metric=float(metric),
+            generations_used=generations_used,
+            champion_routed=solution if (accepted or not self.distill) else None,
+            champion_metrics=stamped,
+            strategy_metrics={**service.last_lifecycle_metrics, "router_score": float(metric), "handoff_count": 0.0},
+        )
 
 
 def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
     table = config.get("orchestrator", {}).get("routed", {}) or {}
+    lifecycle = table.get("lifecycle", {}) or {}
     return RoutedStrategy(
         library_dir=str(config.get("orchestrator", {}).get("library_dir", "library")),
         d_model=int(table.get("d_model", 64)),
         top_k=int(table.get("top_k", 2)),
         max_steps=int(table.get("max_steps", 4)),
+        max_inline_depth=configured_max_inline_depth(config),
         train_steps=int(table.get("train_steps", 200)),
         lr=float(table.get("lr", 0.003)),
         weight_decay=float(table.get("weight_decay", 0.0001)),
@@ -1072,4 +1586,9 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         ponder_epsilon=float(table.get("ponder_epsilon", 0.01)),
         ponder_cost=float(table.get("ponder_cost", 0.001)),
         edge_bias=bool(table.get("edge_bias", False)),
+        lazy_residency=bool(table.get("lazy_residency", True)),
+        lifecycle_enabled=bool(lifecycle.get("enabled", False)),
+        route_patience_tasks=max(1, int(lifecycle.get("route_patience_tasks", 24))),
+        route_activity_floor=max(0.0, float(lifecycle.get("activity_floor", 0.01))),
+        route_traffic_decay=min(1.0, max(0.0, float(lifecycle.get("traffic_decay", 0.95)))),
     )

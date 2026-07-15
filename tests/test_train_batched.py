@@ -6,7 +6,7 @@ from ardevo.evaluation import support_loss
 from ardevo.evolution.evolver import TaskAdapter
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.train import gradient, gradient_batched, last_batch_stats
+from ardevo.evolution.train import gradient, gradient_batched, gradient_scheduled, gradient_scheduled_population, last_batch_stats
 from tests.test_substrate_batched import _mixed_activation_genome
 
 
@@ -40,6 +40,58 @@ def test_batched_training_matches_sequential(xor_adapter: TaskAdapter, linear_ge
         seq_by_key = {(c.in_id, c.out_id): c.weight for c in seq_genome.connections if c.enabled}
         bat_by_key = {(c.in_id, c.out_id): c.weight for c in bat_genome.connections if c.enabled}
         assert all(abs(seq_by_key[key] - bat_by_key[key]) < 1e-4 for key in seq_by_key)
+
+
+def test_scheduled_microbatches_match_sequential_schedule(xor_adapter: TaskAdapter, linear_genome: Genome, solving_genome: Genome) -> None:
+    genomes = [linear_genome, solving_genome, _mixed_activation_genome()]
+    schedule = {"steps": 31, "lr": 0.05, "warmup_fraction": 0.2, "final_lr_fraction": 0.17, "writeback": True}
+    sequential = [gradient_scheduled(genome, xor_adapter.decode(genome), xor_adapter.encoded, rng=random.Random(0), **schedule) for genome in genomes]
+    batched = gradient_scheduled_population(
+        list(genomes),
+        [xor_adapter.decode(genome) for genome in genomes],
+        xor_adapter.encoded,
+        rng=random.Random(0),
+        device="cpu",
+        microbatch_size=2,
+        **schedule,
+    )
+
+    assert last_batch_stats["microbatches"] == 2.0
+    assert last_batch_stats["largest_microbatch"] == 2.0
+    for (_seq_genome, seq_module), (_bat_genome, bat_module) in zip(sequential, batched):
+        seq_weights = seq_module.export_weights()
+        bat_weights = bat_module.export_weights()
+        assert seq_weights.keys() == bat_weights.keys()
+        assert max(abs(seq_weights[key] - bat_weights[key]) for key in seq_weights) < 1e-4
+
+
+def test_adaptive_microbatch_halves_after_oom(monkeypatch, xor_adapter: TaskAdapter, linear_genome: Genome, solving_genome: Genome) -> None:
+    from ardevo import substrate_batched
+
+    genomes = [linear_genome, solving_genome, _mixed_activation_genome()]
+    original_init = substrate_batched.BatchedGraphNet.__init__
+
+    def limited_init(self, nets, device=None) -> None:
+        if len(nets) > 1:
+            raise RuntimeError("CUDA out of memory")
+        original_init(self, nets, device=device)
+
+    monkeypatch.setattr(substrate_batched.BatchedGraphNet, "__init__", limited_init)
+    results = gradient_batched(
+        list(genomes),
+        [xor_adapter.decode(genome) for genome in genomes],
+        xor_adapter.encoded,
+        rng=random.Random(0),
+        steps=3,
+        lr=0.05,
+        writeback=False,
+        device="cpu",
+    )
+
+    assert len(results) == len(genomes)
+    assert last_batch_stats["oom_retries"] == 2.0
+    assert last_batch_stats["oom_fallbacks"] == 0.0
+    assert last_batch_stats["largest_microbatch"] == 1.0
 
 
 def test_padded_size_guard_falls_back_to_sequential(xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
@@ -87,6 +139,18 @@ def test_build_evolver_resolves_population_trainer(xor_adapter: TaskAdapter) -> 
     assert len(state.population) == 6
     assert all(item.metrics["support_loss"] >= 0.0 for item in state.population)
     assert max(item.fitness for item in state.population) > 0.0  # gradient training is doing work
+
+
+def test_scheduled_population_trainer_is_opt_in_for_existing_configs() -> None:
+    config = _config()
+    config["evolution"]["train"] = {"kind": "gradient_scheduled", "steps": 15, "lr": 0.05, "warmup_fraction": 0.2}
+    assert build_evolver(config).train_population_op is None
+
+    config["evolution"]["train"]["batched"] = True
+    evolver = build_evolver(config)
+    assert evolver.train_population_op is not None
+    assert getattr(evolver.train_population_op, "keywords", {})["warmup_fraction"] == 0.2
+    assert getattr(evolver.train_op, "keywords", {})["warmup_fraction"] == 0.2
 
 
 def test_assess_many_equals_sequential_assess(xor_adapter: TaskAdapter, linear_genome: Genome, solving_genome: Genome) -> None:

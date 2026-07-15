@@ -13,22 +13,24 @@ import math
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from multiprocessing.pool import Pool
 
     from ardevo.library import ModuleLibrary
+    from ardevo.topology import TopologyTabuSession
 
-from ardevo.dataset.icarus import EncodedTask, Level0Encoder
+from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.evaluate import standard as standard_evaluate
-from ardevo.evolution.fitness import FitnessAggregator
+from ardevo.evolution.fitness import FitnessAggregator, stamp_complexity_metrics
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import AdaptiveMutationPipeline, MutationContext, MutationPipeline
 from ardevo.evolution.novelty import NoveltyConfig, archive_insert, compute_descriptor, novelty_scores, probe_tensor
 from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_key
 from ardevo.evolution.speciation import SpeciesPlan
+from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
 
 
@@ -40,7 +42,7 @@ class Adapter(Protocol):
     while keeping the same population.
     """
 
-    encoded: EncodedTask
+    encoded: Any
     n_inputs: int
     n_outputs: int
 
@@ -53,7 +55,7 @@ class Adapter(Protocol):
 class TaskAdapter:
     """Injects task specifics (encoded tensors, widths) so the Evolver stays task-agnostic."""
 
-    encoded: EncodedTask
+    encoded: Any
     encoder: Level0Encoder
     n_inputs: int
     n_outputs: int
@@ -61,14 +63,19 @@ class TaskAdapter:
     # the same probe that stamps geometry coordinates); None elsewhere. Descriptor axes carry no
     # per-axis lengths, so grid-aware evaluate ops (augmented_vote) read the shape from here.
     grid_shape: tuple[int, ...] | None = None
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
 
     def decode(self, genome: Genome) -> GraphNet:
         # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
         # same static input re-applied with state carried across passes); steps == 1 keeps the exact
         # feedforward path, so the flat search is unchanged until refinement is actually evolved.
-        return decode_module(genome, self.n_inputs, self.n_outputs)
+        return decode_module(genome, self.n_inputs, self.n_outputs, max_inline_depth=self.max_inline_depth)
 
     def evaluate(self, module: SubstrateModule) -> dict[str, float]:
+        from ardevo.structured import StructuredGridEncoded, evaluate_structured_grid
+
+        if isinstance(self.encoded, StructuredGridEncoded):
+            return evaluate_structured_grid(module, self.encoded, self.encoder)
         return evaluate(module, self.encoded, self.encoder)
 
 
@@ -119,6 +126,8 @@ class EvolverState:
     # Rolling novelty archive ([evolution.novelty]): per-task by construction, since this state is
     # born fresh per solve and task attempts are checkpoint-atomic (no serialization needed).
     novelty_archive: list[tuple[float, ...]] = field(default_factory=list)
+    # Transient refinement signal: no unseen offspring survived topology deduplication.
+    topology_exhausted: bool = False
 
 
 @dataclass
@@ -140,8 +149,10 @@ class Evolver:
     # Optional population-level trainer (e.g. gradient_batched): assess_many routes a whole
     # generation through one tensor program instead of candidate-by-candidate training.
     train_population_op: Callable[..., list[tuple[Genome, SubstrateModule]]] | None = None
+    execution_mode: str = "serial"
     assess_workers: int = 0
     library_dir: str = "library"
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
     # The LIVE library handle for library-reading mutators (add_library_module / add_macro_node), so
     # they sample the SAME entries the decode-time macro resolver resolves. Left None on the pure
     # flat path; the orchestrator's direct strategy sets it to the attached library. Without this the
@@ -161,9 +172,17 @@ class Evolver:
     # Empty (the default) = off, byte-identical.
     halving_stages: list[float] = field(default_factory=list)
     halving_keep: float = 0.5
+    # Set only around post-solve refinement. Ordinary unsolved evolution leaves this None.
+    topology_tabu: "TopologyTabuSession | None" = None
 
     def _context(self, state: EvolverState) -> MutationContext:
-        return MutationContext(innovations=state.innovations, activations=self.activations, default_activation=self.default_activation, library=self.library)
+        return MutationContext(
+            innovations=state.innovations,
+            activations=self.activations,
+            default_activation=self.default_activation,
+            library=self.library,
+            max_inline_depth=self.max_inline_depth,
+        )
 
     def assess(self, genome: Genome, adapter: Adapter, state: EvolverState) -> Assessed:
         """Decode (repairing cycles), train the weights, evaluate, and score one genome."""
@@ -173,7 +192,7 @@ class Evolver:
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
         metrics = self.evaluate_op(genome, module, adapter)
-        return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+        return Assessed(genome, metrics, self._score(genome, metrics), module)
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
@@ -182,7 +201,11 @@ class Evolver:
         except (ValueError, KeyError):
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         metrics = self.evaluate_op(genome, module, adapter)
-        return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+        return Assessed(genome, metrics, self._score(genome, metrics), module)
+
+    def _score(self, genome: Genome, metrics: dict[str, float]) -> float:
+        stamp_complexity_metrics(genome, metrics, self.library)
+        return self.fitness(genome, metrics)
 
     def assess_many(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
         """Assess a batch of genomes, training them all in one tensor program when a population
@@ -215,7 +238,7 @@ class Evolver:
                 continue
             genome, trained_module = next(trained)
             metrics = self.evaluate_op(genome, trained_module, adapter)
-            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), trained_module))
+            assessed.append(Assessed(genome, metrics, self._score(genome, metrics), trained_module))
         return assessed
 
     def _assess_hybrid(self, genomes: list[Genome], decoded: list[SubstrateModule | None], adapter: Adapter, state: EvolverState) -> list[Assessed]:
@@ -275,7 +298,7 @@ class Evolver:
             # re-decode would score untrained weights; evaluate inline exactly like the batched path.
             for index, (genome, module) in zip(batch_indices, trained_pairs):
                 metrics = self.evaluate_op(genome, module, adapter)
-                results[index] = Assessed(genome, metrics, self.fitness(genome, metrics), module)
+                results[index] = Assessed(genome, metrics, self._score(genome, metrics), module)
 
         if serial_async is not None:
             for index, (genome, metrics, fitness) in zip(serial_indices, serial_async.get()):
@@ -419,7 +442,20 @@ class Evolver:
         if seeded_front is not None:
             for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
                 genomes[index] = genome
+        if self.topology_tabu is not None:
+            from ardevo.evolution.genome import genome_to_dict
+
+            # One warm seed is the assessed anchor selection needs. Every other initial candidate
+            # crosses the same pre-evaluation identity gate as offspring; minimal populations often
+            # differ only in weights, so assessing all of them was the largest remaining repeat.
+            filtered = genomes[:1]
+            filtered.extend(genome for genome in genomes[1:] if self.topology_tabu.reserve("module", genome_to_dict(genome)))
+            genomes = filtered
         state.population = self.assess_many(genomes, adapter, state)
+        if self.topology_tabu is not None:
+            for item in state.population:
+                self.topology_tabu.observe_evaluated("module", genome_to_dict(item.genome))
+            self.topology_tabu.commit()  # durable only after the batch finished assessment
         self._apply_novelty(state.population, state, adapter)
         state.best = max(state.population, key=lambda item: item.fitness)
         self.species_history = state.species_history
@@ -468,6 +504,9 @@ class Evolver:
         state: EvolverState,
         adapter: Adapter,
     ) -> list[Assessed]:
+        from ardevo.evolution.genome import genome_to_dict
+
+        state.topology_exhausted = False
         genomes = [item.genome for item in assessed]
         fitnesses = [item.fitness for item in assessed]
         # Pareto mode: vectors are (re)computed here, not at the Assessed construction sites, so the
@@ -509,13 +548,30 @@ class Evolver:
             else:
                 parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring)
             for k in range(plan.n_offspring):
-                child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
-                child = self.mutation(child, ctx, rng=state.rng)
+                child: Genome | None = None
+                attempts = self.topology_tabu.retry_limit + 1 if self.topology_tabu is not None else 1
+                for _attempt in range(attempts):
+                    candidate = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
+                    candidate = self.mutation(candidate, ctx, rng=state.rng)
+                    if self.topology_tabu is None or self.topology_tabu.reserve("module", genome_to_dict(candidate)):
+                        child = candidate
+                        break
+                if child is None:
+                    assert self.topology_tabu is not None
+                    self.topology_tabu.retry_exhaustions += 1
+                    next_assessed.append(members[k % len(members)])
+                    continue
                 child_slots.append(len(next_assessed))
                 next_assessed.append(None)
                 children.append(child)
 
-        for slot, item in zip(child_slots, self.assess_many(children, adapter, state)):
+        if self.topology_tabu is not None and child_slots == [] and any(plan.n_offspring > 0 for plan in plans):
+            state.topology_exhausted = True
+            self.topology_tabu.exhausted = True
+        assessed_children = self.assess_many(children, adapter, state) if children else []
+        if self.topology_tabu is not None:
+            self.topology_tabu.commit()  # a later crash must not cause this generation to repeat
+        for slot, item in zip(child_slots, assessed_children):
             next_assessed[slot] = item
         next_population = [item for item in next_assessed if item is not None]
         self._apply_novelty(next_population, state, adapter)
@@ -636,6 +692,7 @@ def _assess_in_worker(
         return genome, _floored_metrics(), _FLOOR_FITNESS
     genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
     metrics = evaluate_op(genome, module, adapter)
+    stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)
 
 
@@ -656,4 +713,5 @@ def _evaluate_in_worker(
     except (ValueError, KeyError):
         return genome, _floored_metrics(), _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
+    stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)

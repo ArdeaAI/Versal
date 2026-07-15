@@ -22,12 +22,15 @@ if TYPE_CHECKING:
 # value (the import happens lazily inside _create_task, where the task is actually built).
 HAS_CLEARML = importlib.util.find_spec("clearml") is not None
 
-VALID_MACHINE_ENVS = {"local", "LatticeCPU", "LatticeCUDA", "MonadCPU", "MonadMetal"}
+VALID_MACHINE_ENVS = {"local", "LatticeCPU", "LatticeCUDA", "MonadCPU", "MonadMetal", "ClusterCUDA"}
 QUEUE_BY_MACHINE = {
     "LatticeCPU": "lattice_cpu",
     "LatticeCUDA": "lattice_cuda",
     "MonadCPU": "local",
     "MonadMetal": "local",
+    # Generic rented clusters run the current process locally under their own launcher (Slurm,
+    # Kubernetes, or a shell).  ClearML records telemetry but must not enqueue a second remote job.
+    "ClusterCUDA": "local",
 }
 logger = Logger.get_logger()
 
@@ -86,6 +89,10 @@ class Pipeline:
             task_type=Task.TaskTypes.custom,
             reuse_last_task_id=False,
             output_uri=self.config.get("output_uri", False),
+            # Router checkpoints/shards are ArdEVO state, not user-selectable model inputs.
+            # ClearML's PyTorch patch otherwise registers every lazy torch.load() and repeatedly
+            # connects identically named shards, making remote input-model selection ambiguous.
+            auto_connect_frameworks={"pytorch": False},
         )
         self.task.connect(self.config.get("hyperparameters", {}))
         branch = get_current_branch()

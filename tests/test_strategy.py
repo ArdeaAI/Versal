@@ -9,7 +9,7 @@ from ardevo.evolution.genome import InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import build_loop
 from ardevo.library import MODULE, task_io
-from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, StrategyResult, StrategyRuntime
+from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
 from tests.test_orchestrator import _orchestrator
@@ -53,6 +53,39 @@ def test_verification_reassembles_against_current_state(xor_task: Task) -> None:
     assert all(abs(fresh_weights[key] - expected[key]) < 1e-6 for key in fresh_weights)
 
 
+def test_composition_declines_oversized_initial_glue_before_run_task(monkeypatch, xor_task: Task) -> None:
+    loop = build_loop(_loop_config())
+    state = loop.fresh_state(random.Random(0))
+    spec = _spec(xor_task)
+    expected_values = spec.output_width + spec.n_inputs * spec.output_width
+    loop.max_initial_glue_values = expected_values - 1
+    assess_resources = loop.assess_glue_resources
+    resource_devices: list[str | None] = []
+
+    def capture_resources(*args, **kwargs):
+        resource_devices.append(kwargs.get("device"))
+        return assess_resources(*args, **kwargs)
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("the allocation guard must run before loop.run_task")
+
+    monkeypatch.setattr(loop, "assess_glue_resources", capture_resources)
+    monkeypatch.setattr(loop, "run_task", unexpected_run)
+    result = CompositionStrategy()(xor_task, spec, _runtime_for(loop, state, threshold=0.95), budget=10)
+
+    assert result.generations_used == 0
+    assert result.champion_comp is None
+    assert result.champion_metrics["declined_composition_glue_values"] == float(expected_values)
+    assert result.resource_metrics["composition_resource_declined"] == 1.0
+    assert resource_devices == ["cpu"]
+
+
+def test_composition_glue_limit_builds_from_config() -> None:
+    config = _loop_config()
+    config["evolution"]["composition"]["max_initial_glue_values"] = 123
+    assert build_loop(config).max_initial_glue_values == 123
+
+
 def test_evolve_runs_strategies_in_order_with_budget_carry(tmp_path: Path, xor_task: Task) -> None:
     calls: list[tuple[str, int]] = []
 
@@ -91,6 +124,50 @@ def test_evolve_runs_strategies_in_order_with_budget_carry(tmp_path: Path, xor_t
     assert calls == [("low", 3), ("high", 3)]
     attempt = orchestrator.attempts[-1]
     assert attempt.outcome == "evolved" and attempt.strategy == "stub_high" and attempt.generations == 2
+
+
+def test_metric_only_routed_miss_escalates_to_an_admissible_strategy(tmp_path: Path, xor_task: Task) -> None:
+    calls: list[str] = []
+
+    @EVOLVE_STRATEGY.register("stub_undistillable_routed")
+    def _build_undistillable(config: dict):
+        def run(task, spec, runtime, *, budget, seed_comps=None) -> StrategyResult:
+            calls.append("routed")
+            return StrategyResult(
+                strategy="routed",
+                metric=0.2,
+                generations_used=1,
+                champion_metrics={"support_accuracy": 1.0, "query_accuracy": 1.0, "routed_undistillable": 1.0},
+            )
+
+        return run
+
+    @EVOLVE_STRATEGY.register("stub_after_routed")
+    def _build_after_routed(config: dict):
+        def run(task, spec: CompTaskSpec, runtime, *, budget, seed_comps=None) -> StrategyResult:
+            calls.append("composition")
+            from ardevo.evolution.composition import minimal_composition
+
+            comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, runtime.state.comp_innovations, runtime.state.rng)
+            metrics = {"support_accuracy": 1.0, "support_loss": 0.0, "query_accuracy": 1.0, "query_loss": 0.0}
+            champion = AssessedComposition(comp=comp, metrics=metrics, fitness=1.0, net=None)
+            return StrategyResult(strategy="composition", metric=1.0, generations_used=1, champion_comp=champion, champion_metrics=metrics)
+
+        return run
+
+    table = {
+        "evolve": ["stub_undistillable_routed", "stub_after_routed"],
+        "evolve_budget": {"stub_undistillable_routed": 1.0, "stub_after_routed": 1.0},
+        "budgets": {"depth0": 4},
+        "decompose": [],
+    }
+    orchestrator = _orchestrator(tmp_path, table=table)
+
+    solution = orchestrator.solve(xor_task)
+
+    assert calls == ["routed", "composition"]
+    assert solution is not None and solution.entry_type == "composition"
+    assert orchestrator.attempts[-1].strategy == "composition"
 
 
 def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Path, xor_task: Task) -> None:
@@ -175,6 +252,46 @@ def test_seed_state_without_seeded_front_is_unchanged(xor_adapter) -> None:
     assert [genome_to_dict(item.genome) for item in baseline.population] == [genome_to_dict(item.genome) for item in explicit_none.population]
 
 
+def test_refinement_filters_weight_only_initial_population_before_assessment(tmp_path: Path, xor_task: Task, xor_adapter, solving_genome) -> None:
+    from ardevo.evolution.registry import build_evolver
+    from ardevo.library import ModuleLibrary, graft
+    from ardevo.topology import TopologyTabuSession, TopologyTabuStore
+
+    library = ModuleLibrary(tmp_path / "lib")
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={})
+    entry = library.load(key)
+    store = TopologyTabuStore(library.root / "topology_tabu.sqlite3")
+
+    def run(context: str):
+        evolver = build_evolver(_loop_config())
+        session = TopologyTabuSession(store, context, library)
+        session.prime(MODULE, entry.payload)
+        evolver.topology_tabu = session
+        batch_sizes: list[int] = []
+        assess_many = evolver.assess_many
+
+        def capture(genomes, adapter, state):
+            batch_sizes.append(len(genomes))
+            return assess_many(genomes, adapter, state)
+
+        setattr(evolver, "assess_many", capture)
+        state = evolver.seed_state(xor_adapter, random.Random(0), seeded_front=lambda tracker: [graft(entry, tracker)])
+        return batch_sizes, session, evolver, state
+
+    first_batches, first, _first_evolver, _first_state = run("same-task-lineage-config")
+    assert first_batches == [2]  # warm incumbent plus one minimal architecture; six reweighted clones skipped
+    first.commit()
+    repeated_batches, repeated, repeated_evolver, repeated_state = run("same-task-lineage-config")
+    assert repeated_batches == [1]  # the already-tested minimal architecture is skipped persistently
+    assert repeated.duplicates == 7
+
+    setattr(repeated_evolver, "crossover_op", lambda parent_a, parent_b, *, rng: parent_a.clone())
+    setattr(repeated_evolver, "mutation", lambda genome, context, *, rng: genome)
+    repeated_evolver.advance(repeated_state, xor_adapter)
+    assert repeated_batches == [1]  # retries were rejected before another assessment batch
+    assert repeated_state.topology_exhausted and repeated.exhausted
+
+
 def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Path, xor_task: Task, solving_genome) -> None:
     from ardevo.orchestrator import comp_task_spec
 
@@ -197,6 +314,48 @@ def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Pa
     strategy = dict(orchestrator.strategies)["direct"]
     result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
     assert result.seed_metric is None
+
+
+def test_grammar_strategy_seeds_compatible_program_into_direct(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from ardevo import grammar as grammar_module
+    from ardevo.library import ModuleLibrary
+
+    loop = build_loop(_loop_config())
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    state = loop.fresh_state(random.Random(0))
+    runtime = _runtime_for(loop, state, threshold=0.9)
+    captured: list = []
+
+    def direct(task, spec, runtime, *, budget, seed_genomes=None, **_kwargs):
+        captured.extend(seed_genomes or [])
+        return StrategyResult("direct", 1.0, 1, champion_genome=solving_genome, champion_metrics={"support_accuracy": 1.0})
+
+    strategy = GrammarStrategy(direct=direct)
+    strategy._grammar = SimpleNamespace(productions=[object()])
+    strategy._library_keys = tuple(runtime.library.keys())
+    monkeypatch.setattr(strategy, "_programs", lambda _runtime: [object()])
+    monkeypatch.setattr(grammar_module, "compile_program", lambda *_args, **_kwargs: solving_genome)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=4)
+
+    assert result.strategy == "grammar" and result.generations_used == 1
+    assert captured == [solving_genome]
+
+
+def test_grammar_strategy_is_zero_cost_before_independent_motifs_exist(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.library import ModuleLibrary
+
+    loop = build_loop(_loop_config())
+    loop.attach_library(ModuleLibrary(tmp_path / "empty"))
+    state = loop.fresh_state(random.Random(0))
+    strategy = GrammarStrategy(direct=lambda *_args, **_kwargs: StrategyResult("direct", 0.0, 0))
+
+    result = strategy(xor_task, _spec(xor_task), _runtime_for(loop, state, threshold=0.9), budget=4)
+
+    assert result.generations_used == 0 and result.metric == 0.0
+    assert result.champion_metrics["grammar_productions"] == 0.0
 
 
 def test_lookup_quick_evaluates_temporal_modules(tmp_path: Path, temporal_task: Task) -> None:

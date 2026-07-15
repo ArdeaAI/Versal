@@ -74,8 +74,13 @@ def _spec(task: Task) -> CompTaskSpec:
 def test_build_loop_resolves_kinds() -> None:
     default = build_loop({"evolution": {}, "fitness": {"components": []}})
     assert isinstance(default, HierarchicalLoop) and isinstance(default.evolver, Evolver)
+    assert default.max_inline_depth == default.evolver.max_inline_depth == 4
     hierarchical = build_loop(_config())
     assert isinstance(hierarchical, HierarchicalLoop)
+    configured = _config()
+    configured["evolution"]["composition"]["max_inline_depth"] = 7
+    deep = build_loop(configured)
+    assert deep.max_inline_depth == deep.evolver.max_inline_depth == 7
     for gone in ("flat", "nonsense"):
         with pytest.raises(KeyError):
             build_loop({"evolution": {"loop": gone}})
@@ -101,6 +106,32 @@ def test_run_task_end_to_end(decomposable_task: Task) -> None:
     assert "support_accuracy" in best.metrics
     assert state.generation == 3 and len(history) == 3
     assert len(state.module_species_history) >= 2  # seed speciation + at least one module advance
+
+
+def test_refinement_filters_repeated_initial_compositions_before_glue_fit(tmp_path: Path, xor_task: Task) -> None:
+    from ardevo.evolution.composition import comp_to_dict
+    from ardevo.topology import TopologyTabuSession, TopologyTabuStore
+
+    library = ModuleLibrary(tmp_path / "lib")
+    loop = build_loop(_config())
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    spec = _spec(xor_task)
+    seed = _live_comp(sorted(state.species_champions)[0], 2, 1)
+    session = TopologyTabuSession(TopologyTabuStore(library.root / "topology_tabu.sqlite3"), "same-task-lineage-config", library)
+    session.prime("composition", comp_to_dict(seed))
+    loop.topology_tabu = session
+    batch_sizes: list[int] = []
+    assess_all = loop._assess_all
+
+    def capture(comps, task_spec, loop_state, *, train):
+        batch_sizes.append(len(comps))
+        return assess_all(comps, task_spec, loop_state, train=train)
+
+    loop._assess_all = capture
+    loop.run_task(spec, state, budget=0, seed_comps=[seed])
+    assert batch_sizes == [2]  # warm seed plus one minimal graph; four glue-only clones skipped
+    assert session.duplicates == 4
 
 
 def _cyclic_module_genome() -> Genome:

@@ -1,0 +1,5 @@
+# P0: library hits remain zero-cost and are never refined.
+extends = "base.toml"
+
+[orchestrator.refine]
+budget_k = 0

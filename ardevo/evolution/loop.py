@@ -14,11 +14,12 @@ silently shredding a module other tasks rely on.
 """
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Callable, cast
 
-from ardevo.dataset.icarus import EncodedTask, Level0Encoder
+from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.composition import (
     AssemblyContext,
@@ -29,16 +30,21 @@ from ardevo.evolution.composition import (
     CompositionGenome,
     RefSpec,
     assemble,
+    comp_to_dict,
     minimal_composition,
     writeback_composition,
 )
 from ardevo.evolution.evolver import Evolver, get_shared_pool, get_worker_library
+from ardevo.evolution.fitness import stamp_complexity_metrics
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from ardevo.evolution.mutation import MutationContext
 from ardevo.evolution.registry import Registry, _bind_prefixed, build_evolver
 from ardevo.evolution.train import _writeback
 from ardevo.library import MODULE, ModuleLibrary
+from ardevo.reference_depth import configured_max_inline_depth
+from ardevo.utils.device import resolve_compute_device
 from ardevo.utils.logging import Logger
+from ardevo.utils.resources import ResourceEstimate, ResourcePolicy
 
 logger = Logger.get_logger()
 
@@ -77,6 +83,7 @@ class HierarchicalState:
     module_species_history: list[dict[int, int]] = field(default_factory=list)
     repaired_refs: int = 0
     absorbed_keys: list[str] = field(default_factory=list)  # library entries already grafted into the pool
+    topology_exhausted: bool = False  # transient; reset for each composition refinement
 
 
 @dataclass
@@ -91,11 +98,11 @@ class AssessedComposition:
 class CompTaskSpec:
     """Everything the loop needs to evolve compositions against one task."""
 
-    encoded: EncodedTask
+    encoded: Any
     encoder: Level0Encoder
     n_inputs: int
     input_specs: list[tuple[str, int]]  # (bank signature, width) per INPUT node
-    bank_columns: dict[str, list[int]]
+    bank_columns: dict[str, Sequence[int]]
     output_ref: str
     output_width: int
     # The task's full structural I/O contract (library.task_io), computed once per solve so the
@@ -146,6 +153,19 @@ def assess_composition_pure(
         comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False))
         comp = writeback_composition(comp, net)
     metrics = evaluate_op(comp, net, _CompositionEvalAdapter(spec))
+    stamp_complexity_metrics(comp, metrics, library)
+    if library is not None:
+        from ardevo.library import MODULE, expanded_payload_complexity
+
+        live_cost = 0
+        for node_id in comp.module_ids:
+            reference = comp.nodes[node_id].ref
+            if not reference.startswith("live:"):
+                continue
+            genome = species_champions.get(int(reference.removeprefix("live:")))
+            if genome is not None:
+                live_cost += expanded_payload_complexity(MODULE, genome_to_dict(genome), library)
+        metrics["expanded_complexity"] += float(live_cost)
     return AssessedComposition(comp=comp, metrics=metrics, fitness=fitness(comp, metrics), net=net)
 
 
@@ -191,6 +211,9 @@ class HierarchicalLoop:
     glue_scale: float | None
     glue_rank: int
     glue_rank_threshold: int
+    glue_storage: str
+    resource_policy: ResourcePolicy
+    resource_device: str
     # -1 exposes every library entry to comp mutations (glue adapts any widths); >= 0 keeps only
     # entries within that many columns of the task's I/O or the module port shape, which focuses
     # the catalog once the library grows large.
@@ -205,14 +228,40 @@ class HierarchicalLoop:
     decay: float
     offspring_discount: float
     seed_fraction: float
+    # Hard pre-allocation guard for tuple-backed composition genes. Zero disables it. The estimate
+    # uses the exact dense/factored formula and runs before population construction.
+    max_initial_glue_values: int = 0
     # At each lookup miss the orchestrator absorbs up to this many NEW exact-port library entries
     # into the module pool (grafted over the worst non-champion members): found structures become
     # building blocks IN the soup, mid-run, not just at fresh_state.
     absorb_top_k: int = 0
     library: ModuleLibrary | None = None
+    # Set only around post-solve composition refinement.
+    topology_tabu: Any | None = None
 
     def attach_library(self, library: ModuleLibrary | None) -> None:
         self.library = library
+
+    def assess_glue_resources(
+        self,
+        glue_values: int,
+        *,
+        stage: str,
+        population_multiplicity: int = 1,
+        concurrent_trainers: int = 1,
+        storage: str | None = None,
+        fixed_limit: int | None = None,
+        device: str | None = None,
+    ) -> ResourceEstimate:
+        return self.resource_policy.assess_glue(
+            glue_values,
+            stage=stage,
+            storage=storage or self.glue_storage,
+            device=device or self.resource_device,
+            fixed_limit=self.max_initial_glue_values if fixed_limit is None else fixed_limit,
+            population_multiplicity=population_multiplicity,
+            concurrent_trainers=concurrent_trainers,
+        )
 
     # --- state ------------------------------------------------------------------------------------
 
@@ -225,7 +274,12 @@ class HierarchicalLoop:
             from ardevo.library import graft
 
             wanted = int(self.seed_fraction * self.module_pop_size)
-            for index, entry in enumerate(self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports, limit=wanted)):
+            entries = [
+                entry
+                for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
+                if self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+            ][:wanted]
+            for index, entry in enumerate(entries):
                 genomes[index] = graft(entry, tracker)
         modules = [LiveModule(genome=genome) for genome in genomes]
         state = HierarchicalState(modules=modules, module_innovations=tracker, comp_innovations=InnovationTracker(_next_node_id=0), rng=rng)
@@ -253,6 +307,10 @@ class HierarchicalLoop:
         if self.library is not None:
             tolerance = self.catalog_width_tolerance
             for entry in self.library.query():
+                # Adding this entry as a composition MODULE follows one new library edge, leaving
+                # max_inline_depth - 1 levels for the entry's own mixed module/composition subtree.
+                if self.library.reference_subtree_depth(entry.key) > self.max_inline_depth - 1:
+                    continue
                 in_width = sum(item["width"] for item in entry.io["inputs"])
                 out_width = int(entry.io["output"]["width"])
                 if tolerance >= 0 and spec is not None:
@@ -393,6 +451,7 @@ class HierarchicalLoop:
             activations=self.evolver.activations,
             default_activation=self.evolver.default_activation,
             library=self.library,
+            max_inline_depth=self.max_inline_depth,
         )
 
     def advance_modules(self, state: HierarchicalState) -> None:
@@ -443,7 +502,11 @@ class HierarchicalLoop:
             return 0
         from ardevo.library import graft
 
-        ranked = [entry for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports) if entry.key not in state.absorbed_keys]
+        ranked = [
+            entry
+            for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
+            if entry.key not in state.absorbed_keys and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+        ]
         # Graft BEHAVIORALLY DIVERSE entries first: one per unseen niche by rank, then fill. A pool of
         # varied building blocks recombines into more than a cluster of near-duplicate top-metric ones.
         seen_niches: set[tuple[str, ...]] = set()
@@ -465,7 +528,7 @@ class HierarchicalLoop:
             state.absorbed_keys.append(entry.key)
             absorbed += 1
         if absorbed:
-            logger.info("absorbed %d library entries into the module pool: %s", absorbed, state.absorbed_keys[-absorbed:])
+            logger.info("absorbed %d library entries into the module pool", absorbed)
             self._speciate_only(state)
         return absorbed
 
@@ -475,26 +538,51 @@ class HierarchicalLoop:
         # resolve against modules that moved since last generation, so cached fitness goes stale.
         # Repair dead live refs FIRST: module species die during advance_modules, and an elite
         # pointing at one would otherwise be silently floored (champion lineage lost).
-        elites = [self._repair_refs(item.comp, state) for item in ordered[: self.comp_elitism]]
+        elite_items = ordered[: self.comp_elitism]
+        elites = [self._repair_refs(item.comp, state) for item in elite_items]
         n_offspring = max(self.comp_pop_size - len(elites), 0)
         # ALL rng draws happen up front (selection, crossover, mutation, repair); assessment is
         # rng-free, so deferring it into one (possibly parallel) batch is stream-identical.
         children: list[CompositionGenome] = []
+        carried: list[AssessedComposition] = []
         if n_offspring > 0:
             comps = [item.comp for item in ordered]
             fitnesses = [item.fitness for item in ordered]
             parents = self.comp_selection_op(comps, fitnesses, rng=state.rng, count=2 * n_offspring)
             comp_ctx = CompMutationContext(
-                innovations=state.comp_innovations, ref_catalog=self.ref_catalog(state), glue_rank=self.glue_rank, glue_rank_threshold=self.glue_rank_threshold
+                innovations=state.comp_innovations,
+                ref_catalog=self.ref_catalog(state),
+                glue_rank=self.glue_rank,
+                glue_rank_threshold=self.glue_rank_threshold,
+                glue_storage=self.glue_storage,
             )
             for k in range(n_offspring):
-                if state.rng.random() < self.comp_crossover_rate:
-                    child = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
-                else:
-                    child = parents[2 * k].clone()
-                child = self.comp_mutation(child, comp_ctx, rng=state.rng)
-                children.append(self._repair_refs(child, state))
-        return self._assess_all(elites, spec, state, train=False) + self._assess_all(children, spec, state, train=True)
+                child: CompositionGenome | None = None
+                attempts = self.topology_tabu.retry_limit + 1 if self.topology_tabu is not None else 1
+                for _attempt in range(attempts):
+                    if state.rng.random() < self.comp_crossover_rate:
+                        candidate = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
+                    else:
+                        candidate = parents[2 * k].clone()
+                    candidate = self._repair_refs(self.comp_mutation(candidate, comp_ctx, rng=state.rng), state)
+                    if self.topology_tabu is None or self.topology_tabu.reserve("composition", comp_to_dict(candidate)):
+                        child = candidate
+                        break
+                if child is None:
+                    assert self.topology_tabu is not None
+                    self.topology_tabu.retry_exhaustions += 1
+                    parent = parents[2 * k]
+                    carried.append(next((item for item in assessed if item.comp is parent), ordered[0]))
+                    continue
+                children.append(child)
+        if self.topology_tabu is not None and not children and n_offspring > 0:
+            state.topology_exhausted = True
+            self.topology_tabu.exhausted = True
+        assessed_elites = elite_items if self.topology_tabu is not None else self._assess_all(elites, spec, state, train=False)
+        assessed_children = self._assess_all(children, spec, state, train=True)
+        if self.topology_tabu is not None:
+            self.topology_tabu.commit()  # durable only after every selected child was assessed
+        return assessed_elites + carried + assessed_children
 
     # --- the per-task drive ---------------------------------------------------------------------------
 
@@ -509,6 +597,7 @@ class HierarchicalLoop:
         on_generation: Callable[[int, AssessedComposition, float], None] | None = None,
     ) -> AssessedComposition:
         """Evolve a composition population against one task for up to `budget` generations."""
+        state.topology_exhausted = False
         population: list[CompositionGenome] = [comp.clone() for comp in (seed_comps or [])][: self.comp_pop_size]
         while len(population) < self.comp_pop_size:
             population.append(
@@ -521,11 +610,23 @@ class HierarchicalLoop:
                     glue_scale=self.glue_scale,
                     glue_rank=self.glue_rank,
                     glue_rank_threshold=self.glue_rank_threshold,
+                    glue_storage=self.glue_storage,
                 )
             )
         population = [self._repair_refs(comp, state) for comp in population]
 
+        if self.topology_tabu is not None:
+            # Keep one warm incumbent as the parent/fitness anchor, then reject repeated initial
+            # structures before glue fitting. Minimal compositions otherwise spend a full batch on
+            # the same graph with different random glue values.
+            filtered = population[:1]
+            filtered.extend(comp for comp in population[1:] if self.topology_tabu.reserve("composition", comp_to_dict(comp)))
+            population = filtered
         assessed = self._assess_all(population, spec, state, train=True)
+        if self.topology_tabu is not None:
+            for item in assessed:
+                self.topology_tabu.observe_evaluated("composition", comp_to_dict(item.comp))
+            self.topology_tabu.commit()
         self._attribute(assessed, state)
         self._module_writeback(assessed, state)
         best = max(assessed, key=lambda item: item.fitness)
@@ -536,6 +637,8 @@ class HierarchicalLoop:
             if self.advance_every > 0 and generation % self.advance_every == self.advance_every - 1:
                 self.advance_modules(state)
             assessed = self._reproduce_comps(assessed, spec, state)
+            if state.topology_exhausted:
+                break
             self._attribute(assessed, state)
             self._module_writeback(assessed, state)
             generation_best = max(assessed, key=lambda item: item.fitness)
@@ -605,6 +708,9 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
     evolution = config.get("evolution", {})
     comp_cfg = evolution.get("composition", {})
     modules_cfg = evolution.get("modules", {})
+    glue_storage = str(comp_cfg.get("glue_storage", "tuple"))
+    if glue_storage not in {"tuple", "f32"}:
+        raise ValueError(f"unknown composition glue_storage {glue_storage!r}; expected 'tuple' or 'f32'")
 
     comp_selection_cfg = comp_cfg.get("selection", {})
     comp_selection_op = partial(
@@ -629,10 +735,13 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         comp_crossover_op=comp_crossover_op,
         comp_crossover_rate=float(comp_crossover_cfg.get("rate", 0.2)),
         comp_mutation=CompMutationPipeline(mutators),
-        max_inline_depth=int(comp_cfg.get("max_inline_depth", 4)),
+        max_inline_depth=configured_max_inline_depth(config),
         glue_scale=float(comp_cfg["glue_scale"]) if "glue_scale" in comp_cfg else None,
         glue_rank=int(comp_cfg.get("glue_rank", 0)),
         glue_rank_threshold=int(comp_cfg.get("glue_rank_threshold", 0)),
+        glue_storage=glue_storage,
+        resource_policy=ResourcePolicy.from_config(config.get("resources")),
+        resource_device=str(resolve_compute_device(config)),
         catalog_width_tolerance=int(comp_cfg.get("catalog_width_tolerance", -1)),
         module_pop_size=int(modules_cfg.get("pop_size", evolution.get("pop_size", 32))),
         module_elitism=int(modules_cfg.get("elitism", evolution.get("elitism", 1))),
@@ -644,5 +753,6 @@ def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:
         decay=float(modules_cfg.get("decay", 0.95)),
         offspring_discount=float(modules_cfg.get("offspring_discount", 0.9)),
         seed_fraction=float(modules_cfg.get("seed_fraction", 0.25)),
+        max_initial_glue_values=max(0, int(comp_cfg.get("max_initial_glue_values", 0))),
         absorb_top_k=int(modules_cfg.get("absorb_top_k", 0)),
     )

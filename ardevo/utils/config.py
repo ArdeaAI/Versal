@@ -1,7 +1,7 @@
 """Configuration for ArdEVO.
 
-`configs/orchestrated_overmind.toml` is the single source of truth (and the default when
-`uv run app` gets no --config). `Config` parses it and produces `current`, a flat dict that
+`configs/smoke.toml` is the default when `uv run app` gets no --config. It inherits the complete
+method from `configs/canary.toml`. `Config` parses it and produces `current`, a flat dict that
 the `Pipeline`/`Proctor` infra reads (scalar run settings plus a `hyperparameters` dict for
 ClearML), while preserving the nested `evolution`/`substrate`/`fitness` tables verbatim so
 the evolver factory can resolve operators from them.
@@ -10,6 +10,7 @@ the evolver factory can resolve operators from them.
 import hashlib
 import json
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -21,7 +22,7 @@ class Config:
 
     PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
     TOML_FILE: ClassVar[Path] = PROJECT_ROOT / "pyproject.toml"
-    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "configs" / "orchestrated_overmind.toml"
+    DEFAULT_CONFIG: ClassVar[Path] = PROJECT_ROOT / "configs" / "smoke.toml"
 
     def __init__(self, conf_path: Path | str | None = None) -> None:
         self.toml = self._load_toml()
@@ -38,16 +39,64 @@ class Config:
 
     @classmethod
     def _load_config(cls, conf_path: Path) -> dict[str, Any]:
-        if not conf_path.exists():
-            raise FileNotFoundError(f"Configuration file '{conf_path}' not found.")
-        raw_bytes = conf_path.read_bytes()
-        raw = tomllib.loads(raw_bytes.decode("utf-8"))
+        raw, sources = cls._load_config_tree(conf_path)
         normalized = cls._normalize_config(raw)
-        # Run provenance: which exact config bytes produced a run. Rides into run_summary.json so a
-        # results directory is self-identifying instead of being matched to a config by schedule shape.
+        raw_bytes = conf_path.read_bytes()
+        effective_bytes = json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        # Keep the historical leaf-file digest while adding the hash and ordered provenance of the
+        # fully merged configuration. Existing run-summary consumers therefore remain compatible.
         normalized["config_path"] = str(conf_path)
         normalized["config_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+        normalized["config_effective_sha256"] = hashlib.sha256(effective_bytes).hexdigest()
+        normalized["config_sources"] = sources
         return normalized
+
+    @classmethod
+    def _load_config_tree(cls, conf_path: Path, stack: tuple[Path, ...] = ()) -> tuple[dict[str, Any], list[dict[str, str]]]:
+        """Load one TOML inheritance tree, resolving each `extends` relative to its declaring file."""
+        path = conf_path.expanduser().resolve()
+        if path in stack:
+            cycle = " -> ".join(str(item) for item in (*stack, path))
+            raise ValueError(f"configuration extends cycle: {cycle}")
+        if not path.exists():
+            declared_by = f" (declared by {stack[-1]})" if stack else ""
+            raise FileNotFoundError(f"Configuration file '{path}' not found{declared_by}.")
+
+        raw_bytes = path.read_bytes()
+        raw = tomllib.loads(raw_bytes.decode("utf-8"))
+        extends = raw.pop("extends", None)
+        if extends is None:
+            parent_specs: list[str] = []
+        elif isinstance(extends, str):
+            parent_specs = [extends]
+        elif isinstance(extends, list) and all(isinstance(item, str) for item in extends):
+            parent_specs = [str(item) for item in extends]
+        else:
+            raise TypeError(f"{path}: top-level 'extends' must be a path string or list of path strings")
+
+        merged: dict[str, Any] = {}
+        sources: list[dict[str, str]] = []
+        for spec in parent_specs:
+            candidate = Path(spec).expanduser()
+            parent_path = candidate if candidate.is_absolute() else path.parent / candidate
+            parent, parent_sources = cls._load_config_tree(parent_path, (*stack, path))
+            merged = cls._deep_merge(merged, parent)
+            sources.extend(parent_sources)
+        merged = cls._deep_merge(merged, raw)
+        sources.append({"path": str(path), "sha256": hashlib.sha256(raw_bytes).hexdigest()})
+        return merged, sources
+
+    @classmethod
+    def _deep_merge(cls, base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+        """Recursively merge mappings; child scalars and lists replace their parent values."""
+        merged = dict(base)
+        for key, value in overlay.items():
+            previous = merged.get(key)
+            if isinstance(previous, Mapping) and isinstance(value, Mapping):
+                merged[key] = cls._deep_merge(previous, value)
+            else:
+                merged[key] = value
+        return merged
 
     @classmethod
     def _normalize_config(cls, raw: dict[str, Any]) -> dict[str, Any]:
@@ -84,6 +133,7 @@ class Config:
             "rung": dataset.get("rung", 1),
             "n_samples": dataset.get("n_samples", 8),
             "support_fraction": dataset.get("support_fraction", 0.8),
+            "min_fixed_query_samples": dataset.get("min_fixed_query_samples", 0),
             # Operator tables preserved verbatim for build_evolver.
             "substrate": substrate,
             "evolution": evolution,
@@ -94,6 +144,10 @@ class Config:
             "orchestrator": raw.get("orchestrator", {}),
             # Library admission policy knobs (quality gate + per-signature caps).
             "library": raw.get("library", {}),
+            # Cluster/resource and artifact-retention policies are consumed by external launchers.
+            "resources": raw.get("resources", {}),
+            "archive": raw.get("archive", {}),
+            "campaign": raw.get("campaign", {}),
         }
 
         # Flat scalars for ClearML hyperparameter tracking (logging only; not the source of truth).
@@ -103,6 +157,7 @@ class Config:
             "elitism": evolution.get("elitism", 1),
             "rung": normalized["rung"],
             "n_samples": normalized["n_samples"],
+            "min_fixed_query_samples": normalized["min_fixed_query_samples"],
             "seed": normalized["seed"],
             "selection_kind": evolution.get("selection", {}).get("kind", "tournament"),
             "crossover_kind": evolution.get("crossover", {}).get("kind", "none"),
