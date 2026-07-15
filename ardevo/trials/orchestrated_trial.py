@@ -75,6 +75,7 @@ class OrchestratedTrial(Proctor):
             rungs=self.rungs,
             n_samples=int(config["n_samples"]),
             support_fraction=float(config.get("support_fraction", 0.8)),
+            min_fixed_query_samples=int(config.get("min_fixed_query_samples", 0)),
             tasks_per_rung=int(schedule_cfg.get("tasks_per_rung", 100)),
             shuffle=bool(schedule_cfg.get("shuffle", True)),
             seed=int(config.get("seed", 0)),
@@ -440,6 +441,8 @@ class OrchestratedTrial(Proctor):
             record["resource_metrics"] = dict(attempt.resource_metrics)
         if attempt is not None and getattr(attempt, "strategy_metrics", None):
             record["strategy_metrics"] = dict(attempt.strategy_metrics)
+        if attempt is not None and getattr(attempt, "diagnostic_observation", None):
+            record["diagnostic_observation"] = dict(attempt.diagnostic_observation)
         if attempt is not None and (
             getattr(attempt, "support_status", "legacy_missing") != "legacy_missing"
             or getattr(attempt, "query_status", "legacy_missing") != "legacy_missing"
@@ -701,6 +704,11 @@ class OrchestratedTrial(Proctor):
                 "schedule": self.config.get("schedule", {}),
                 "evolution": self.config.get("evolution", {}),
                 "fitness": self.config.get("fitness", {}),
-                "dataset": {"source": self.config.get("dataset"), "n_samples": self.config.get("n_samples"), "support_fraction": self.config.get("support_fraction")},
+                "dataset": {
+                    "source": self.config.get("dataset"),
+                    "n_samples": self.config.get("n_samples"),
+                    "support_fraction": self.config.get("support_fraction"),
+                    "min_fixed_query_samples": self.config.get("min_fixed_query_samples"),
+                },
             },
         }

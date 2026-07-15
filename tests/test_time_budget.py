@@ -87,6 +87,36 @@ def test_expired_total_budget_is_recorded_without_starting_new_work(tmp_path: Pa
     assert orchestrator.counters["total_time_budget_hits"] == 1
 
 
+def test_total_timeout_finalizes_a_remembered_parent_champion(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"max_total_task_seconds": 1, "blind_query": True, "search_metric": "support_accuracy", "report_metric": "query_accuracy"},
+    )
+    result = StrategyResult(
+        strategy="direct",
+        metric=0.8,
+        generations_used=3,
+        champion_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8, "support_loss": 0.2},
+    )
+    orchestrator._best_parent_result = result
+    finalized: list[bool] = []
+
+    def attach(candidate, _spec):
+        finalized.append(True)
+        candidate.report_metrics = {"query_accuracy": 0.7, "query_loss": 0.3}
+        return candidate
+
+    monkeypatch.setattr(orchestrator, "_attach_report_metrics", attach)
+    orchestrator._record_total_timeout(xor_task, 0)
+
+    attempt = orchestrator.attempts[-1]
+    assert finalized == [True]  # reporting is allowed after the search deadline
+    assert attempt.strategy == "direct" and attempt.generations == 3
+    assert attempt.support_accuracy == 0.8 and attempt.query_accuracy == 0.7
+    assert attempt.failure_stage == "time_budget"
+
+
 def test_recursive_solve_inherits_earlier_total_deadline(tmp_path: Path, xor_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path, table={"max_task_seconds": 3600, "max_total_task_seconds": 3600})
     total_deadline = time.perf_counter() + 30

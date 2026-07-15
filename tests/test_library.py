@@ -2,13 +2,14 @@
 
 import random
 from pathlib import Path
+from typing import cast
 
 import torch
 
 from ardevo.dataset.icarus import Task, TaskKind, TaskMeta
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
 from ardevo.evolution.mutation import MutationContext, add_library_module
-from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, task_io
+from ardevo.library import INVALID_EXPANDED_COMPLEXITY, MODULE, LibraryEntry, ModuleLibrary, expanded_payload_complexity, graft, payload_shell_complexity, task_io
 from ardevo.substrate import decode
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
@@ -288,6 +289,50 @@ def test_structural_fingerprint_ignores_weights_but_not_topology(tmp_path: Path,
     deepened["refine_steps"] = int(deepened.get("refine_steps", 1)) + 2
     assert structural_fingerprint(MODULE, payload) != structural_fingerprint(MODULE, toggled)
     assert structural_fingerprint(MODULE, payload) != structural_fingerprint(MODULE, deepened)
+
+
+def test_expanded_complexity_prices_nested_and_retired_macro_targets(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    inner_key = _module_entry(library, solving_genome)
+    wrapper = genome_to_dict(solving_genome)
+    wrapper["connections"] = wrapper["connections"][:1]
+    wrapper["macros"] = [{"ref": f"library:{inner_key}", "inputs": [0, 1], "outputs": [2], "innovation": 999, "trainable": False}]
+    wrapper_key = library.add(entry_type=MODULE, payload=wrapper, io=_IO, provenance={"accepted_metric": 1.0}, level=2)
+
+    shell = payload_shell_complexity(MODULE, wrapper)
+    inner = payload_shell_complexity(MODULE, genome_to_dict(solving_genome))
+    assert library.expanded_complexity(wrapper_key) == shell + inner
+    assert library.expanded_complexity(wrapper_key) > shell
+    library.retire(inner_key)
+    assert library.expanded_complexity(wrapper_key) == shell + inner  # tombstones remain executable dependencies
+
+
+def test_expanded_complexity_counts_repeated_placements_and_rejects_bad_reference_graphs(solving_genome: Genome) -> None:
+    inner = genome_to_dict(solving_genome)
+
+    class FakeLibrary:
+        entries: dict[str, LibraryEntry]
+
+        def load(self, key: str) -> LibraryEntry:
+            if key not in self.entries:
+                raise KeyError(key)
+            return self.entries[key]
+
+    fake = FakeLibrary()
+    fake.entries = {"inner": LibraryEntry("inner", MODULE, 1, _IO, inner, True, {})}
+    library = cast(ModuleLibrary, fake)
+    wrapper = genome_to_dict(solving_genome)
+    placement = {"ref": "library:inner", "inputs": [0, 1], "outputs": [2], "innovation": 1, "trainable": False}
+    wrapper["macros"] = [placement, {**placement, "innovation": 2}]
+    expected = payload_shell_complexity(MODULE, wrapper) + 2 * payload_shell_complexity(MODULE, inner)
+    assert expanded_payload_complexity(MODULE, wrapper, library) == expected
+
+    missing = {**wrapper, "macros": [{**placement, "ref": "library:missing"}]}
+    assert expanded_payload_complexity(MODULE, missing, library) == INVALID_EXPANDED_COMPLEXITY
+
+    cyclic = {**inner, "macros": [{**placement, "ref": "library:cycle"}]}
+    fake.entries["cycle"] = LibraryEntry("cycle", MODULE, 2, _IO, cyclic, True, {})
+    assert expanded_payload_complexity(MODULE, cyclic, library, visiting=frozenset({"cycle"})) == INVALID_EXPANDED_COMPLEXITY
 
 
 def test_structural_fingerprint_composition_ignores_glue_values() -> None:

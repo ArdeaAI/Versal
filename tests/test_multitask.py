@@ -57,6 +57,45 @@ def test_build_pool_report_closes_backend_datasets(monkeypatch) -> None:
     assert sorted(closed) == [1, 2]
 
 
+def test_fixed_split_query_floor_reloads_native_query_without_trimming_support() -> None:
+    calls: list[int] = []
+    closed: list[int] = []
+    pair = (_binary_field([0.0, 1.0]), _binary_field([1.0]))
+
+    class CappedFixedDataset:
+        def __init__(self, *, n_samples: int, **_kwargs: Any) -> None:
+            calls.append(n_samples)
+            support = [pair] * 5
+            native_query = [pair] * 6
+            self.tasks = [Task(TaskMeta(3, TaskKind.MAP, "fixed", fixed_split=True), support, native_query[: max(0, n_samples - len(support))])]
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, index: int) -> Task:
+            return self.tasks[index]
+
+        def close(self) -> None:
+            closed.append(1)
+
+    report = multitask.build_pool_report(
+        "unused",
+        [3],
+        n_samples=4,
+        support_fraction=0.8,
+        tasks_per_rung=1,
+        shuffle=False,
+        seed=0,
+        min_fixed_query_samples=3,
+        dataset_factory=CappedFixedDataset,
+    )
+
+    assert calls == [4, 8]
+    assert len(report.entries[0].task.support) == 5
+    assert len(report.entries[0].task.query) == 3
+    assert len(closed) == 2
+
+
 def test_scheduler_state_round_trips() -> None:
     """The orchestrated trial checkpoints scheduler state every task; a rebuilt scheduler must
     continue the exact pick order."""

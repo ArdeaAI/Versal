@@ -31,6 +31,7 @@ logger = Logger.get_logger()
 
 MODULE = "module"
 COMPOSITION = "composition"
+INVALID_EXPANDED_COMPLEXITY = 10**12
 
 AdmissionPolicy = Callable[..., "AdmissionDecision"]
 
@@ -209,6 +210,63 @@ def payload_refs(entry_type: str, payload: dict[str, Any]) -> set[str]:
     return refs
 
 
+def payload_shell_complexity(entry_type: str, payload: dict[str, Any]) -> int:
+    """The historical local-only structural cost, computed without constructing a genome."""
+
+    if entry_type == MODULE:
+        enabled = sum(bool(connection.get("enabled", True)) for connection in payload.get("connections", []))
+        hidden = sum(node.get("kind") == "hidden" for node in payload.get("nodes", []))
+        return enabled + hidden + len(payload.get("macros", []))
+    if entry_type == COMPOSITION:
+        enabled = sum(bool(edge.get("enabled", True)) for edge in payload.get("edges", []))
+        modules = sum(node.get("kind") == "module" for node in payload.get("nodes", []))
+        return enabled + modules
+    raise ValueError(f"unknown entry_type {entry_type!r}")
+
+
+def expanded_payload_complexity(
+    entry_type: str,
+    payload: dict[str, Any],
+    library: "ModuleLibrary",
+    *,
+    visiting: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> int:
+    """Static assembled-topology cost, including every persistent reference placement.
+
+    Repeated placements count repeatedly because each executes separately even when weights are
+    shared. Missing, cyclic, or implausibly deep references receive an effectively infinite cost;
+    malformed legacy state can therefore never masquerade as compression.
+    """
+
+    if depth > 64:
+        return INVALID_EXPANDED_COMPLEXITY
+    if entry_type == MODULE:
+        references = [macro.get("ref", "") for macro in payload.get("macros", [])]
+    elif entry_type == COMPOSITION:
+        references = [node.get("ref", "") for node in payload.get("nodes", []) if node.get("kind") == "module"]
+    else:
+        raise ValueError(f"unknown entry_type {entry_type!r}")
+    total = payload_shell_complexity(entry_type, payload)
+    for reference in references:
+        if not reference.startswith("library:"):
+            continue
+        key = reference.removeprefix("library:")
+        if key in visiting:
+            return INVALID_EXPANDED_COMPLEXITY
+        try:
+            entry = library.load(key)
+        except KeyError:
+            return INVALID_EXPANDED_COMPLEXITY
+        nested = expanded_payload_complexity(entry.entry_type, entry.payload, library, visiting=visiting | {key}, depth=depth + 1)
+        if nested >= INVALID_EXPANDED_COMPLEXITY:
+            return INVALID_EXPANDED_COMPLEXITY
+        total += nested
+        if total >= INVALID_EXPANDED_COMPLEXITY:
+            return INVALID_EXPANDED_COMPLEXITY
+    return total
+
+
 def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     """Weight-agnostic topology hash: two payloads share a fingerprint iff they are the same
     STRUCTURE (nodes, wiring, macro refs, refine depth), regardless of trained weights, glue
@@ -252,6 +310,7 @@ class ModuleLibrary:
         self._index_path = self.root / "index.json"
         self._index: dict[str, dict[str, Any]] = {}
         self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
+        self._expanded_complexity_cache: dict[str, int] = {}
         # Parsed-entry cache: payloads are immutable and every mutation (dedupe provenance, stats)
         # goes through this object, so the cached instance IS the coherent one. Unbounded is fine at
         # hundreds of entries; revisit alongside the _write_index watchpoint when it reaches thousands.
@@ -408,6 +467,17 @@ class ModuleLibrary:
         self._macro_depth_cache[key] = depth
         return depth
 
+    def expanded_complexity(self, key: str) -> int:
+        """Recursively expanded static topology cost for one immutable library entry."""
+
+        cached = self._expanded_complexity_cache.get(key)
+        if cached is not None:
+            return cached
+        entry = self.load(key)
+        value = expanded_payload_complexity(entry.entry_type, entry.payload, self, visiting=frozenset({key}))
+        self._expanded_complexity_cache[key] = value
+        return value
+
     def macro_subtree_depth(self, key: str, _visiting: frozenset[str] = frozenset()) -> int:
         """Compatibility name for the now type-agnostic reference-depth query."""
         return self.reference_subtree_depth(key, _visiting)
@@ -439,6 +509,7 @@ class ModuleLibrary:
         for key in swept:
             del self._index[key]
             self._macro_depth_cache.pop(key, None)
+            self._expanded_complexity_cache.pop(key, None)
             self._entry_cache.pop(key, None)
             self._dirty_stats.discard(key)
             (self._entries_dir / f"{key}.json").unlink(missing_ok=True)

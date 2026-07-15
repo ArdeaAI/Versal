@@ -21,6 +21,7 @@ live_status = true
 source = "Ardea/Icarus-dataset"
 n_samples = 128
 support_fraction = 0.8
+min_fixed_query_samples = 32
 
 [schedule]
 kind = "interleave_rungs"
@@ -40,8 +41,8 @@ accept_threshold = 0.95
 floor = 0.35
 stall_generations = 28
 stall_epsilon = 0.005
-max_task_seconds = 600
-max_total_task_seconds = 600
+max_task_seconds = 900
+max_total_task_seconds = 900
 max_depth = 8
 quick_eval_top_k = 5
 library_dir = "library"
@@ -128,8 +129,9 @@ decompose_probe_generations = 6
     weight_decay = 0.0002
     compute_policy_path = "results/compute_policy.json"
 
-  # A library hit may spend a small decaying budget to improve capability or compress its topology.
+  # A library hit spends a bounded search looking for a simpler or more capable replacement.
   [orchestrator.refine]
+  mode = "always"
   budget_k = 24
   depth_max = 0
   metric_epsilon = 0.005
@@ -314,4 +316,4 @@ w_support_accuracy = 1.0
 w_weight_robustness = 0.5
 w_hidden_penalty = 0.05
 w_complexity_penalty = 0.01
-objectives = ["support_accuracy", "novelty", "connection_cost"]
+objectives = ["support_accuracy", "novelty", "weight_robustness", "connection_cost"]

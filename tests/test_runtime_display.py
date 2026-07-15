@@ -61,6 +61,26 @@ def test_valid_zero_query_is_not_rendered_as_missing_at_narrow_width() -> None:
     assert "saved 1 new entry" in output
 
 
+def test_recursive_diagnostic_never_becomes_parent_support() -> None:
+    display, stream = _render_display()
+    display.task_started(13, 18, 13, "darcy_flow.b3")
+    display.stage_result("routed", "continue", "diagnostic only", depth=1, support_accuracy=0.618)
+    attempt = _attempt(
+        support_accuracy=None,
+        support_status="no_executable_champion",
+        diagnostic_observation={"score": 0.618, "metric": "support_accuracy", "task": "darcy_flow.b3.h0", "depth": 1, "strategy": "routed", "executable": True},
+        strategy="time_budget",
+        generations=0,
+    )
+    display.task_finished(13, 18, 13, "darcy_flow.b3", attempt, solved=False, task_seconds=640, new_library_keys=[], library_size=7)
+
+    output = stream.getvalue()
+    assert "subtask support 0.6180" in output
+    assert "BEST SUPPORT ACCURACY" in output and "N/A" in output
+    assert "Best diagnostic" in output and "darcy_flow.b3.h0" in output
+    assert "none — no executable parent champion" in output
+
+
 def test_stage_catalog_explains_actions_instead_of_repeating_command_names() -> None:
     assert STAGES["routed"] == ("Route experts", "combine frozen experts and distill an executable pathway")
     assert STAGES["composition"] == ("Compose modules", "wire reusable modules with trainable glue")

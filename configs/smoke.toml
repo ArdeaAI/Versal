@@ -15,6 +15,10 @@ max_task_seconds = 90
 max_total_task_seconds = 90
 max_depth = 1
 
+  [orchestrator.refine]
+  mode = "decay"
+  budget_k = 4
+
   [orchestrator.budgets]
   depth0 = 40
   depth1 = 20

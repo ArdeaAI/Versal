@@ -457,11 +457,25 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
             runtime.library = library  # score against the seeded library, not the orchestrator's empty one
             result = strategy(task, comp_task_spec(task), runtime, budget=1)
             assert result.champion_routed is not None and math.isfinite(result.metric)
-            assert result.champion_metrics["routed_steps_used"] == 60.0
+            assert result.champion_metrics["routed_steps_used"] == 6.0  # one tenth of generation_cost=10
             results[(task_name, ablation, rank)] = result.champion_metrics["support_accuracy"]
     for task_name, _task, rank in variants:
         real, zeroed = results[(task_name, "none", rank)], results[(task_name, "zero", rank)]
         print(f"expert-ablation diagnostic on {task_name} (adapter_rank={rank}): real={real:.3f} zeroed={zeroed:.3f}")
+
+
+def test_routed_training_budget_scales_steps_and_never_overcharges() -> None:
+    from ardevo.routing import RoutedStrategy
+
+    strategy = RoutedStrategy(library_dir="unused", train_steps=200, generation_cost=10, persist=False)
+    assert strategy._step_cap(0) == 0
+    assert strategy._step_cap(1) == 20
+    assert strategy._step_cap(5) == 100
+    assert strategy._step_cap(10) == 200
+    assert strategy._generations_for_steps(0, 1) == 0
+    assert strategy._generations_for_steps(20, 1) == 1
+    assert strategy._generations_for_steps(75, 5) == 4
+    assert strategy._generations_for_steps(200, 10) == 10
 
 
 def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:

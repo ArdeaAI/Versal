@@ -85,6 +85,24 @@ def test_literal_accuracy_round_trip_distinguishes_zero_from_missing() -> None:
     assert legacy.support_status == "legacy_missing" and "support_accuracy" not in legacy.to_dict()
 
 
+def test_diagnostic_observation_round_trips_without_becoming_parent_accuracy() -> None:
+    diagnostic = {"score": 0.618, "metric": "router_score", "task": "darcy.h0", "depth": 1, "strategy": "routed", "executable": False}
+    attempt = Attempt(
+        task="darcy",
+        depth=0,
+        outcome="failed",
+        metric=0.0,
+        generations=0,
+        support_status="no_executable_champion",
+        query_status="time_limit_before_evaluation",
+        diagnostic_observation=diagnostic,
+    )
+
+    restored = Attempt.from_dict(attempt.to_dict())
+    assert restored.diagnostic_observation == diagnostic
+    assert restored.support_accuracy is None and restored.query_accuracy is None
+
+
 def test_attempt_sample_metrics_round_trip_and_absent_when_empty() -> None:
     diagnostics = {"mean_sample_accuracy": 0.55, "max_sample_accuracy": 0.9, "best_sample_weight": -1.0, "weight_robustness": 0.4}
     attempt = Attempt(task="two_spirals", depth=0, outcome="failed", metric=0.67, generations=28, sample_metrics=dict(diagnostics))

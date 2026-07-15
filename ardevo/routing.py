@@ -24,6 +24,7 @@ are solved-but-not-shelved records (RoutedSolution), the executable state living
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1068,27 +1069,40 @@ class RoutedStrategy:
             service.record_traffic()  # once per task, from its final evaluation's gate decisions
             return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
-        steps_used = self._train(view, spec, runtime)
-        metrics = evaluate(view, spec.encoded, spec.encoder)
+        allocated_generations = max(0, min(int(budget), max(0, self.generation_cost)))
+        step_cap = self._step_cap(allocated_generations)
+        steps_used = self._train(view, spec, runtime, step_cap=step_cap) if step_cap > 0 else 0
+        metrics = evaluate(view, spec.encoded, spec.encoder) if steps_used > 0 else dict(zero_shot_metrics)
         metric = runtime.metric_of(self._metrics_view(metrics))
         service.record_traffic()  # once per task, from its final evaluation's gate decisions
         metrics["routed_zero_shot_metric"] = zero_shot_metric
         self._remember_for_replay(spec, input_key, head_key, support_input)
         accepted = runtime.accepted(self._metrics_view(metrics))
+        generations_used = self._generations_for_steps(steps_used, allocated_generations)
         if accepted:
-            return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost)
-        return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=self.generation_cost, runtime=runtime)
+            return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used)
+        return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
-    def _train(self, view: RoutedTaskView, spec: CompTaskSpec, runtime: Any) -> int:
+    def _step_cap(self, allocated_generations: int) -> int:
+        if allocated_generations <= 0 or self.train_steps <= 0 or self.generation_cost <= 0:
+            return 0
+        return min(self.train_steps, math.ceil(self.train_steps * allocated_generations / self.generation_cost))
+
+    def _generations_for_steps(self, steps_used: int, allocated_generations: int) -> int:
+        if steps_used <= 0 or self.train_steps <= 0 or self.generation_cost <= 0:
+            return 0
+        return min(allocated_generations, math.ceil(steps_used * self.generation_cost / self.train_steps))
+
+    def _train(self, view: RoutedTaskView, spec: CompTaskSpec, runtime: Any, *, step_cap: int) -> int:
         from ardevo.evaluation import evaluate, support_loss
 
         trainable = [parameter for parameter in view.net.parameters() if parameter.requires_grad]
         if not trainable:
             return 0
         optimizer = torch.optim.Adam(trainable, lr=self.lr, weight_decay=self.weight_decay)
-        milestone = max(1, self.train_steps // 4)
+        milestone = max(1, step_cap // 4)
         steps_run = 0
-        for step in range(self.train_steps):
+        for step in range(step_cap):
             if runtime.should_stop():
                 break
             optimizer.zero_grad()

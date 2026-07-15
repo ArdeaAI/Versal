@@ -77,6 +77,7 @@ def build_pool_report(
     tasks_per_rung: int,
     shuffle: bool,
     seed: int,
+    min_fixed_query_samples: int = 0,
     dataset_factory: Any = None,
     load_workers: int = 4,
 ) -> PoolReport:
@@ -97,11 +98,31 @@ def build_pool_report(
 
     def _load_rung(rung: int) -> tuple[list[TaskEntry], SkippedRung | None]:
         dataset = None
+        expanded_dataset = None
         rung_entries: list[TaskEntry] = []
         try:
             dataset = factory(rungs=(rung,), n_tasks=tasks_per_rung, n_samples=n_samples, support_fraction=support_fraction, shuffle_within=shuffle, seed=seed, hf_repo=source)
-            for index in range(len(dataset)):
-                rung_entries.append(task_entry(dataset[index]))
+            tasks = [dataset[index] for index in range(len(dataset))]
+            fixed_floor = max(0, int(min_fixed_query_samples))
+            needs_native_query = [task for task in tasks if task.meta.fixed_split and len(task.query) < fixed_floor]
+            if needs_native_query:
+                # Icarus treats n_samples as support + query, while authoritative fixed support is
+                # never truncated. Reload the same deterministic task selection with just enough
+                # headroom for the requested native query floor. Bucketed tasks keep the original
+                # cap and the vendored adapter remains unchanged.
+                expanded_cap = max(n_samples, max(len(task.support) + fixed_floor for task in needs_native_query))
+                expanded_dataset = factory(
+                    rungs=(rung,),
+                    n_tasks=tasks_per_rung,
+                    n_samples=expanded_cap,
+                    support_fraction=support_fraction,
+                    shuffle_within=shuffle,
+                    seed=seed,
+                    hf_repo=source,
+                )
+                expanded_by_name = {expanded.meta.name: expanded for expanded in (expanded_dataset[index] for index in range(len(expanded_dataset)))}
+                tasks = [expanded_by_name.get(task.meta.name, task) if task.meta.fixed_split else task for task in tasks]
+            rung_entries.extend(task_entry(task) for task in tasks)
             if not rung_entries:
                 return rung_entries, SkippedRung(rung=rung, error_type="EmptyRung", message="dataset loaded but yielded zero tasks")
         except Exception as error:  # broad: many failure modes (arrow overflow, network, missing config); skip the rung and continue
@@ -110,6 +131,8 @@ def build_pool_report(
         finally:
             if dataset is not None:
                 dataset.close()
+            if expanded_dataset is not None:
+                expanded_dataset.close()
         return rung_entries, None
 
     if load_workers > 1 and len(rungs) > 1:

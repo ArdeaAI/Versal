@@ -2,9 +2,11 @@
 population-batched trainer (via build_evolver injection) and Proctor. Per-genome pool work never
 touches it (workers are CPU by construction)."""
 
+import sys
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -236,3 +238,41 @@ def test_cluster_cuda_uses_local_launcher_with_clearml_telemetry(monkeypatch) ->
     pipe = pipelines.Pipeline({"machine_env": "ClusterCUDA", "clearml_run": True})
     assert pipe.queue == "local"
     assert pipe.clearml_run is True
+
+
+def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
+    from ardevo.utils import pipelines
+
+    captured: dict[str, Any] = {}
+
+    class FakeRun:
+        def connect(self, values) -> None:
+            captured["connected"] = values
+
+        def set_repo(self, **values) -> None:
+            captured["repo"] = values
+
+    class FakeTask:
+        TaskTypes = SimpleNamespace(custom="custom")
+
+        @staticmethod
+        def init(**values):
+            captured["init"] = values
+            return FakeRun()
+
+    monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
+    monkeypatch.setitem(sys.modules, "clearml", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(pipelines, "get_current_branch", lambda: None)
+    pipeline = pipelines.Pipeline(
+        {
+            "machine_env": "MonadMetal",
+            "clearml_run": True,
+            "project_name": "ardevo",
+            "experiment_name": "test",
+            "hyperparameters": {"seed": 1},
+        }
+    )
+
+    assert pipeline.task is not None
+    assert captured["init"]["auto_connect_frameworks"] == {"pytorch": False}
+    assert captured["connected"] == {"seed": 1}

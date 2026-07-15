@@ -89,6 +89,10 @@ class Pipeline:
             task_type=Task.TaskTypes.custom,
             reuse_last_task_id=False,
             output_uri=self.config.get("output_uri", False),
+            # Router checkpoints/shards are ArdEVO state, not user-selectable model inputs.
+            # ClearML's PyTorch patch otherwise registers every lazy torch.load() and repeatedly
+            # connects identically named shards, making remote input-model selection ambiguous.
+            auto_connect_frameworks={"pytorch": False},
         )
         self.task.connect(self.config.get("hyperparameters", {}))
         branch = get_current_branch()

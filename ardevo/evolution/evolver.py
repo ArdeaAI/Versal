@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
 from ardevo.evolution.evaluate import standard as standard_evaluate
-from ardevo.evolution.fitness import FitnessAggregator
+from ardevo.evolution.fitness import FitnessAggregator, stamp_complexity_metrics
 from ardevo.evolution.genome import Genome, InnovationTracker, make_acyclic
 from ardevo.evolution.mutation import AdaptiveMutationPipeline, MutationContext, MutationPipeline
 from ardevo.evolution.novelty import NoveltyConfig, archive_insert, compute_descriptor, novelty_scores, probe_tensor
@@ -187,7 +187,7 @@ class Evolver:
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
         metrics = self.evaluate_op(genome, module, adapter)
-        return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+        return Assessed(genome, metrics, self._score(genome, metrics), module)
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
@@ -196,7 +196,11 @@ class Evolver:
         except (ValueError, KeyError):
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         metrics = self.evaluate_op(genome, module, adapter)
-        return Assessed(genome, metrics, self.fitness(genome, metrics), module)
+        return Assessed(genome, metrics, self._score(genome, metrics), module)
+
+    def _score(self, genome: Genome, metrics: dict[str, float]) -> float:
+        stamp_complexity_metrics(genome, metrics, self.library)
+        return self.fitness(genome, metrics)
 
     def assess_many(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
         """Assess a batch of genomes, training them all in one tensor program when a population
@@ -229,7 +233,7 @@ class Evolver:
                 continue
             genome, trained_module = next(trained)
             metrics = self.evaluate_op(genome, trained_module, adapter)
-            assessed.append(Assessed(genome, metrics, self.fitness(genome, metrics), trained_module))
+            assessed.append(Assessed(genome, metrics, self._score(genome, metrics), trained_module))
         return assessed
 
     def _assess_hybrid(self, genomes: list[Genome], decoded: list[SubstrateModule | None], adapter: Adapter, state: EvolverState) -> list[Assessed]:
@@ -289,7 +293,7 @@ class Evolver:
             # re-decode would score untrained weights; evaluate inline exactly like the batched path.
             for index, (genome, module) in zip(batch_indices, trained_pairs):
                 metrics = self.evaluate_op(genome, module, adapter)
-                results[index] = Assessed(genome, metrics, self.fitness(genome, metrics), module)
+                results[index] = Assessed(genome, metrics, self._score(genome, metrics), module)
 
         if serial_async is not None:
             for index, (genome, metrics, fitness) in zip(serial_indices, serial_async.get()):
@@ -650,6 +654,7 @@ def _assess_in_worker(
         return genome, _floored_metrics(), _FLOOR_FITNESS
     genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
     metrics = evaluate_op(genome, module, adapter)
+    stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)
 
 
@@ -670,4 +675,5 @@ def _evaluate_in_worker(
     except (ValueError, KeyError):
         return genome, _floored_metrics(), _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
+    stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)

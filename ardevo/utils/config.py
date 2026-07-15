@@ -133,6 +133,7 @@ class Config:
             "rung": dataset.get("rung", 1),
             "n_samples": dataset.get("n_samples", 8),
             "support_fraction": dataset.get("support_fraction", 0.8),
+            "min_fixed_query_samples": dataset.get("min_fixed_query_samples", 0),
             # Operator tables preserved verbatim for build_evolver.
             "substrate": substrate,
             "evolution": evolution,
@@ -156,6 +157,7 @@ class Config:
             "elitism": evolution.get("elitism", 1),
             "rung": normalized["rung"],
             "n_samples": normalized["n_samples"],
+            "min_fixed_query_samples": normalized["min_fixed_query_samples"],
             "seed": normalized["seed"],
             "selection_kind": evolution.get("selection", {}).get("kind", "tournament"),
             "crossover_kind": evolution.get("crossover", {}).get("kind", "none"),

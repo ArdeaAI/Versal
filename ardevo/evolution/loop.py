@@ -34,6 +34,7 @@ from ardevo.evolution.composition import (
     writeback_composition,
 )
 from ardevo.evolution.evolver import Evolver, get_shared_pool, get_worker_library
+from ardevo.evolution.fitness import stamp_complexity_metrics
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from ardevo.evolution.mutation import MutationContext
 from ardevo.evolution.registry import Registry, _bind_prefixed, build_evolver
@@ -150,6 +151,19 @@ def assess_composition_pure(
         comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False))
         comp = writeback_composition(comp, net)
     metrics = evaluate_op(comp, net, _CompositionEvalAdapter(spec))
+    stamp_complexity_metrics(comp, metrics, library)
+    if library is not None:
+        from ardevo.library import MODULE, expanded_payload_complexity
+
+        live_cost = 0
+        for node_id in comp.module_ids:
+            reference = comp.nodes[node_id].ref
+            if not reference.startswith("live:"):
+                continue
+            genome = species_champions.get(int(reference.removeprefix("live:")))
+            if genome is not None:
+                live_cost += expanded_payload_complexity(MODULE, genome_to_dict(genome), library)
+        metrics["expanded_complexity"] += float(live_cost)
     return AssessedComposition(comp=comp, metrics=metrics, fitness=fitness(comp, metrics), net=net)
 
 

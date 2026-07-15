@@ -24,6 +24,7 @@ STAGES: dict[str, tuple[str, str]] = {
     "direct": ("Evolve network", "grow and train a task-specific topology"),
     "composition": ("Compose modules", "wire reusable modules with trainable glue"),
     "decompose": ("Decompose", "split the task into valid subtasks and solve them recursively"),
+    "decompose_first": ("Decompose first", "split an oversized task before attempting a flat network"),
     "query": ("Held-out query", "score the support-selected executable champion once"),
     "persist": ("Persist result", "retain a solution or useful stepping stone for later tasks"),
     "time_budget": ("Deadline", "stop work cleanly when the task allowance is exhausted"),
@@ -91,10 +92,11 @@ class RuntimeDisplay:
         self._active_stage = label
         BOARD.stage(label, detail or concept)
 
-    def generation(self, strategy: str, generation: int, best_fitness: float, support_accuracy: float, mean_fitness: float) -> None:
+    def generation(self, strategy: str, generation: int, best_fitness: float, support_accuracy: float, mean_fitness: float, *, depth: int = 0) -> None:
         label = STAGES.get(strategy, (strategy, ""))[0]
         self._active_stage = label
-        self._provisional_support = support_accuracy if self._provisional_support is None else max(self._provisional_support, support_accuracy)
+        if depth == 0:
+            self._provisional_support = support_accuracy if self._provisional_support is None else max(self._provisional_support, support_accuracy)
         BOARD.generation(label, generation, best_fitness, support_accuracy, mean_fitness)
 
     def stage_result(
@@ -109,7 +111,7 @@ class RuntimeDisplay:
     ) -> None:
         label, concept = STAGES.get(stage, (stage.replace("_", " ").title(), ""))
         self._active_stage = label
-        if support_accuracy is not None:
+        if support_accuracy is not None and depth == 0:
             self._provisional_support = support_accuracy if self._provisional_support is None else max(self._provisional_support, support_accuracy)
         style, symbol = {
             "accepted": ("green", "✓"),
@@ -127,7 +129,8 @@ class RuntimeDisplay:
         row.add_column(ratio=1)
         row.add_column(justify="right", style="dim")
         prefix = f"{'  ' * depth}{symbol}"
-        score = f" · support {support_accuracy:.4f}" if support_accuracy is not None else ""
+        score_label = "support" if depth == 0 else "subtask support"
+        score = f" · {score_label} {support_accuracy:.4f}" if support_accuracy is not None else ""
         timing = _duration(seconds) if seconds is not None else ""
         row.add_row(Text(prefix, style=style), Text(label, style=style), Text(f"{detail or concept}{score}"), timing)
         self.console.print(row)
@@ -179,8 +182,19 @@ class RuntimeDisplay:
             Text("HELD-OUT QUERY ACCURACY", style="bold bright_magenta"),
             _accuracy(getattr(attempt, "query_accuracy", None), getattr(attempt, "query_status", "legacy_missing"), "bold bright_magenta"),
         )
+        diagnostic = getattr(attempt, "diagnostic_observation", None) or {}
+        if diagnostic and getattr(attempt, "support_accuracy", None) is None:
+            diagnostic_label = "subtask" if diagnostic.get("executable") else "router"
+            grid.add_row(
+                "Best diagnostic",
+                f"{float(diagnostic['score']):.4f} {diagnostic.get('metric')} · {diagnostic_label} {diagnostic.get('task')} at depth {diagnostic.get('depth')}",
+            )
         strategy = getattr(attempt, "strategy", None) or "none"
-        grid.add_row("Selected path", f"{STAGES.get(strategy, (strategy, ''))[0]} · {getattr(attempt, 'generations', 0)} generations")
+        if strategy == "time_budget":
+            grid.add_row("Selected path", "none — no executable parent champion")
+            grid.add_row("Stopped during", "task deadline")
+        else:
+            grid.add_row("Selected path", f"{STAGES.get(strategy, (strategy, ''))[0]} · {getattr(attempt, 'generations', 0)} generations")
         if solved and new_library_keys:
             persistence = f"saved {len(new_library_keys)} new entr{'y' if len(new_library_keys) == 1 else 'ies'}"
         elif not solved and getattr(attempt, "library_key", None):
@@ -194,7 +208,8 @@ class RuntimeDisplay:
         timing = Tree(Text(f"Timing · {_duration(task_seconds)} total", style="bold"), guide_style="dim")
         for stage, seconds in (getattr(attempt, "stage_seconds", None) or {}).items():
             label = STAGES.get(stage, (stage.replace("_", " ").title(), ""))[0]
-            timing.add(f"{label}: {_duration(float(seconds))}")
+            inclusive = " (includes recursive work)" if stage in {"decompose", "decompose_first"} else ""
+            timing.add(f"{label}: {_duration(float(seconds))}{inclusive}")
         body = Group(grid, Text(), timing)
         border = "green" if solved else "red"
         self.console.print(Panel(body, title=f"Task {cursor}/{total} · rung {rung} · {name}", border_style=border, padding=(1, 2)))

@@ -47,19 +47,24 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert canary["machine_env"] == "MonadMetal"
     assert canary["schedule"]["rungs"] == "all"
     assert canary["orchestrator"]["max_depth"] == 8
+    assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
+    assert canary["min_fixed_query_samples"] == 32
+    assert canary["orchestrator"]["refine"]["mode"] == "always"
     assert canary["evolution"]["composition"]["max_initial_glue_values"] == 0
 
     smoke = Config(Config.PROJECT_ROOT / "configs" / "smoke.toml").current
     assert smoke["orchestrator"]["evolve"] == canary["orchestrator"]["evolve"]
     assert smoke["n_samples"] == 48
     assert smoke["orchestrator"]["max_depth"] == 1
+    assert smoke["orchestrator"]["refine"]["mode"] == "decay"
+    assert smoke["orchestrator"]["refine"]["budget_k"] == 4
     assert smoke["orchestrator"]["direct"]["pop_size"] == 16
     assert smoke["evolution"]["composition"]["pop_size"] == 24
     assert smoke["evolution"]["composition"]["max_initial_glue_values"] == 5_000_000
 
     brute = Config(Config.PROJECT_ROOT / "configs" / "brute.toml").current
-    assert brute["schedule"]["rungs"] == [3]
-    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 20
+    assert brute["schedule"]["rungs"] == [1]
+    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 2000
     assert brute["n_samples"] == 400
     assert brute["orchestrator"]["budgets"]["depth0"] == 2000
     assert brute["orchestrator"]["max_total_task_seconds"] == 7200

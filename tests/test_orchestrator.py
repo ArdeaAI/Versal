@@ -393,6 +393,9 @@ def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposab
         lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.3}),
     )
     assert orchestrator._subtasks_promising(subtasks) is False
+    diagnostic = orchestrator._best_diagnostic_observation
+    assert diagnostic is not None and diagnostic["score"] == 0.3
+    assert diagnostic["executable"] is False
 
     # Probe reports a fittable support -> the decomposition is allowed through.
     setattr(
@@ -401,6 +404,8 @@ def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposab
         lambda task, spec, budget, seed_comps=None: StrategyResult(strategy="direct", metric=0.0, generations_used=budget, champion_metrics={"support_accuracy": 0.95}),
     )
     assert orchestrator._subtasks_promising(subtasks) is True
+    diagnostic = orchestrator._best_diagnostic_observation
+    assert diagnostic is not None and diagnostic["score"] == 0.95
 
 
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:
@@ -468,12 +473,12 @@ def test_refine_disabled_is_exactly_todays_hit(tmp_path: Path, xor_task: Task, s
     [
         (0.91, 0.0, 99, MODULE, True),  # metric win beats everything downstream
         (0.89, 0.9, 1, MODULE, False),  # metric loss loses regardless
-        (0.90, 0.52, 99, MODULE, True),  # metric tie, robustness win
-        (0.90, 0.48, 1, MODULE, False),  # metric tie, robustness loss
-        (0.90, 0.50, 9, MODULE, True),  # tie-tie, smaller topology wins (minimize over time)
+        (0.90, 0.52, 99, MODULE, False),  # inside metric band, bloat loses despite robustness
+        (0.90, 0.48, 1, MODULE, True),  # inside metric band, simplicity wins first
+        (0.90, 0.50, 9, MODULE, True),  # smaller topology wins (minimize over time)
         (0.90, 0.50, 10, MODULE, False),  # equal everything is a non-event
         (0.905, 0.50, 10, MODULE, False),  # epsilon boundary: not strictly beyond the band
-        (0.90, 0.50, 1, COMPOSITION, False),  # cross-type size comparison is meaningless
+        (0.90, 0.50, 1, COMPOSITION, True),  # expanded cost makes entry types comparable
         (math.nan, 0.9, 1, MODULE, False),  # non-finite candidate never wins
         (0.99, math.inf, 1, MODULE, False),
     ],
@@ -686,7 +691,7 @@ def test_retire_guard_requires_strict_margin(tmp_path: Path, xor_task: Task, sol
     key = planted()
     simpler_other_type = RefinementRank(metric=1.0, robustness=0.005, complexity=4, entry_type=COMPOSITION)
     orchestrator._retire_if_dominated(key, simpler_other_type, incumbent)
-    assert not library.is_retired(key)  # cross-type size comparison stays meaningless
+    assert library.is_retired(key)  # expanded complexity makes cross-type comparison meaningful
 
 
 def test_refine_capability_gain_recharges_lineage_cooldown(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
@@ -726,6 +731,22 @@ def test_refine_compression_gain_spends_lineage_cooldown(tmp_path: Path, xor_tas
     )
     assert improved is None and generations == 0
     assert orchestrator.counters["refine_skipped_decayed"] == 1
+
+
+def test_refine_always_spends_reduced_budget_on_every_hit(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table(mode="always"))
+    key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    calls: list[dict] = []
+    orchestrator.strategies = [("direct", _fake_direct(0.5, 0.0, linear_genome, calls))]
+
+    for _ in range(6):
+        solution = orchestrator.solve(xor_task)
+        assert solution is not None and solution.key == key  # known-good fallback never regresses
+
+    assert [call["budget"] for call in calls] == [8] * 6
+    assert orchestrator.counters["refine_attempts"] == 6
+    assert orchestrator.counters["refine_no_gain"] == 6
+    assert orchestrator.counters["refine_skipped_decayed"] == 0
 
 
 def _wall_table(**overrides) -> dict:

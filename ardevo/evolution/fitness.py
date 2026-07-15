@@ -27,7 +27,7 @@ def query_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
 @FITNESS.register("complexity_penalty")
 def complexity_penalty(genome: Genome, metrics: dict[str, float]) -> float:
     # Negative so a larger graph lowers fitness; the weight scales the pressure.
-    return -float(genome.complexity())
+    return -float(metrics.get("expanded_complexity", genome.complexity()))
 
 
 @FITNESS.register("hidden_penalty")
@@ -141,7 +141,31 @@ def connection_cost(genome: Genome, metrics: dict[str, float]) -> float:
             total += 1.0
         else:
             total += sum((a - b) ** 2 for a, b in zip(source, target))
-    return -total
+    # Geometry prices visible wiring. Referenced inner structure has no coordinates in this shell,
+    # so add its recursively expanded cost beyond the already-counted local topology.
+    expanded = float(metrics.get("expanded_complexity", genome.complexity()))
+    shell = float(metrics.get("shell_complexity", genome.complexity()))
+    return -(total + max(0.0, expanded - shell))
+
+
+def stamp_complexity_metrics(genome: Any, metrics: dict[str, float], library: Any | None) -> None:
+    """Attach local and recursively expanded topology costs before fitness/Pareto scoring."""
+
+    shell = int(genome.complexity())
+    expanded = shell
+    if library is not None:
+        from ardevo.library import COMPOSITION, MODULE, expanded_payload_complexity
+
+        if isinstance(genome, Genome):
+            from ardevo.evolution.genome import genome_to_dict
+
+            expanded = expanded_payload_complexity(MODULE, genome_to_dict(genome), library)
+        else:
+            from ardevo.evolution.composition import comp_to_dict
+
+            expanded = expanded_payload_complexity(COMPOSITION, comp_to_dict(genome), library)
+    metrics["shell_complexity"] = float(shell)
+    metrics["expanded_complexity"] = float(expanded)
 
 
 @dataclass
