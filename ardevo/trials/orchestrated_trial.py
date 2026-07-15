@@ -39,6 +39,8 @@ from ardevo.utils.device import capture_hardware_profile
 from ardevo.utils.logging import Logger
 from ardevo.utils.proctor import Proctor
 from ardevo.utils.runtime_display import RuntimeDisplay
+from ardevo.utils.shutdown import EscapeShutdown
+from ardevo.utils.status import BOARD
 
 logger = Logger.get_logger()
 console = Logger.get_console()
@@ -69,6 +71,7 @@ class OrchestratedTrial(Proctor):
         self.task_records: list[dict[str, Any]] = []
         self.interruptions: list[dict[str, Any]] = []
         self.display = RuntimeDisplay(console)
+        self.shutdown = EscapeShutdown(lambda: BOARD.event("Escape pressed · stopping at the next safe boundary and writing final reports"))
 
         report = build_pool_report(
             source=config["dataset"],
@@ -152,13 +155,16 @@ class OrchestratedTrial(Proctor):
             if bool(self.config.get("render_async", False)):
                 rendering.enable_async_rendering()
             self.display.enable(bool(self.config.get("live_status", True)))
-            orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self)
+            self.shutdown.start()
+            orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
             orchestrator.attempts = attempts
             if counters:
                 orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
             self.archive_manager = ArchiveManager.from_config(self.config, self.run_dir, self.library.root)
             self._write_run_summary(orchestrator, state, task_cursor, status="running")
             while task_cursor < self.tasks_to_run:
+                if self.shutdown.requested:
+                    break
                 index = self.scheduler.next_index(self.pool, state.rng)
                 entry = self.pool[index]
                 active_entry = entry
@@ -206,6 +212,8 @@ class OrchestratedTrial(Proctor):
                     self._archive_boundary(orchestrator, state, task_cursor)
                 elif task_cursor % self.checkpoint_every == 0:
                     self._persist_resume_state(orchestrator, state, task_cursor)
+                if self.shutdown.requested:
+                    break
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
             try:
                 if active_entry is not None and active_task_started is not None:
@@ -218,7 +226,8 @@ class OrchestratedTrial(Proctor):
                         active_stage=self.display.active_stage,
                         elapsed=elapsed,
                     )
-                self.display.close()  # release the terminal before the traceback
+                self.shutdown.stop()  # restore terminal input before releasing Rich or printing a traceback
+                self.display.close()
                 self.library.flush_stats()  # a crash still leaves the stats it had
                 rendering.flush_renders()  # pending async renders finish (their own failures only log)
                 self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
@@ -230,15 +239,19 @@ class OrchestratedTrial(Proctor):
             raise
 
         try:
+            gracefully_stopped = self.shutdown.requested
+            self.shutdown.stop()
             self.display.close()
             self.library.flush_stats()
             rendering.flush_renders()  # renders land before GC can delete images and before finalize
             self._persist_resume_state(orchestrator, state, task_cursor)
             if self.gc_enabled and not self.fresh_per_task:
                 self._run_gc(state)
-            self._write_run_summary(orchestrator, state, task_cursor, status="done")
-            self._publish_final_archive(orchestrator, state, task_cursor)
+            final_status = "stopped" if gracefully_stopped else "done"
+            self._write_run_summary(orchestrator, state, task_cursor, status=final_status)
+            self._publish_final_archive(orchestrator, state, task_cursor, status=final_status)
             self.results = {
+                "status": final_status,
                 "tasks_attempted": task_cursor,
                 "library_size": len(self.library),
                 "counters": dict(orchestrator.counters),
@@ -246,7 +259,7 @@ class OrchestratedTrial(Proctor):
                 "generations_run": state.generation,
                 "run_dir": str(self.run_dir),
             }
-            self.display.run_finished(self.task_records, seconds=time.perf_counter() - run_started, library_size=len(self.library))
+            self.display.run_finished(self.task_records, seconds=time.perf_counter() - run_started, library_size=len(self.library), status=final_status)
             self.finalize()
             return self.results
         finally:
@@ -298,7 +311,7 @@ class OrchestratedTrial(Proctor):
             try:
                 seed = int(self.config.get("seed", 0)) * 1_000_003 + task_cursor
                 state = loop.fresh_state(random.Random(seed))
-                isolated = Orchestrator(self.config, loop, library, state, proctor=self)
+                isolated = Orchestrator(self.config, loop, library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
                 solution = isolated.solve(entry.task)
                 library.flush_stats()
                 attempt = isolated.attempts[-1] if isolated.attempts else None
@@ -589,11 +602,11 @@ class OrchestratedTrial(Proctor):
             logger.exception("best-effort external archive snapshot failed at task %d", task_cursor)
             return None
 
-    def _publish_final_archive(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int) -> None:
-        """Make a failed authoritative final upload visibly resumable instead of leaving `done`."""
+    def _publish_final_archive(self, orchestrator: Orchestrator, state: HierarchicalState, task_cursor: int, *, status: str = "done") -> None:
+        """Publish the terminal state; make a failed authoritative upload visibly resumable."""
 
         try:
-            self._archive_boundary(orchestrator, state, task_cursor, status="done", force=True)
+            self._archive_boundary(orchestrator, state, task_cursor, status=status, force=True)
         except BaseException as error:
             self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: external archive: {type(error).__name__}: {error}")
             raise

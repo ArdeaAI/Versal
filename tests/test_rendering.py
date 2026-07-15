@@ -361,18 +361,39 @@ def test_overmind_default_grid_keeps_order_at_eight_across() -> None:
     assert [box.label for box in second_row] == ["v8"]
 
 
+def test_pruned_overmind_compacts_survivors_to_eight_across_and_remaps_paths() -> None:
+    from ardevo.rendering import build_overmind_spec, prune_overmind_view
+
+    view = _grid_view(10)
+    view.vertices[1].retired = True
+    view.vertices[4].retired = True
+    view.pathways = [(0, 2, 0.8), (1, 2, 0.7), (8, 9, 0.6)]
+
+    pruned = prune_overmind_view(view)
+
+    assert [vertex.label for vertex in pruned.vertices] == ["v0", "v2", "v3", "v5", "v6", "v7", "v8", "v9"]
+    assert pruned.pathways == [(0, 1, 0.8), (6, 7, 0.6)]
+    spec = build_overmind_spec(pruned, legend=False)
+    cells = [box for box in spec.containers if box.depth == 1]
+    assert len({round(box.y1, 6) for box in cells}) == 1
+    assert len(cells) == 8
+
+
 def test_overmind_render_uses_double_resolution_and_wider_sides(monkeypatch, tmp_path: Path) -> None:
     import ardevo.rendering as rendering
 
     captured: dict[str, float | int] = {}
+    paths: list[Path] = []
 
     def capture(path, _spec, _title, **kwargs):
+        paths.append(path)
         captured.update(kwargs)
         return path
 
     monkeypatch.setattr(rendering, "_render_spec_png", capture)
     out_path = tmp_path / "overmind.png"
     assert rendering.render_overmind(out_path, _grid_view(1)) == out_path
+    assert paths == [out_path, tmp_path / "overmind_pruned.png"]
     assert captured == {"dpi": 300, "x_padding": 1.8}
 
 

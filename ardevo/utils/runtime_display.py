@@ -28,6 +28,7 @@ STAGES: dict[str, tuple[str, str]] = {
     "query": ("Held-out query", "score the support-selected executable champion once"),
     "persist": ("Persist result", "retain a solution or useful stepping stone for later tasks"),
     "time_budget": ("Deadline", "stop work cleanly when the task allowance is exhausted"),
+    "shutdown": ("Graceful stop", "finish the current safe step and persist the run"),
 }
 
 STATUS_REASONS = {
@@ -36,6 +37,7 @@ STATUS_REASONS = {
     "evaluation_unavailable": "evaluation did not produce a valid measurement",
     "query_split_unavailable": "the task has no usable held-out query split",
     "time_limit_before_evaluation": "the deadline arrived before held-out evaluation",
+    "shutdown_before_evaluation": "the run was stopped before held-out evaluation",
     "not_reached": "the stage was not reached",
     "task_crashed": "the task was interrupted before evaluation completed",
     "legacy_missing": "not recorded by this run schema",
@@ -160,6 +162,8 @@ class RuntimeDisplay:
             reason = "accepted executable champion"
         elif failure_stage == "time_budget":
             reason = "task deadline reached"
+        elif failure_stage == "shutdown_requested":
+            reason = "Escape requested a graceful stop"
         elif failure_stage == "parent_re_evolve":
             reason = "subtasks solved, but the recomposed parent stayed below threshold"
         elif isinstance(failure_stage, str) and failure_stage.startswith("subtask:"):
@@ -190,9 +194,9 @@ class RuntimeDisplay:
                 f"{float(diagnostic['score']):.4f} {diagnostic.get('metric')} · {diagnostic_label} {diagnostic.get('task')} at depth {diagnostic.get('depth')}",
             )
         strategy = getattr(attempt, "strategy", None) or "none"
-        if strategy == "time_budget":
+        if strategy in {"time_budget", "shutdown"}:
             grid.add_row("Selected path", "none — no executable parent champion")
-            grid.add_row("Stopped during", "task deadline")
+            grid.add_row("Stopped during", "task deadline" if strategy == "time_budget" else "graceful shutdown")
         else:
             grid.add_row("Selected path", f"{STAGES.get(strategy, (strategy, ''))[0]} · {getattr(attempt, 'generations', 0)} generations")
         if solved and new_library_keys:
@@ -236,14 +240,15 @@ class RuntimeDisplay:
         grid.add_row("Elapsed", _duration(elapsed))
         self.console.print(Panel(grid, title=f"Interrupted · {name}", border_style="red"))
 
-    def run_finished(self, task_records: list[dict[str, Any]], *, seconds: float, library_size: int) -> None:
+    def run_finished(self, task_records: list[dict[str, Any]], *, seconds: float, library_size: int, status: str = "done") -> None:
         outcomes = Counter(record.get("outcome", "unknown") for record in task_records)
         table = Table.grid(padding=(0, 2))
         table.add_row("Tasks completed", str(len(task_records)))
         table.add_row("Outcomes", " · ".join(f"{name} {count}" for name, count in sorted(outcomes.items())) or "none")
         table.add_row("Elapsed", _duration(seconds))
         table.add_row("Library size", str(library_size))
-        self.console.print(Panel(table, title="Run complete", border_style="green"))
+        stopped = status == "stopped"
+        self.console.print(Panel(table, title="Run stopped gracefully" if stopped else "Run complete", border_style="yellow" if stopped else "green"))
 
 
 class NullRuntimeDisplay:

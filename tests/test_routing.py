@@ -397,12 +397,39 @@ def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solvi
     service = RouterService(library, d_model=16, top_k=2, max_steps=2, persist_dir=tmp_path / "lib" / "router", image_dir=image_dir)
     service.sync()  # one vertex -> first render
     overmind = image_dir / "overmind.png"
-    assert overmind.exists()
+    pruned = image_dir / "overmind_pruned.png"
+    assert overmind.exists() and pruned.exists()
     first_mtime = overmind.stat().st_mtime_ns
     # A new library entry is a "significant addition": the portrait refreshes.
     library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
     assert service.sync() == 1
     assert overmind.stat().st_mtime_ns >= first_mtime  # rewritten on growth
+
+
+def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(
+    tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ardevo.rendering as rendering
+
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    evicted_key = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    service = RouterService(library, d_model=16, top_k=1, max_steps=1, image_dir=tmp_path / "lib" / "images")
+    service.sync()
+    evicted_name = sanitize_key(evicted_key)
+    service.evicted[evicted_key] = {"route_epoch": 2, "reuse_epoch": 1}
+    service._remove_vertex(evicted_name)
+    captured: list[rendering.OvermindView] = []
+
+    def capture(_render, _path, view, **_kwargs):
+        captured.append(view)
+
+    monkeypatch.setattr(rendering, "submit_render", capture)
+    service.render_overmind()
+
+    assert captured
+    historical = next(vertex for vertex in captured[-1].vertices if vertex.key == evicted_key)
+    assert historical.retired is True
+    assert "route evicted" in historical.label
 
 
 def test_build_overmind_spec_embeds_experts_and_degrades(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:

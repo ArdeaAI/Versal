@@ -304,7 +304,15 @@ class StallDetector:
 
 
 class Orchestrator:
-    def __init__(self, config: dict[str, Any], loop: HierarchicalLoop, library: ModuleLibrary, state: HierarchicalState, proctor: Any = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        loop: HierarchicalLoop,
+        library: ModuleLibrary,
+        state: HierarchicalState,
+        proctor: Any = None,
+        shutdown_requested: Callable[[], bool] | None = None,
+    ) -> None:
         table = config.get("orchestrator", {})
         self.accept_metric = str(table.get("accept_metric", "query_accuracy"))
         self.search_metric = str(table.get("search_metric", self.accept_metric))
@@ -385,6 +393,7 @@ class Orchestrator:
         self.library = library
         self.state = state
         self.proctor = proctor
+        self._shutdown_requested_callback = shutdown_requested
         self.display = getattr(proctor, "display", NULL_DISPLAY)
         self.attempts: list[Attempt] = []
         self.counters = {
@@ -469,16 +478,18 @@ class Orchestrator:
                 self._total_task_deadline = previous_total_deadline
 
     def _solve_timed(self, task: Task, depth: int = 0) -> Solution | None:
-        if self._total_deadline_exceeded():
-            return self._record_total_timeout(task, depth)
-        spec = comp_task_spec(task, include_query=not self.blind_query, structured_grid=self.structured_grid)
-        report_spec = comp_task_spec(task, structured_grid=self.structured_grid) if self.blind_query else spec
-        name = task.meta.name
         if depth == 0:
             self._failure_stage = None  # forensics for THIS top-level task only
             self._failure_op = None
             self._best_diagnostic_observation: dict[str, Any] | None = None
             self._best_parent_result: StrategyResult | None = None
+        if self._shutdown_requested():
+            return self._record_shutdown(task, depth)
+        if self._total_deadline_exceeded():
+            return self._record_total_timeout(task, depth)
+        spec = comp_task_spec(task, include_query=not self.blind_query, structured_grid=self.structured_grid)
+        report_spec = comp_task_spec(task, structured_grid=self.structured_grid) if self.blind_query else spec
+        name = task.meta.name
 
         self.display.stage_started("lookup")
         lookup_started = time.perf_counter()
@@ -495,6 +506,8 @@ class Orchestrator:
             )
             return self._handle_library_hit(hit, task, spec, depth)
         self.display.stage_result("lookup", "miss", "no compatible learned solution cleared the support gate", seconds=time.perf_counter() - lookup_started, depth=depth)
+        if self._shutdown_requested():
+            return self._record_shutdown(task, depth)
         if self._total_deadline_exceeded():
             return self._record_total_timeout(task, depth)
         self.counters["library_misses"] += 1
@@ -519,7 +532,7 @@ class Orchestrator:
             self.counters["wall_seeded_attempts"] += 1
         result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
         result = self._remember_or_recover_parent_result(result, depth)
-        if self.blind_query:
+        if self.blind_query and not self._shutdown_requested():
             result = self._attach_report_metrics(result, report_spec)
             _support, query, _support_status, query_status = self._quality_of_result(result)
             if result.has_admissible_champion:
@@ -536,8 +549,10 @@ class Orchestrator:
             self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key))
             return self._solution_from_result(result, key)
 
-        timed_out = self._deadline_exceeded()  # sampled ONCE: the failure forensics below must match the decompose gate
-        if depth < self.max_depth and not timed_out and not decomposed_first:  # decompose-first already spent its shot
+        stopping = self._shutdown_requested()
+        timed_out = self._time_deadline_exceeded()
+        halted = stopping or timed_out
+        if depth < self.max_depth and not halted and not decomposed_first:  # decompose-first already spent its shot
             decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
             # Wall time of the whole decompose phase (probe evolves + sub-solves; sub-solve attempts
@@ -546,18 +561,20 @@ class Orchestrator:
                 self._active_stages["decompose"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
-            timed_out = self._deadline_exceeded()
+            stopping = self._shutdown_requested()
+            timed_out = self._time_deadline_exceeded()
+            halted = stopping or timed_out
 
         self.counters["failures"] += 1
         if timed_out:
-            # The counter key only exists when max_task_seconds > 0, and timed_out requires it.
-            # Decompose was skipped above, so at depth 0 the forensics slot is free to claim.
             self.counters["time_budget_hits"] += 1
             total_deadline = getattr(self, "_total_task_deadline", None)
             if depth == 0 and total_deadline is not None and time.perf_counter() > total_deadline:
                 self.counters["total_time_budget_hits"] += 1
             if depth == 0:
                 self._failure_stage = "time_budget"
+        elif stopping and depth == 0:
+            self._failure_stage = "shutdown_requested"
         stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
         if stone_key is not None:
             self.display.stage_result("persist", "saved", "below-threshold stepping stone retained for a later attempt", depth=depth)
@@ -570,7 +587,7 @@ class Orchestrator:
                 library_key=stone_key,
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
-                query_status="time_limit_before_evaluation" if timed_out else None,
+                query_status="time_limit_before_evaluation" if timed_out else ("shutdown_before_evaluation" if stopping else None),
             )
         )
         logger.debug("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
@@ -594,13 +611,52 @@ class Orchestrator:
 
     # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
 
-    def _deadline_exceeded(self) -> bool:
+    def _shutdown_requested(self) -> bool:
+        callback = self._shutdown_requested_callback
+        return bool(callback is not None and callback())
+
+    def _time_deadline_exceeded(self) -> bool:
         deadline = getattr(self, "_solve_deadline", None)
         return deadline is not None and time.perf_counter() > deadline
 
+    def _deadline_exceeded(self) -> bool:
+        return self._shutdown_requested() or self._time_deadline_exceeded()
+
     def _total_deadline_exceeded(self) -> bool:
         deadline = getattr(self, "_total_task_deadline", None)
-        return deadline is not None and time.perf_counter() > deadline
+        return self._shutdown_requested() or (deadline is not None and time.perf_counter() > deadline)
+
+    def _record_shutdown(self, task: Task, depth: int) -> None:
+        """Record a cooperative stop without misclassifying it as a configured deadline."""
+
+        self.counters["failures"] += 1
+        if depth == 0:
+            self._failure_stage = "shutdown_requested"
+        recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
+        if recovered is not None:
+            attempt = self._attempt_from_result(
+                recovered,
+                task=task.meta.name,
+                depth=depth,
+                outcome="failed",
+                failure_stage="shutdown_requested" if depth == 0 else None,
+                query_status="shutdown_before_evaluation",
+            )
+        else:
+            attempt = Attempt(
+                task=task.meta.name,
+                depth=depth,
+                outcome="failed",
+                metric=0.0,
+                generations=0,
+                strategy="shutdown",
+                failure_stage="shutdown_requested" if depth == 0 else None,
+                support_status="not_reached",
+                query_status="shutdown_before_evaluation",
+            )
+        self._record(attempt)
+        logger.debug("orchestrator stopped %s at depth %d after an Escape request", task.meta.name, depth)
+        return None
 
     def _record_total_timeout(self, task: Task, depth: int) -> None:
         """Record an expired cumulative budget without starting lookup, probing, or evolution."""
@@ -663,7 +719,7 @@ class Orchestrator:
         """Chain the per-solve deadline behind a stall detector. With no deadline the detector is
         returned AS-IS (identical object flow, the byte-identical off path); with one, the detector
         still runs FIRST so its flatline state advances exactly as it would unbudgeted."""
-        if getattr(self, "_solve_deadline", None) is None:
+        if getattr(self, "_solve_deadline", None) is None and self._shutdown_requested_callback is None:
             return detector
 
         def stop(generation: int, best: Any) -> bool:
@@ -685,6 +741,7 @@ class Orchestrator:
             on_generation=self._on_generation,
             accepts=self._accepts_item,
             deadline_exceeded=self._deadline_exceeded,
+            shutdown_requested=self._shutdown_requested,
         )
 
     def _evolve(
@@ -702,9 +759,15 @@ class Orchestrator:
         resource_metrics: dict[str, float] = {}
         remaining = budget
         carry = 0
+        if self._shutdown_requested():
+            return StrategyResult(strategy="shutdown", metric=0.0, generations_used=0)
         if self._total_deadline_exceeded():
             return StrategyResult(strategy="time_budget", metric=0.0, generations_used=0)
         for position, (name, strategy) in enumerate(self.strategies):
+            if self._shutdown_requested():
+                if not results:
+                    return StrategyResult(strategy="shutdown", metric=0.0, generations_used=0)
+                break
             # Past the deadline, later ladder stages never start; position 0 always runs so
             # `max(results)` below is never asked to rank an empty list.
             if position > 0 and self._deadline_exceeded():
@@ -953,6 +1016,7 @@ class Orchestrator:
             on_generation=self._on_generation,
             accepts=lambda item: self._metric(item) >= target_metric,
             deadline_exceeded=self._deadline_exceeded,
+            shutdown_requested=self._shutdown_requested,
             topology_tabu=topology_tabu,
         )
 
@@ -1158,6 +1222,16 @@ class Orchestrator:
             self.counters["library_inactivity_retired"] += len(retired)
         if attempt is not None and retired:
             attempt.strategy_metrics["library_inactivity_retired"] = float(len(retired))
+        if retired:
+            # Retirement happens after the routed stage has saved. Refresh its in-memory mask and
+            # paired portraits now, so a run that stops at this boundary still shows current state.
+            for name, strategy in self.strategies:
+                service = getattr(strategy, "service", None)
+                if name == "routed" and service is not None:
+                    service.sync(
+                        include_compositions=bool(getattr(strategy, "include_compositions", True)),
+                        exclude_temporal=bool(getattr(strategy, "exclude_temporal", True)),
+                    )
         return retired
 
     @staticmethod

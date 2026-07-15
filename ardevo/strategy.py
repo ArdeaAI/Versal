@@ -54,6 +54,7 @@ class StrategyRuntime:
     on_generation: Callable[[str, int, Any, float], None] | None = None  # (strategy, gen, best, mean)
     accepts: Callable[[Any], bool] | None = None
     deadline_exceeded: Callable[[], bool] | None = None
+    shutdown_requested: Callable[[], bool] | None = None
     topology_tabu: "TopologyTabuSession | None" = None
 
     def accepted(self, item: Any) -> bool:
@@ -61,6 +62,9 @@ class StrategyRuntime:
 
     def should_stop(self) -> bool:
         return self.deadline_exceeded is not None and self.deadline_exceeded()
+
+    def should_shutdown(self) -> bool:
+        return self.shutdown_requested is not None and self.shutdown_requested()
 
 
 @dataclass

@@ -466,6 +466,11 @@
     },
     {
       "access": "write",
+      "condition": "full overmind portrait is written; retired experts are compacted out",
+      "path": "<library_dir>/images/overmind_pruned.png"
+    },
+    {
+      "access": "write",
       "condition": "new run creates <run_dir>; --resume uses the supplied directory instead",
       "path": "results/<timestamp>_orchestrated/"
     },

@@ -67,6 +67,8 @@ uv run runtime_inventory --check                  # verify config, registry, CLI
 
 Set `[run] clearml = true` to track in ClearML; it degrades gracefully offline. Machine env maps to a queue:
 `MonadMetal`/`MonadCPU`/`local` run locally, `LatticeCPU`/`LatticeCUDA` enqueue remotely.
+In an interactive local run, press Escape to stop at the next optimizer/generation boundary and
+write a resumable checkpoint plus final reports. Ctrl-C remains the immediate interruption path.
 
 The search grows a network *topology* from nothing and lets structural mutations add nodes/edges. A per-generation
 `train` step tunes each candidate's weights by gradient before scoring, so **evolution searches structure and the
@@ -130,15 +132,17 @@ builds into a `CompositionGenome` and verifies at the accept bar; the verified c
 the ordinary rails and becomes a new routable vertex at the next sync. On a cold library, routed short-circuits
 at zero cost, so evolution populates the vertex set first.
 
-`uv run render --overmind` draws the whole routed model to `library/images/overmind.png` as a top-down flow
-grid: input-adapter band up top, every expert a fully-embedded cell, output heads across the bottom, edges
+`uv run render --overmind` draws the routed history to `library/images/overmind.png` and its current-only
+companion to `library/images/overmind_pruned.png` as top-down flow grids: input-adapter band up top, every
+expert a fully-embedded cell, output heads across the bottom, edges
 widthed by observed lifetime gate traffic. A gold dot at each card's top-left is its network input anchor.
 Global inputs and inter-network or recurrent routes enter there; routes and final-output feeds leave from the
 rendered network's actual output nodes. Nested execution is explicit: a green line runs from the containing
 module/macro footprint node to the nested card's input anchor. Internal forward, recurrent, and glue edges stay
 node-to-node. The redundant dashed "built from" overlay is omitted. Cards retain their traffic-first order in
 eight-column rows; the canvas remains content-sized, writes at 300 DPI, and carries extra horizontal margin for
-large curves. Every render failure degrades to a labeled opaque box, never an exception.
+large curves. Both use eight columns; the pruned view removes retired experts and compacts survivors into
+the open space. Every render failure degrades to a labeled opaque box, never an exception.
 
 During a live campaign, `--metadata-overmind` is the isolated preview path: `--config` resolves its
 configured `library_dir`, entry/gallery renders are skipped, `router_state.pt` is never loaded, and only

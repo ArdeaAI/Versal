@@ -1054,6 +1054,28 @@ class OvermindView:
     pathways: list[tuple[int, int, float]] = field(default_factory=list)
 
 
+def prune_overmind_view(view: OvermindView) -> OvermindView:
+    """Remove retired cards and compact the remaining portrait without changing its grid width.
+
+    Vertex order is preserved, so :func:`build_overmind_spec` repacks the survivors left-to-right
+    into the same eight-column rows.  Pathway indices are remapped and edges touching a hidden
+    vertex disappear.
+    """
+
+    kept = [index for index, vertex in enumerate(view.vertices) if not vertex.retired]
+    remap = {old: new for new, old in enumerate(kept)}
+    pathways = [(remap[source], remap[target], weight) for source, target, weight in view.pathways if source in remap and target in remap]
+    return OvermindView(
+        vertices=[view.vertices[index] for index in kept],
+        input_signatures=list(view.input_signatures),
+        output_signatures=list(view.output_signatures),
+        d_model=view.d_model,
+        top_k=view.top_k,
+        max_steps=view.max_steps,
+        pathways=pathways,
+    )
+
+
 _ROW_GAP = 2.4  # vertical gap between grid rows; leaves room for the container label above a box
 _BAND_GAP = 4  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
@@ -1262,10 +1284,23 @@ def render_overmind(
     node_budget: int = DEFAULT_NODE_BUDGET,
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> Path:
-    """Render the entire routed model (every expert embedded, wired to the shared bus) to one PNG.
-    Intended for `<library_dir>/images/overmind.png`, refreshed whenever the model grows."""
+    """Render full and current-only portraits of the routed model.
+
+    Writing ``overmind.png`` also writes ``overmind_pruned.png``.  The full portrait retains
+    retired experts as opaque historical cards; the pruned portrait removes them and compacts the
+    survivors into the same eight-column grid.
+    """
     resolve = library_resolver(library) if library is not None else None
     spec = build_overmind_spec(view, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
     live = sum(1 for vertex in view.vertices if not vertex.retired)
-    title = f"overmind: {live} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
-    return _render_spec_png(out_path, spec, title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)
+    total = len(view.vertices)
+    title = f"overmind history: {live} current / {total} total, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
+    rendered = _render_spec_png(out_path, spec, title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)
+
+    if not out_path.stem.endswith("_pruned"):
+        pruned_path = out_path.with_name(f"{out_path.stem}_pruned{out_path.suffix}")
+        pruned = prune_overmind_view(view)
+        pruned_spec = build_overmind_spec(pruned, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
+        pruned_title = f"overmind current: {len(pruned.vertices)} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
+        _render_spec_png(pruned_path, pruned_spec, pruned_title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)
+    return rendered

@@ -47,6 +47,7 @@ RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "<library_dir>/grammar/grammar.json", "access": "read-write", "condition": "grammar strategy rebuilds after the live library key set changes"},
     {"path": "<library_dir>/images/<key>.png", "access": "delete", "condition": "optional run-end GC removes an unreferenced retired entry"},
     {"path": "<library_dir>/images/overmind.png", "access": "write", "condition": "routed expert set changes"},
+    {"path": "<library_dir>/images/overmind_pruned.png", "access": "write", "condition": "full overmind portrait is written; retired experts are compacted out"},
     {"path": "results/<timestamp>_orchestrated/", "access": "write", "condition": "new run creates <run_dir>; --resume uses the supplied directory instead"},
     {"path": "results/compute_policy.json", "access": "read", "condition": "canonical scheduled trainer uses a matching explicit calibration profile when present"},
     {"path": "<run_dir>/config.toml", "access": "read-write", "condition": "source config snapshot written on a new run and loaded by implicit --resume"},

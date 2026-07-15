@@ -116,6 +116,13 @@ def render_overmind_from_metadata(
     key_by_name = {sanitize_key(key): key for key in original_order}
     latent_order = list(key_by_name)
     retired = {name for name, key in key_by_name.items() if summaries[key].get("retired", False)}
+    for key in sorted(str(key) for key in (meta.get("evicted") or {}) if str(key) in summaries):
+        name = sanitize_key(key)
+        if name in key_by_name:
+            continue
+        key_by_name[name] = key
+        latent_order.append(name)
+        retired.add(name)
     step_usage = {str(name): [float(value) for value in values] for name, values in meta.get("step_usage_totals", {}).items()}
     ordered_names = overmind_vertex_order(latent_order, retired, step_usage)
 
@@ -134,11 +141,12 @@ def render_overmind_from_metadata(
     for name in ordered_names:
         key = key_by_name[name]
         is_retired = name in retired
+        route_evicted = key in (meta.get("evicted") or {})
         share = usage.get(name, 0.0) / total_usage
         vertices.append(
             OvermindVertex(
                 key=key,
-                label=f"{key}  ({share:.0%})" + ("  retired" if is_retired else ""),
+                label=f"{key}  ({share:.0%})" + ("  retired" if summaries[key].get("retired", False) else ("  route evicted" if route_evicted else "")),
                 retired=is_retired,
                 usage=share,
                 entry_share=entry_raw.get(name, 0.0) / entry_peak,
@@ -168,9 +176,9 @@ def main() -> None:
     parser.add_argument("--library", default=None, help="library dir to render (default: [orchestrator] library_dir from --config, else library)")
     parser.add_argument("--images", default=None, help="per-entry output dir (default: <library>/images)")
     parser.add_argument("--gallery", nargs="?", const="__default__", default=None, help="also write a contact-sheet PNG (default path: <library>/gallery.png)")
-    parser.add_argument("--overmind", action="store_true", help="also (re)render the whole routed model to <library>/images/overmind.png from <library>/router state")
-    parser.add_argument("--overmind-only", action="store_true", help="render only overmind.png; implies --overmind and skips entry/gallery renders")
-    parser.add_argument("--metadata-overmind", action="store_true", help="render only overmind.png from router metadata, without loading router_state.pt")
+    parser.add_argument("--overmind", action="store_true", help="also render full-history and current-only overmind portraits from <library>/router state")
+    parser.add_argument("--overmind-only", action="store_true", help="render only overmind.png and overmind_pruned.png; implies --overmind and skips entry/gallery renders")
+    parser.add_argument("--metadata-overmind", action="store_true", help="render only both overmind portraits from router metadata, without loading router_state.pt")
     parser.add_argument("--cold-overmind", action="store_true", help="ignore persisted router state and render the current library with an untrained router")
     parser.add_argument("--config", default=None, help="run config that selects the default library and shapes a cold overmind portrait")
     parser.add_argument("--columns", type=int, default=16, help="gallery columns")
@@ -247,7 +255,7 @@ def main() -> None:
                 persist_dir=router_dir,
                 image_dir=images_dir,
             )
-            service._rendered_vertex_count = -1  # force a render even if the count is unchanged
+            service._rendered_signature = None  # force a render even if the structure is unchanged
             service.render_overmind()
             gallery_note += f" | overmind -> {images_dir / 'overmind.png'}"
         else:

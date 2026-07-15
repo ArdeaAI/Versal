@@ -210,6 +210,7 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
         {"key": "m1_alpha", "retired": False},
         {"key": "m1_beta", "retired": False},
         {"key": "m1_retired", "retired": True},
+        {"key": "m1_evicted", "retired": False},
     ]
 
     class MetadataLibrarySpy:
@@ -235,6 +236,7 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
             "m1_beta": {"m1_alpha": 6.0},
             "m1_missing": {"m1_beta": 100.0},
         },
+        "evicted": {"m1_evicted": {"route_epoch": 8, "reuse_epoch": 4}},
     }
     metadata_path = tmp_path / "router_meta.json"
     metadata_path.write_text(json.dumps(meta))
@@ -255,10 +257,12 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
     assert captured["path"] == out_path
     assert captured["library"] is library_spy
     view = captured["view"]
-    assert [vertex.key for vertex in view.vertices] == ["m1_beta", "m1_alpha", "m1_retired"]
-    assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.6, 0.2, 0.2])
-    assert [vertex.mean_step for vertex in view.vertices] == pytest.approx([0.0, 1.0, 0.5])
-    assert view.vertices[-1].retired is True
+    assert [vertex.key for vertex in view.vertices] == ["m1_beta", "m1_alpha", "m1_retired", "m1_evicted"]
+    assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.6, 0.2, 0.2, 0.0])
+    assert [vertex.mean_step for vertex in view.vertices[:3]] == pytest.approx([0.0, 1.0, 0.5])
+    assert view.vertices[-1].mean_step is None
+    assert view.vertices[-2].retired is True and view.vertices[-1].retired is True
+    assert "route evicted" in view.vertices[-1].label
     assert view.input_signatures == ["BINARY|K:2", "REAL|K:3"]
     assert view.output_signatures == ["BINARY|K:1"]
     assert view.pathways == pytest.approx([(1, 0, 0.5), (1, 2, 1.0 / 6.0), (0, 1, 1.0)])

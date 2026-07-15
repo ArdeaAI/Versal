@@ -93,6 +93,25 @@ def test_task_panel_reports_lifecycle_changes_without_dumping_metrics() -> None:
     assert "router_vertices_expired" not in output
 
 
+def test_graceful_shutdown_panel_explains_escape_and_missing_evaluation() -> None:
+    display, stream = _render_display()
+    attempt = _attempt(
+        failure_stage="shutdown_requested",
+        support_accuracy=None,
+        support_status="not_reached",
+        query_status="shutdown_before_evaluation",
+        strategy="shutdown",
+        generations=0,
+    )
+    display.task_finished(3, 18, 3, "two_spirals", attempt, solved=False, task_seconds=1.2, new_library_keys=[], library_size=2)
+    display.run_finished([], seconds=1.2, library_size=2, status="stopped")
+
+    output = stream.getvalue()
+    assert "Escape requested a graceful stop" in output
+    assert "run was stopped before held-out evaluation" in output
+    assert "Run stopped gracefully" in output
+
+
 def test_stage_catalog_explains_actions_instead_of_repeating_command_names() -> None:
     assert STAGES["routed"] == ("Route experts", "combine frozen experts and distill an executable pathway")
     assert STAGES["composition"] == ("Compose modules", "wire reusable modules with trainable glue")

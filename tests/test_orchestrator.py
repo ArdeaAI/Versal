@@ -78,6 +78,20 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
     assert orchestrator.counters["library_hits"] == 1
 
 
+def test_shutdown_request_records_graceful_stop_without_deadline_accounting(tmp_path: Path, xor_task: Task) -> None:
+    requested = True
+    orchestrator = _orchestrator(tmp_path, shutdown_requested=lambda: requested)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.strategy == "shutdown"
+    assert attempt.failure_stage == "shutdown_requested"
+    assert attempt.support_status == "not_reached"
+    assert attempt.query_status == "shutdown_before_evaluation"
+    assert "time_budget_hits" not in orchestrator.counters
+
+
 def test_stall_triggers_decompose_recurse_and_level2_admission(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     calls: list[str] = []

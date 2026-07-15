@@ -598,7 +598,7 @@ class RouterService:
         self.library = library
         self.persist_dir = persist_dir
         self.persist_strict = persist_strict
-        self.image_dir = image_dir  # <library_dir>/images; where overmind.png lands
+        self.image_dir = image_dir  # <library_dir>/images; where full + pruned overmind portraits land
         self.adapter_rank = adapter_rank
         self.max_inline_depth = max_inline_depth
         self.lazy_residency = lazy_residency
@@ -623,7 +623,7 @@ class RouterService:
         self.usage_totals: dict[str, float] = {}
         self.transition_totals: dict[str, dict[str, float]] = {}
         self.step_usage_totals: dict[str, list[float]] = {}
-        self._rendered_vertex_count = -1  # forces the first overmind render once vertices exist
+        self._rendered_signature: tuple[tuple[str, bool], ...] | None = None
         self.net = RoutedNet(
             d_model=d_model,
             top_k=top_k,
@@ -663,8 +663,7 @@ class RouterService:
         for name in self.net._vertex_order:
             self.route_life.setdefault(name, self.route_patience_tasks)
         self.last_lifecycle_metrics = {"router_vertices_revived": float(revived)} if revived else {}
-        if added:
-            self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
+        self.render_overmind()  # the internal signature guard catches additions, revival, and retirement
         return added
 
     def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
@@ -756,6 +755,8 @@ class RouterService:
         if expired_edges:
             metrics["router_edges_expired"] = float(expired_edges)
         self.last_lifecycle_metrics = metrics
+        if expired:
+            self.render_overmind()
         return dict(metrics)
 
     def _remove_vertex(self, name: str) -> None:
@@ -820,13 +821,21 @@ class RouterService:
         return [name for _value, name in sorted(zip(projection, names), key=lambda pair: pair[0])]
 
     def render_overmind(self) -> None:
-        """Draw the WHOLE routed model (every expert embedded, wired to the shared bus) to
-        <library_dir>/images/overmind.png. Refreshed on structural growth; never raises, so a bad
-        render can no more kill a run than a library-entry render can."""
+        """Draw historical and current-only eight-column overmind portraits.
+
+        Route-evicted experts remain in the full image as retired historical cards while the
+        pruned companion omits them.  Refreshed on any structural lifecycle change; never raises.
+        """
         if self.image_dir is None:
             return
-        live = len(self.net._vertex_order)
-        if live == self._rendered_vertex_count:
+        current_keys = {self.net._vertices[name].original_key for name in self.net._vertex_order}
+        signature = tuple((self.net._vertices[name].original_key, name in self.net._retired) for name in self.net._vertex_order) + tuple(
+            (key, True) for key in sorted(self.evicted) if key not in current_keys
+        )
+        if not signature:
+            self._rendered_signature = signature
+            return
+        if signature == self._rendered_signature:
             return
         try:
             from ardevo.rendering import OvermindVertex, OvermindView, render_overmind, submit_render
@@ -867,6 +876,23 @@ class RouterService:
                         stepping_stone=stone,
                     )
                 )
+            # Route decay removes parameters from the active model, but its library payload still
+            # exists until ordinary library GC. Keep that history visible only in the full image.
+            for offset, key in enumerate(sorted(self.evicted)):
+                if key in current_keys:
+                    continue
+                summary = self.library.summary(key)
+                if summary is None:
+                    continue
+                retired_label = "retired" if summary.get("retired", False) else "route evicted"
+                vertices.append(
+                    OvermindVertex(
+                        key=key,
+                        label=f"{key}  {retired_label}",
+                        retired=True,
+                        embedding_rank=len(rank) + offset,
+                    )
+                )
             view = OvermindView(
                 vertices=vertices,
                 input_signatures=list(self.net.input_adapter_widths),
@@ -878,7 +904,7 @@ class RouterService:
             )
             # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
             submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library, max_inline_depth=self.max_inline_depth)
-            self._rendered_vertex_count = live
+            self._rendered_signature = signature
         except Exception as error:  # a render must never break a run
             logger.debug("overmind render skipped: %s", error)
 
@@ -1193,7 +1219,7 @@ class RoutedStrategy:
 
         zero_shot_metrics = evaluate(view, spec.encoded, spec.encoder)
         zero_shot_metric = runtime.metric_of(self._metrics_view(zero_shot_metrics))
-        if self.zero_shot_accept and runtime.accepted(self._metrics_view(zero_shot_metrics)):
+        if self.zero_shot_accept and runtime.accepted(self._metrics_view(zero_shot_metrics)) and not runtime.should_shutdown():
             service.record_traffic()  # once per task, from its final evaluation's gate decisions
             return self._resolve_win(task, spec, runtime, service, view, zero_shot_metrics, zero_shot_metric, zero_shot=True, steps_used=0, generations_used=0)
 
@@ -1207,7 +1233,7 @@ class RoutedStrategy:
         self._remember_for_replay(spec, input_key, head_key, support_input)
         accepted = runtime.accepted(self._metrics_view(metrics))
         generations_used = self._generations_for_steps(steps_used, allocated_generations)
-        if accepted:
+        if accepted and not runtime.should_shutdown():
             return self._resolve_win(task, spec, runtime, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used)
         return self._result(task, service, view, metrics, metric, zero_shot=False, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
