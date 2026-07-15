@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from ardevo.dataset.icarus import Task
-from ardevo.evolution.multitask import task_entry
+from ardevo.dataset.icarus_streaming import StreamingTaskRef
+from ardevo.evolution.multitask import reference_entry, task_entry
 from ardevo.orchestrator import Attempt
 from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from tests.test_orchestrator import _orchestrator
@@ -234,6 +235,73 @@ def test_run_summary_tolerates_configs_without_provenance(tmp_path: Path) -> Non
     assert summary["config_sources"] == [] and summary["seed"] == 0
 
 
+def test_run_summary_carries_streaming_pool_provenance_and_loading_metrics(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    trial.pool = [task_entry(xor_task)]
+    trial.dataset_provenance = {"source": "Ardea/Icarus-dataset", "revision": "a" * 40, "selection_algorithm": "shard_round_robin_v1"}
+    trial.task_pool_load_seconds = 1.25
+    trial.task_pool_ready = True
+
+    trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
+
+    summary = json.loads((trial.run_dir / "run_summary.json").read_text())
+    assert summary["dataset_provenance"] == trial.dataset_provenance
+    assert summary["task_pool"] == {"path": "task_pool.json", "schema_version": 1, "ready": True, "entries": 1, "load_seconds": 1.25}
+
+
+def test_task_pool_manifest_records_exact_resume_locators_atomically(tmp_path: Path) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    revision = "b" * 40
+    reference = StreamingTaskRef(17, "raven.b42", "rung_17", "rung_17/shard-00042.parquet", 3, revision)
+    trial.pool = [reference_entry(reference)]
+    trial.dataset_provenance = {"source": "Ardea/Icarus-dataset", "revision": revision, "selection_algorithm": "shard_round_robin_v1"}
+    trial.config["seed"] = 7
+    trial.config["schedule"] = {"rungs": [17], "tasks_per_rung": 1, "shuffle": True}
+    trial.rungs = [17]
+
+    trial._write_task_pool_manifest()
+
+    manifest = json.loads((trial.run_dir / "task_pool.json").read_text())
+    assert manifest["schema_version"] == 1 and manifest["complete"] is True
+    assert manifest["dataset"] == trial.dataset_provenance
+    assert manifest["selection"] == {"rungs": [17], "tasks_per_rung": 1, "shuffle": True, "seed": 7}
+    assert manifest["tasks"] == [reference.to_dict()]
+    assert trial._read_task_pool_manifest() == manifest
+    assert not list(trial.run_dir.glob(".task_pool.json.*"))
+
+
+def test_pool_loading_failure_is_reported_after_loading_status_exists(tmp_path: Path, monkeypatch) -> None:
+    import pytest
+
+    from ardevo.trials import orchestrated_trial
+    from tests.test_hierarchical_loop import _config as _loop_config
+
+    config = _loop_config()
+    config.update({"dataset": "offline", "n_samples": 4, "seed": 0, "live_status": False})
+    config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "library")}
+    config["schedule"] = {"kind": "round_robin", "rungs": [1], "tasks_per_rung": 1}
+    monkeypatch.setattr(orchestrated_trial.results, "DEFAULT_ROOT", tmp_path / "results")
+    trial = OrchestratedTrial(config)
+    trial.shutdown = cast(Any, SimpleNamespace(requested=False, start=lambda: None, stop=lambda: None))
+    status_seen_inside_loader: list[str] = []
+
+    def fail_after_summary() -> None:
+        status_seen_inside_loader.append(json.loads((trial.run_dir / "run_summary.json").read_text())["status"])
+        raise OSError("synthetic Hub outage")
+
+    monkeypatch.setattr(trial, "_load_task_pool", fail_after_summary)
+    with pytest.raises(OSError, match="synthetic Hub outage"):
+        trial.run()
+
+    assert status_seen_inside_loader == ["loading_tasks"]
+    summary = json.loads((trial.run_dir / "run_summary.json").read_text())
+    assert summary["status"] == "crashed: OSError: synthetic Hub outage"
+    assert summary["task_pool"]["ready"] is False and summary["tasks_attempted"] == 0
+    assert (trial.run_dir / "run_report.json").is_file() and (trial.run_dir / "run_report.md").is_file()
+
+
 def test_crash_leaves_a_diagnosable_summary(tmp_path: Path) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
@@ -333,9 +401,8 @@ def test_new_run_snapshots_exact_config_bytes(tmp_path: Path) -> None:
     assert (trial.run_dir / "config.effective.json.sha256").read_text() == f"{effective_hash}  config.effective.json\n"
 
 
-def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
-    """A rung that fails to LOAD aborts the run when require_all_rungs is set; the default stays
-    tolerant (the pre-existing skip-and-report behavior)."""
+def test_require_all_rungs_gates_deferred_pool_load(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    """Construction is cheap; a missing rung gates the deferred pool load inside ``run``."""
     import pytest
 
     from ardevo.evolution import multitask
@@ -349,11 +416,19 @@ def test_require_all_rungs_gates_construction(tmp_path: Path, xor_task: Task, mo
     config.update({"dataset": "synthetic", "n_samples": 4, "seed": 0})
     config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "lib")}
     config["schedule"] = {"kind": "interleave_rungs", "rungs": [1, 7], "require_all_rungs": True}
+    strict = OrchestratedTrial(config)
+    strict.run_dir = tmp_path / "strict"
+    strict.run_dir.mkdir()
+    strict.shutdown = cast(Any, SimpleNamespace(requested=False))
     with pytest.raises(RuntimeError, match="require_all_rungs.*rung 7"):
-        OrchestratedTrial(config)
+        strict._load_task_pool()
 
     config["schedule"]["require_all_rungs"] = False
-    trial = OrchestratedTrial(config)  # tolerant default: skips are reported, not fatal
+    trial = OrchestratedTrial(config)
+    trial.run_dir = tmp_path / "tolerant"
+    trial.run_dir.mkdir()
+    trial.shutdown = cast(Any, SimpleNamespace(requested=False))
+    trial._load_task_pool()  # tolerant default: skips are reported, not fatal
     assert [skipped.rung for skipped in trial.skipped_rungs] == [7]
 
 
@@ -373,6 +448,10 @@ def test_schedule_task_name_filters_are_deterministic(tmp_path: Path, xor_task: 
     config["orchestrator"] = {"tasks": 1, "library_dir": str(tmp_path / "lib")}
     config["schedule"] = {"kind": "interleave_rungs", "rungs": [18], "task_include": ["arc.*"], "task_exclude": ["*.train.*"]}
     trial = OrchestratedTrial(config)
+    trial.run_dir = tmp_path / "filtered"
+    trial.run_dir.mkdir()
+    trial.shutdown = cast(Any, SimpleNamespace(requested=False))
+    trial._load_task_pool()
     assert [entry.name for entry in trial.pool] == ["arc.eval.one"]
 
 

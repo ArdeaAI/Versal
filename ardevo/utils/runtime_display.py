@@ -17,6 +17,7 @@ from rich.tree import Tree
 from ardevo.utils.status import BOARD
 
 STAGES: dict[str, tuple[str, str]] = {
+    "load_task": ("Load task", "stream the selected Parquet row into the one-task resident slot"),
     "lookup": ("Reuse", "test compatible learned solutions"),
     "refine": ("Refine", "improve a retrieved solution without regression"),
     "routed": ("Route experts", "combine frozen experts and distill an executable pathway"),

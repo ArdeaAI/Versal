@@ -38,7 +38,7 @@ REGISTRY_MODULES = (
 RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "pyproject.toml", "access": "read", "condition": "startup project metadata"},
     {"path": CANONICAL_CONFIG_PATH, "access": "read", "condition": "default startup"},
-    {"path": "<Hugging Face datasets cache>", "access": "read-write", "condition": "Icarus dataset acquisition and reuse; outside the repository"},
+    {"path": "<Hugging Face Hub cache>", "access": "read-write", "condition": "selected Icarus Parquet shards; content-addressed and outside the repository"},
     {"path": "<library_dir>/index.json", "access": "read-write", "condition": "library load, admission, statistics, retirement, and optional run-end GC"},
     {"path": "<library_dir>/entries/<key>.json", "access": "read-write", "condition": "library entry load, admission, statistics, and optional run-end GC"},
     {"path": "<library_dir>/router/router_meta.json", "access": "read-write", "condition": "routed persistence enabled"},
@@ -56,6 +56,7 @@ RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "<run_dir>/config.effective.json.sha256", "access": "write", "condition": "effective config snapshot digest"},
     {"path": "<run_dir>/frozen_library/", "access": "write", "condition": "[library] fresh_per_task freezes the starting state for the no-memory control"},
     {"path": "<run_dir>/run_summary.json", "access": "read-write", "condition": "prior rows load on resume; refreshed at startup, task boundaries, crash, and completion"},
+    {"path": "<run_dir>/task_pool.json", "access": "read-write", "condition": "pinned streamed task references written after discovery and reused on resume"},
     {"path": "<run_dir>/checkpoint.json", "access": "read-write", "condition": "loaded on resume and overwritten with rolling resumable state"},
     {"path": "<run_dir>/task_<NNNN>/stats.json", "access": "write", "condition": "task admits a library entry"},
     {"path": "<run_dir>/task_<NNNN>/checkpoint.json", "access": "write", "condition": "task admits a library entry"},

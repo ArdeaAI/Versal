@@ -1,7 +1,7 @@
 """Deterministic, read-only run-summary reporting.
 
-The reporter deliberately consumes only the durable run ledger, the two run-pinned config
-snapshots, and optional small library metadata.  It never opens task checkpoints or entry payloads,
+The reporter deliberately consumes only the durable run ledger, run-pinned config and task-pool
+artifacts, and optional small library metadata. It never opens task checkpoints or entry payloads,
 so it is safe to run against a live, crashed, resumed, or historical experiment directory.
 """
 
@@ -206,7 +206,7 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
     gaps = [support_value - query for row in tasks if (support_value := _support(row)) is not None and (query := _held_out(row)) is not None]
 
     provenance_files: list[dict[str, Any]] = []
-    for name in ("run_summary.json", "config.toml", "config.effective.json"):
+    for name in ("run_summary.json", "config.toml", "config.effective.json", "task_pool.json"):
         path = run_dir / name
         if path.is_file():
             provenance_files.append({"path": name, "sha256": _sha256(path), "size": path.stat().st_size})
@@ -233,7 +233,13 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "source_schema_version": summary.get("schema_version"),
-        "provenance": {"run_dir": str(run_dir), "files": provenance_files, "library": library_metadata},
+        "provenance": {
+            "run_dir": str(run_dir),
+            "files": provenance_files,
+            "library": library_metadata,
+            "dataset": summary.get("dataset_provenance"),
+            "task_pool": summary.get("task_pool"),
+        },
         "run": {
             "status": summary.get("status", "unknown"),
             "seed": summary.get("seed"),
@@ -266,7 +272,14 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "library_hit_count": int(outcome_counts.get("library_hit", 0)),
             "deadline_count": sum(row.get("failure_stage") == "time_budget" for row in tasks),
         },
-        "resources": {"events": dict(sorted(resource_events.items())), "counters": summary.get("counters", {})},
+        "resources": {
+            "events": dict(sorted(resource_events.items())),
+            "counters": summary.get("counters", {}),
+            "dataset": {
+                "pool_load_seconds": _finite((summary.get("task_pool") or {}).get("load_seconds")) if isinstance(summary.get("task_pool"), dict) else None,
+                "task_load_seconds": sum(_finite(row.get("task_load_seconds")) or 0.0 for row in tasks),
+            },
+        },
         "storage": {
             "library_start_entries": start_size,
             "library_peak_entries": max((int(row.get("library_size", 0) or 0) for row in tasks), default=end_size),
@@ -309,12 +322,17 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         (
             f"This report was derived from `{report['provenance']['run_dir']}` using report schema {report['schema_version']}. "
-            "It reads only the durable summary, pinned configs, and optional library metadata."
+            "It reads only the durable summary, pinned configs and task manifest, and optional library metadata."
         ),
         "",
     ]
     for item in report["provenance"]["files"]:
         lines.append(f"- `{item['path']}`: `{item['sha256']}` ({item['size']:,} bytes)")
+    dataset = report["provenance"].get("dataset")
+    if isinstance(dataset, dict):
+        revision = dataset.get("revision") or "local"
+        selection = dataset.get("selection_algorithm") or "unspecified"
+        lines.append(f"- Dataset `{dataset.get('source', 'unknown')}` at revision `{revision}`; selection `{selection}`.")
     lines.extend(
         [
             "",
@@ -387,6 +405,11 @@ def _markdown(report: dict[str, Any]) -> str:
         ]
     )
     lines.extend(f"- `{name}`: {_display(seconds, 1)} seconds" for name, seconds in report["strategies"]["stage_seconds"].items())
+    dataset_timing = report["resources"].get("dataset", {})
+    if dataset_timing.get("pool_load_seconds") is not None:
+        lines.append(f"- `task_pool_discovery`: {_display(dataset_timing['pool_load_seconds'], 1)} seconds")
+    if dataset_timing.get("task_load_seconds"):
+        lines.append(f"- `task_materialization`: {_display(dataset_timing['task_load_seconds'], 1)} seconds")
     if report["resources"]["events"]:
         lines.extend(["", "Resource metric events:", ""])
         lines.extend(f"- `{name}`: {count}" for name, count in report["resources"]["events"].items())

@@ -48,24 +48,28 @@ def rung_report(
         if report.skipped:
             skip = report.skipped[0]
             rows.append({"rung": rung, "status": f"FAIL:{skip.error_type}", "detail": skip.message})
+            report.close()
             continue
         entry = report.entries[0]
-        io = task_io(entry.task)
-        temporal = "T" in io["inputs"][0]["signature"].split("|", 1)[-1].split(",")
-        row: dict[str, Any] = {
-            "rung": rung,
-            "status": "OK",
-            "tasks": len(report.entries),
-            "example": entry.name,
-            "input": f"{io['inputs'][0]['signature']} w={io['inputs'][0]['width']}",
-            "output": f"{io['output']['signature']} w={io['output']['width']}",
-            "temporal": temporal,
-        }
-        if library is not None:
-            exact = library.query(input_signature=io["inputs"][0]["signature"], input_width=io["inputs"][0]["width"], output_width=io["output"]["width"])
-            near = library.query(input_width=io["inputs"][0]["width"], output_width=io["output"]["width"], width_tolerance=width_tolerance)
-            row["library"] = f"exact={len(exact)} near={len(near)}"
-        rows.append(row)
+        try:
+            io = task_io(report.materialize(entry))
+            temporal = "T" in io["inputs"][0]["signature"].split("|", 1)[-1].split(",")
+            row: dict[str, Any] = {
+                "rung": rung,
+                "status": "OK",
+                "tasks": len(report.entries),
+                "example": entry.name,
+                "input": f"{io['inputs'][0]['signature']} w={io['inputs'][0]['width']}",
+                "output": f"{io['output']['signature']} w={io['output']['width']}",
+                "temporal": temporal,
+            }
+            if library is not None:
+                exact = library.query(input_signature=io["inputs"][0]["signature"], input_width=io["inputs"][0]["width"], output_width=io["output"]["width"])
+                near = library.query(input_width=io["inputs"][0]["width"], output_width=io["output"]["width"], width_tolerance=width_tolerance)
+                row["library"] = f"exact={len(exact)} near={len(near)}"
+            rows.append(row)
+        finally:
+            report.close()
     return rows
 
 

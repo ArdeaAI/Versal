@@ -1,6 +1,7 @@
 """Process-pool assessment is stream-identical to serial; mixed generations partition."""
 
 import random
+from typing import Any, cast
 
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.genome import Genome, genome_to_dict
@@ -101,6 +102,69 @@ def test_adapter_spill_is_cached_resolves_exactly_and_cleans_up(xor_adapter, tmp
 
     evolver.close_pool()
     assert not Path(ref.path).exists()
+
+
+def test_task_switch_releases_main_and_worker_adapter_before_loading_next(xor_adapter, tmp_path, monkeypatch) -> None:
+    """A different task never overlaps the previous encoded payload in either process slot."""
+    from pathlib import Path
+
+    import torch
+
+    from ardevo.evolution import evolver as ev_mod
+    from ardevo.evolution.evolver import AdapterRef
+
+    config = {
+        "seed": 0,
+        "library_dir": str(tmp_path),
+        "evolution": {
+            "pop_size": 2,
+            "init": {"kind": "minimal"},
+            "selection": {"kind": "tournament", "tournament_size": 2},
+            "crossover": {"kind": "none"},
+            "mutation": {"operators": []},
+            "train": {"kind": "none"},
+        },
+        "fitness": {"components": ["support_accuracy"]},
+    }
+    evolver = build_evolver(config)
+    ref = evolver._pooled_adapter(xor_adapter)
+    assert isinstance(ref, AdapterRef)
+    spill = ref.path
+    assert Path(spill).exists()
+    evolver.release_task_adapter()
+    assert not Path(spill).exists() and getattr(evolver, "_adapter_spill", None) is None
+
+    ev_mod._WORKER_ADAPTER = ("old-task.pt", xor_adapter)
+
+    def load_after_release(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202 - torch.load seam
+        assert ev_mod._WORKER_ADAPTER is None
+        return xor_adapter
+
+    monkeypatch.setattr(torch, "load", load_after_release)
+    try:
+        assert ev_mod._resolve_adapter(AdapterRef("new-task.pt")) is xor_adapter
+    finally:
+        ev_mod._WORKER_ADAPTER = None
+
+
+def test_shared_task_release_collects_an_acknowledgement_from_every_worker() -> None:
+    from types import SimpleNamespace
+
+    from ardevo.evolution import evolver as ev_mod
+
+    class FakePool:
+        _pool = [SimpleNamespace(pid=10, is_alive=lambda: True), SimpleNamespace(pid=11, is_alive=lambda: True)]
+
+        def map(self, function, values, *, chunksize):  # noqa: ANN001, ANN201 - multiprocessing Pool seam
+            assert function is ev_mod._release_worker_task_adapter and list(values) == [0, 1, 2, 3] and chunksize == 1
+            return [10, 11, 10, 11]
+
+    previous = ev_mod.get_shared_pool()
+    ev_mod.set_shared_pool(cast(Any, FakePool()))
+    try:
+        ev_mod.release_shared_task_adapters()
+    finally:
+        ev_mod.set_shared_pool(previous)
 
 
 def test_partitioned_batched_training_handles_mixed_generations(xor_adapter, linear_genome: Genome, solving_genome: Genome) -> None:

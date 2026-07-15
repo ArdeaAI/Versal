@@ -411,17 +411,31 @@ class Evolver:
 
     def close_pool(self) -> None:
         """Close only this evolver's OWN lazy pool; the shared pool is owned by create_assess_pool."""
+        self.release_task_adapter()
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            self._pool = None
+            pool.terminate()
+            pool.join()
+
+    def release_task_adapter(self) -> None:
+        """Release the main process's encoded payload when the scheduler switches tasks.
+
+        Shared assessment workers replace their own one-slot adapter on the first evaluation of
+        the next task; they are intentionally not restarted because ClearML patches process spawn.
+        """
         slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
         if slot is not None:
             from pathlib import Path
 
             self._adapter_spill = None
             Path(slot[1]).unlink(missing_ok=True)
+        import gc
+
+        gc.collect()
         pool = getattr(self, "_pool", None)
         if pool is not None:
-            self._pool = None
-            pool.terminate()
-            pool.join()
+            _release_pool_task_adapters(pool)
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -613,6 +627,38 @@ def get_shared_pool() -> "Pool | None":
     return _SHARED_POOL
 
 
+def release_shared_task_adapters() -> None:
+    """Make every shared worker drop its decoded task before the next task is loaded.
+
+    Assessment is synchronous, so the pool is idle at the root-task boundary.  A short worker
+    fan-out is preferable to restarting the pool: these workers are deliberately spawned before
+    ClearML patches multiprocessing and must stay alive for the run.
+    """
+    pool = _SHARED_POOL
+    if pool is None:
+        return
+    _release_pool_task_adapters(pool)
+
+
+def _release_pool_task_adapters(pool: "Pool") -> None:
+    """Collect worker acknowledgements for either the shared or an evolver-owned pool."""
+    seen: set[int] = set()
+    expected: set[int] = set()
+    for _round in range(8):
+        workers = tuple(getattr(pool, "_pool", ()))
+        expected = {int(worker.pid) for worker in workers if worker.pid is not None and worker.is_alive()}
+        if expected <= seen:
+            return
+        # Each task pauses briefly after clearing its slot.  That keeps one fast worker from
+        # consuming the whole queue and makes the returned PID set an explicit acknowledgement
+        # from every live worker, rather than a best-effort broadcast.
+        acknowledgements = pool.map(_release_worker_task_adapter, range(max(1, len(expected) * 2)), chunksize=1)
+        seen.update(int(pid) for pid in acknowledgements)
+    missing = sorted(expected - seen)
+    if missing:
+        raise RuntimeError(f"assessment workers did not release the previous task payload: {missing}")
+
+
 def get_worker_library() -> "ModuleLibrary | None":
     """The worker-process ModuleLibrary set by _init_worker, for library: refs during composition
     assembly. On-disk entries resolve by key, so a library grown mid-run needs no reload."""
@@ -659,11 +705,29 @@ def _init_worker(library_dir: str) -> None:
 _WORKER_ADAPTER: tuple[str, Adapter] | None = None
 
 
+def _release_worker_task_adapter(_token: int) -> int:
+    global _WORKER_ADAPTER
+    _WORKER_ADAPTER = None
+    import gc
+    import os
+    import time
+
+    gc.collect()
+    time.sleep(0.01)
+    return os.getpid()
+
+
 def _resolve_adapter(adapter: "Adapter | AdapterRef") -> Adapter:
     if not isinstance(adapter, AdapterRef):
         return adapter
     global _WORKER_ADAPTER
     if _WORKER_ADAPTER is None or _WORKER_ADAPTER[0] != adapter.path:
+        # Drop the previous task before deserializing the next one.  Tuple assignment would keep
+        # both tensor payloads resident while torch.load evaluates its right-hand side.
+        _WORKER_ADAPTER = None
+        import gc
+
+        gc.collect()
         import torch
 
         # weights_only=False is required (the spill holds adapter dataclasses, not bare tensors)

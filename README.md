@@ -27,6 +27,9 @@ The system is evaluated on the 18-rung
 [Icarus dataset](https://huggingface.co/datasets/Ardea/Icarus-dataset), which moves from Boolean
 functions through temporal, image, scientific, audio, and structured-grid problems. Task handling is
 driven by tensor descriptors—value type, axes, and widths—not by benchmark names or rung numbers.
+Pool discovery streams only task identity metadata, pins the Hub revision, and selects across
+Parquet shards. The selected shard enters Hugging Face's normal disk cache on first use, while only
+the currently scheduled task is decoded into memory.
 
 ```text
 task

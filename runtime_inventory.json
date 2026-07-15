@@ -421,8 +421,8 @@
     },
     {
       "access": "read-write",
-      "condition": "Icarus dataset acquisition and reuse; outside the repository",
-      "path": "<Hugging Face datasets cache>"
+      "condition": "selected Icarus Parquet shards; content-addressed and outside the repository",
+      "path": "<Hugging Face Hub cache>"
     },
     {
       "access": "read-write",
@@ -508,6 +508,11 @@
       "access": "read-write",
       "condition": "prior rows load on resume; refreshed at startup, task boundaries, crash, and completion",
       "path": "<run_dir>/run_summary.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "pinned streamed task references written after discovery and reused on resume",
+      "path": "<run_dir>/task_pool.json"
     },
     {
       "access": "read-write",

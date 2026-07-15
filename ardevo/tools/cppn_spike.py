@@ -87,8 +87,12 @@ def load_two_spirals(offline: bool, seed: int) -> Task:
 
     report = build_pool_report(source="Ardea/Icarus-dataset", rungs=[3], n_samples=400, support_fraction=0.8, tasks_per_rung=1, shuffle=False, seed=seed)
     if not report.entries:
+        report.close()
         raise RuntimeError(f"rung 3 failed to load: {[skipped.message for skipped in report.skipped]}")
-    return report.entries[0].task
+    try:
+        return report.materialize(report.entries[0])
+    finally:
+        report.close()
 
 
 def build_adapter(arm: str, task: Task, h: int, phenotype_activation: str) -> CppnTaskAdapter | TaskAdapter:
