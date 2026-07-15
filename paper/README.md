@@ -1,6 +1,11 @@
 # ArdEVO Paper Workflow
 
-`paper/preprint.md` is the only manuscript source. Do not edit generated LaTeX. Scientific claims and figures are pinned to immutable artifacts in `evidence/manifest.json`; its machine-readable contract is `evidence/manifest.schema.json`.
+The paper has two hand-edited Markdown sources:
+
+- `preprint.md` is the concise conference core.
+- `technical_appendix.md` is body-only supplementary material used by the technical-report edition.
+
+Do not edit generated LaTeX or PDF files. Scientific claims, figures, and both manuscript sources are pinned in `evidence/manifest.json`; `evidence/manifest.schema.json` defines the current contract. The verifier still accepts the legacy single-manuscript schema for old evidence bundles.
 
 ## Evidence Check
 
@@ -10,25 +15,48 @@ Restore the ignored `ai/archive/` evidence bundle, then run:
 python paper/tools/verify_evidence.py
 ```
 
-The verifier rejects malformed records, repository-escaping paths, missing files, conflicting pins, and SHA256 mismatches. Update a digest only after re-auditing the affected claim or figure against the replacement artifact. A typesetting-only preprint may use `--skip-evidence`, but submission and final builds cannot.
+The verifier rejects malformed records, repository-escaping paths, missing files, conflicting pins, and SHA256 mismatches. Update a digest only after re-auditing the corresponding prose or figure against the replacement artifact. A typesetting-only preprint may use `--skip-evidence`; submission and final builds cannot.
 
-## NeurIPS Build
+The manuscript distinguishes three evidence eras:
 
-The build pins `pypandoc-binary==1.15` (Pandoc 3.6.1), authenticates the vendored official NeurIPS 2026 style, converts Markdown through the checked template and Lua filter, and runs `latexmk` with a fixed `SOURCE_DATE_EPOCH`.
+- July 5-6: historical lower-ladder compounding and two-spirals diagnostics.
+- July 12: broad, ten-task-per-rung pre-change characterization.
+- July 15: current-method, one-task-per-rung functionality canary.
+
+Do not compare the two canaries causally. They differ in code, task sample, task count, budgets, and library trajectory. ARC values are held-out cell/sample accuracy unless an artifact explicitly contains exact-grid fields.
+
+## Conference Edition
+
+The default build is the concise conference preprint:
 
 ```bash
 uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py
-uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --mode submission
-uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --mode final
+uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition conference --mode preprint
+uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition conference --mode submission
+uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition conference --mode final
 ```
 
-The default preprint is `latex/neurips_2026/ardevo-preprint.pdf`. Submission rendering removes acknowledgments and relies on the official style's anonymization. Submission and final modes refuse to build until every macro in `latex/neurips_2026/checklist.tex` is answered and the template instruction block is removed. The current manuscript remains longer than NeurIPS's nine-page main-content limit; a successful working-draft build is not a submission-readiness signal.
+Outputs are `latex/neurips_2026/ardevo-{mode}.tex` and `.pdf`. Submission rendering removes acknowledgments and uses the official style's anonymization. Submission and final modes fail closed until every checklist macro is answered, the instruction block is removed, evidence verifies, and layout checks pass.
 
-The official assets come from the [NeurIPS 2026 template](https://media.neurips.cc/Conferences/NeurIPS2026/Formatting_Instructions_For_NeurIPS_2026.zip). Verify or restore the pinned copy with:
+## Technical Report Edition
+
+The technical report combines the conference core with the supplement before the references:
+
+```bash
+uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition technical-report
+```
+
+It produces `latex/neurips_2026/ardevo-technical-report.tex` and `.pdf`. The technical report supports preprint mode only; submission and final modes are intentionally rejected. Detailed rung tables, extended methods, historical diagnostics, engineering incidents, and provenance belong in the supplement rather than the conference core.
+
+## Template and Generated Files
+
+The build pins `pypandoc-binary==1.15` (Pandoc 3.6.1), authenticates the vendored official NeurIPS 2026 style, converts Markdown through the checked template and Lua filter, and runs `latexmk` under a fixed `SOURCE_DATE_EPOCH`.
+
+Verify or restore the official assets with:
 
 ```bash
 python paper/tools/sync_neurips_template.py
 python paper/tools/sync_neurips_template.py --fetch
 ```
 
-An upstream archive change fails closed and requires a deliberate lock review. `latex/main.tex`, `main.bbl`, and `main.pdf` are the frozen legacy conversion retained for comparison; they are not build inputs and must not be edited.
+An upstream archive change requires a deliberate lock review. `latex/main.tex`, `main.bbl`, and `main.pdf` are frozen legacy outputs retained only for comparison; they are not build inputs and must not be edited.

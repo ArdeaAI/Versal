@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source": "ai/archive/20260715_canary/library/router",
+  "files": 73,
+  "bytes": 300730552,
+  "tree_sha256": "5710eeec9bbc825880988081c83e160b01fbe28fe5526f6afd11c09fb09cb74d",
+  "groups": {
+    "core": {
+      "files": 1,
+      "bytes": 105020
+    },
+    "metadata": {
+      "files": 1,
+      "bytes": 24990
+    },
+    "input_shards": {
+      "files": 28,
+      "bytes": 123856111
+    },
+    "output_shards": {
+      "files": 26,
+      "bytes": 171537314
+    },
+    "vertex_shards": {
+      "files": 17,
+      "bytes": 5207117
+    }
+  }
+}

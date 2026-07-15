@@ -1,8 +1,8 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["matplotlib"]
+# dependencies = ["matplotlib==3.10.9", "numpy==2.4.6", "pillow==12.2.0"]
 # ///
-"""Generate every figure for paper/preprint.md from the frozen archives under ai/archive/.
+"""Generate figures for the conference paper and technical report from frozen archives.
 
 Deterministic: fixed jitter seed, no timestamps in any output (PDF CreationDate stripped).
 Run from the repo root:  uv run python paper/figures/make_figures.py
@@ -34,6 +34,7 @@ G1_WARM_SUMMARY = ARCHIVE_DIR / "20260705_g1" / "results" / "20260705_185704_orc
 PROBE_SUMMARY = ARCHIVE_DIR / "20260705_g2" / "results" / "20260705_234350_orchestrated" / "run_summary.json"
 G2_SNAPSHOT_SUMMARY = ARCHIVE_DIR / "20260705_g2" / "results" / "20260706_015530_orchestrated" / "run_summary.json"
 G2_TAIL_SUMMARY = ARCHIVE_DIR / "20260705_g2" / "results" / "20260706_024019_orchestrated" / "run_summary.json"
+CANARY_20260715_SUMMARY = ARCHIVE_DIR / "20260715_canary" / "results" / "20260715_014520_orchestrated" / "run_summary.json"
 
 # Okabe-Ito colorblind-safe palette, fixed assignment per rung reused across all figures.
 RUNG_COLOR = {
@@ -178,7 +179,7 @@ def make_fig1() -> None:
         84,
         10.5,
         "library: persistent, immutable solution store\nmodules (level 1) + compositions (level 2+), keyed by structural I/O signature;"
-        "\nquality-diversity archive admission; wall-ledger stepping stones",
+        "\nquality-diversity admission; route decay, retirement, and reference-safe garbage collection",
         fill="#E3EFF8",
         edge=library_blue,
         fontsize=7.0,
@@ -193,16 +194,19 @@ def make_fig1() -> None:
     draw_box(ax, 33, 53, 27, 8, "refine on hit\nbudgeted, decaying; seeded\nfrom the stored solution", fontsize=6.4)
 
     # Evolve ladder container + strategies.
-    draw_box(ax, 36, 22, 24, 25, "", fill="#FBFBFB", edge="#999999", lw=0.8)
+    draw_box(ax, 36, 20.5, 24, 27.5, "", fill="#FBFBFB", edge="#999999", lw=0.8)
     ax.text(48, 44.8, "evolve ladder (one budget)", ha="center", va="center", fontsize=6.6, color=INK, fontweight="bold")
-    draw_box(ax, 38, 37.5, 20, 5, "routed: learned reuse", fontsize=6.2, fill="#EFEFEF")
-    draw_box(ax, 38, 30.0, 20, 5, "direct: structure growth", fontsize=6.2, fill="#EFEFEF")
-    draw_box(ax, 38, 22.5, 20, 5, "composition: hierarchical reuse", fontsize=6.2, fill="#EFEFEF")
-    draw_arrow(ax, (48, 37.2), (48, 35.4), lw=0.8)
-    draw_arrow(ax, (48, 29.7), (48, 27.9), lw=0.8)
+    draw_box(ax, 38, 38.0, 20, 4.5, "routed: learned reuse", fontsize=6.0, fill="#EFEFEF")
+    draw_box(ax, 38, 32.2, 20, 4.5, "grammar: induced programs", fontsize=6.0, fill="#EFEFEF")
+    draw_box(ax, 38, 26.4, 20, 4.5, "direct: structure growth", fontsize=6.0, fill="#EFEFEF")
+    draw_box(ax, 38, 20.8, 20, 4.5, "composition: hierarchical reuse", fontsize=6.0, fill="#EFEFEF")
+    draw_arrow(ax, (48, 37.8), (48, 36.9), lw=0.8)
+    draw_arrow(ax, (48, 32.0), (48, 31.1), lw=0.8)
+    draw_arrow(ax, (48, 26.2), (48, 25.3), lw=0.8)
 
-    draw_box(ax, 65, 22, 15, 10, "decompose\n+ recurse\n(solvability-gated)", fontsize=6.4)
-    draw_box(ax, 82, 38, 15.5, 10, "gated\nadmission\n(one gate)", fontsize=6.6)
+    draw_box(ax, 64, 20.5, 15, 10, "decompose\n+ recurse\n(solvability-gated)", fontsize=6.4)
+    draw_box(ax, 82, 39, 15.5, 9, "support-only\nadmission gate", fontsize=6.6)
+    draw_box(ax, 62, 31.5, 17, 8, "one-shot held-out report\n(never feeds search)", fontsize=6.2, fill="#FFF4E6", edge="#D55E00")
 
     # Forward flow.
     draw_arrow(ax, (13, 42), (17, 42))
@@ -212,17 +216,18 @@ def make_fig1() -> None:
     arrow_label(ax, 34, 44.0, "miss", color="#444444")
     draw_arrow(ax, (60, 56.5), (90, 48.3), rad=-0.22)
     arrow_label(ax, 77, 57.4, "strict lexicographic win", color="#444444")
-    draw_arrow(ax, (60, 40), (82, 43), rad=0.12)
-    arrow_label(ax, 70.5, 43.6, "clears 0.95 bar", color="#444444")
-    draw_arrow(ax, (60, 25.5), (65, 26.5))
-    arrow_label(ax, 62.3, 23.6, "stall", color="#444444")
+    draw_arrow(ax, (60, 40), (82, 43.5), rad=0.12)
+    arrow_label(ax, 70.5, 43.9, "executable + clears support bar", color="#444444")
+    draw_arrow(ax, (60, 35.5), (62, 35.5), color="#D55E00", lw=0.9, ls=(0, (3, 2)))
+    draw_arrow(ax, (60, 24.0), (64, 25.5))
+    arrow_label(ax, 62.0, 22.2, "stall", color="#444444")
     # Recursion loop back to the task, routed around the right and top edges.
-    ax.plot([80.6, 99.0, 99.0, 8.0], [27.0, 27.0, 66.0, 66.0], color="#444444", linewidth=1.0, linestyle=(0, (4, 2)), zorder=1)
+    ax.plot([79.6, 99.0, 99.0, 8.0], [25.5, 25.5, 66.0, 66.0], color="#444444", linewidth=1.0, linestyle=(0, (4, 2)), zorder=1)
     draw_arrow(ax, (8.0, 66.0), (8.0, 46.6), color="#444444", lw=1.0, ls=(0, (4, 2)))
     arrow_label(ax, 53.5, 67.9, "sub-tasks recurse (depth + 1); parent re-evolves over the sub-solutions", color="#444444")
 
     # Admission writes into the library.
-    draw_arrow(ax, (89.5, 37.5), (89.5, 14), color=library_blue, lw=1.2)
+    draw_arrow(ax, (89.5, 38.5), (89.5, 14), color=library_blue, lw=1.2)
     arrow_label(ax, 91.1, 25.5, "admit (provenance, levels)", color=library_blue, rotation=90)
 
     # Library feedback into the per-task flow.
@@ -230,7 +235,7 @@ def make_fig1() -> None:
     arrow_label(ax, 22.6, 25.5, "top-5 candidates", color=library_blue, rotation=90)
     draw_arrow(ax, (34, 14), (34, 52.5), color=library_blue, lw=1.0)
     arrow_label(ax, 32.6, 33.0, "refinement seeds", color=library_blue, rotation=90)
-    draw_arrow(ax, (50, 14), (50, 21.5), color=library_blue, lw=1.0)
+    draw_arrow(ax, (50, 14), (50, 20.2), color=library_blue, lw=1.0)
     arrow_label(
         ax,
         48.8,
@@ -241,7 +246,7 @@ def make_fig1() -> None:
         fontsize=5.8,
     )
     # Failure shelves a stepping stone.
-    draw_arrow(ax, (57, 21.5), (57, 14), color=stone_red, lw=1.2)
+    draw_arrow(ax, (57, 20.2), (57, 14), color=stone_red, lw=1.2)
     arrow_label(ax, 58.4, 17.6, "fail: shelve best champion\nas a stepping stone (wall ledger)", color=stone_red, ha="left", fontsize=5.8)
 
     figure.subplots_adjust(left=0.005, right=0.995, top=0.995, bottom=0.005)
@@ -420,7 +425,79 @@ def make_fig4() -> None:
     save_figure(figure, "fig4_wall")
 
 
+# ---------------------------------------------------------------- figure 7: post-change full-method canary
+
+
+def make_fig7() -> None:
+    """Show the July 15 canary's literal support and held-out rails without imputing N/A as zero."""
+
+    rows = load_tasks(CANARY_20260715_SUMMARY)
+    rungs = np.array([int(row["rung"]) for row in rows])
+    support = np.array([float(row["support_accuracy"]) if row.get("support_accuracy") is not None else np.nan for row in rows])
+    query = np.array([float(row["query_accuracy"]) if row.get("query_accuracy") is not None else np.nan for row in rows])
+
+    support_blue = "#0072B2"
+    query_orange = "#D55E00"
+    figure, ax = plt.subplots(figsize=(7.05, 3.25))
+    ax.axhspan(-0.13, 0.0, color="#F2F2F2", zorder=0)
+    ax.axhline(0.95, color=NEUTRAL_GRAY, linewidth=0.8, linestyle=(0, (4, 2)), zorder=1)
+    ax.text(18.35, 0.956, "support acceptance bar", ha="right", va="bottom", fontsize=5.8, color="#666666")
+
+    for rung, support_value, query_value in zip(rungs, support, query):
+        if np.isfinite(support_value) and np.isfinite(query_value):
+            ax.plot([rung, rung], [support_value, query_value], color="#C8C8C8", linewidth=0.8, zorder=2)
+
+    support_mask = np.isfinite(support)
+    query_mask = np.isfinite(query)
+    ax.scatter(rungs[support_mask], support[support_mask], marker="o", s=24, color=support_blue, edgecolor="white", linewidth=0.45, zorder=4, label="best support accuracy")
+    ax.scatter(rungs[query_mask], query[query_mask], marker="s", s=23, color=query_orange, edgecolor="white", linewidth=0.45, zorder=5, label="held-out query accuracy")
+
+    missing = ~(support_mask | query_mask)
+    ax.scatter(rungs[missing], np.full(int(missing.sum()), -0.065), marker="x", s=28, color="#333333", linewidth=1.0, zorder=5, label="N/A: no executable parent before deadline")
+    for rung in rungs[missing]:
+        ax.text(rung, -0.105, "N/A", ha="center", va="center", fontsize=5.5, color="#444444")
+
+    ax.set_xlim(0.5, 18.5)
+    ax.set_ylim(-0.13, 1.04)
+    ax.set_xticks(rungs)
+    ax.set_yticks([0.0, 0.25, 0.50, 0.75, 1.0])
+    ax.set_xlabel("Icarus rung (one task per rung, seed 0)")
+    ax.set_ylabel("literal accuracy")
+    handles, labels = ax.get_legend_handles_labels()
+    figure.suptitle(
+        "Post-change full-method canary: fitting remains distinct from held-out generalization",
+        x=0.075,
+        y=0.975,
+        ha="left",
+        fontsize=8.2,
+        fontweight="bold",
+    )
+    figure.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.91), ncol=3, frameon=False, handletextpad=0.4, columnspacing=1.4)
+    ax.text(0.6, -0.065, "not evaluated", ha="left", va="center", fontsize=5.8, color="#777777", style="italic")
+    figure.subplots_adjust(left=0.075, right=0.99, top=0.76, bottom=0.18)
+    save_figure(figure, "fig7_canary")
+
+
 # ---------------------------------------------------------------- figures 5 and 6: curated renders
+
+
+def make_fig5e() -> None:
+    """Arrange the three differently shaped historical network renders on one readable plate."""
+
+    panels = {
+        "(a) level-3 reuse chain": FIGURE_DIR / "fig5c_level3_chain.png",
+        "(b) repeated-macro assembly": FIGURE_DIR / "fig5b_seven_macro_artifact.png",
+        "(c) interrupted probe champion": FIGURE_DIR / "fig5d_probe_champion.png",
+    }
+    figure = plt.figure(figsize=(7.05, 4.6), facecolor="white")
+    grid = figure.add_gridspec(2, 2, width_ratios=(0.36, 0.64), height_ratios=(1, 1), wspace=0.025, hspace=0.12)
+    axes = (figure.add_subplot(grid[:, 0]), figure.add_subplot(grid[0, 1]), figure.add_subplot(grid[1, 1]))
+    for ax, (label, path) in zip(axes, panels.items()):
+        ax.imshow(plt.imread(path))
+        ax.set_title(label, loc="left", fontsize=7.0, pad=3, fontweight="bold")
+        ax.axis("off")
+    figure.subplots_adjust(left=0.005, right=0.995, top=0.96, bottom=0.005)
+    save_figure(figure, "fig5e_artifact_triptych")
 
 
 def copy_renders() -> None:
@@ -443,7 +520,9 @@ def main() -> None:
     make_fig2()
     make_fig3()
     make_fig4()
+    make_fig7()
     copy_renders()
+    make_fig5e()
 
 
 if __name__ == "__main__":

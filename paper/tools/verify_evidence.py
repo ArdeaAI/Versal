@@ -92,20 +92,21 @@ def _validate_entry(value: Any, kind: str, index: int) -> tuple[str, list[dict[s
     return identifier, artifacts
 
 
-def validate_manifest(value: Any) -> list[dict[str, str]]:
+def _validate_manuscript_entry(value: Any, index: int) -> tuple[str, dict[str, str]]:
+    field = f"manuscripts[{index}]"
     if not isinstance(value, dict):
-        raise ManifestError("manifest must be an object")
-    expected = {"schema_version", "manuscript", "claims", "figures"}
+        raise ManifestError(f"{field} must be an object")
+    expected = {"id", "artifact"}
     if set(value) != expected:
-        raise ManifestError(f"manifest must contain exactly {sorted(expected)}")
-    if value["schema_version"] != 1:
-        raise ManifestError("schema_version must be 1")
+        raise ManifestError(f"{field} must contain exactly {sorted(expected)}")
+    identifier = _validate_id(value["id"], f"{field}.id")
+    artifact = _validate_artifact(value["artifact"], f"{field}.artifact")
+    if artifact["role"] != "manuscript":
+        raise ManifestError(f"{field}.artifact.role must be 'manuscript'")
+    return identifier, artifact
 
-    manuscript = _validate_artifact(value["manuscript"], "manuscript")
-    if manuscript["role"] != "manuscript":
-        raise ManifestError("manuscript.role must be 'manuscript'")
 
-    artifacts = [manuscript]
+def _validate_entries(value: dict[str, Any], artifacts: list[dict[str, str]]) -> None:
     identifiers: set[str] = set()
     for kind in ("claims", "figures"):
         entries = value[kind]
@@ -117,7 +118,47 @@ def validate_manifest(value: Any) -> list[dict[str, str]]:
                 raise ManifestError(f"duplicate claim/figure id: {identifier}")
             identifiers.add(identifier)
             artifacts.extend(entry_artifacts)
+
+
+def _validate_v1_manifest(value: dict[str, Any]) -> list[dict[str, str]]:
+    expected = {"schema_version", "manuscript", "claims", "figures"}
+    if set(value) != expected:
+        raise ManifestError(f"schema v1 manifest must contain exactly {sorted(expected)}")
+    manuscript = _validate_artifact(value["manuscript"], "manuscript")
+    if manuscript["role"] != "manuscript":
+        raise ManifestError("manuscript.role must be 'manuscript'")
+    artifacts = [manuscript]
+    _validate_entries(value, artifacts)
     return artifacts
+
+
+def _validate_v2_manifest(value: dict[str, Any]) -> list[dict[str, str]]:
+    expected = {"schema_version", "manuscripts", "claims", "figures"}
+    if set(value) != expected:
+        raise ManifestError(f"schema v2 manifest must contain exactly {sorted(expected)}")
+    manuscripts = value["manuscripts"]
+    if not isinstance(manuscripts, list) or not manuscripts:
+        raise ManifestError("manuscripts must be a non-empty array")
+
+    artifacts: list[dict[str, str]] = []
+    manuscript_ids: set[str] = set()
+    for index, entry in enumerate(manuscripts):
+        identifier, artifact = _validate_manuscript_entry(entry, index)
+        if identifier in manuscript_ids:
+            raise ManifestError(f"duplicate manuscript id: {identifier}")
+        manuscript_ids.add(identifier)
+        artifacts.append(artifact)
+    _validate_entries(value, artifacts)
+    return artifacts
+
+
+def validate_manifest(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, dict):
+        raise ManifestError("manifest must be an object")
+    version = value.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
+        raise ManifestError("schema_version must be 1 or 2")
+    return _validate_v1_manifest(value) if version == 1 else _validate_v2_manifest(value)
 
 
 def verify_manifest(manifest_path: Path = DEFAULT_MANIFEST) -> tuple[int, int]:

@@ -1,14 +1,16 @@
 # Paper figures
 
-All figures are produced by one deterministic script (fixed jitter seed, PDF `CreationDate` stripped;
-re-running yields byte-identical output):
+All figures are produced by one deterministic script (pinned rendering dependencies, fixed jitter
+seed, and stripped PDF `CreationDate`; re-running yields byte-identical output):
 
 ```bash
 uv run python paper/figures/make_figures.py   # from the repo root
 ```
 
-Figures 1-4 are generated as vector PDF plus 200 dpi PNG. Figures 5a-5d and 6 are verbatim copies of
-frozen archive renders (raster PNG only).
+Figures 1-4, 5e, and 7 are generated as PDF plus 200 dpi PNG. Figures 5a-5d and 6 are verbatim
+copies of frozen archive renders (raster PNG only); Figure 5e arranges three of those unchanged
+renders into a single readable plate. The concise paper uses Figures 1, 2, and 7; the technical
+report retains the diagnostic Figures 3-6.
 
 Design constants: Okabe-Ito colorblind-safe palette with a fixed color per rung reused across every
 figure (rung 1 xor `#0072B2`, rung 2 parity `#56B4E9`, rung 3 two_spirals `#D55E00`, rung 4 pole
@@ -19,9 +21,9 @@ log scale on all seconds axes.
 ## Figure 1: `fig1_ladder.pdf` / `.png`
 
 System diagram of the per-task solve ladder (paper Section 4). Drawn programmatically; no data input.
-Labels follow the prose of Sections 4.1-4.6: lookup (top-5 quick eval by I/O signature), refine on hit,
-the evolve ladder (routed, direct, composition), decompose + recurse, gated admission, the wall ledger,
-and the persistent library tier with its five reuse channels.
+Labels follow the current method: lookup, refine on hit, the routed/grammar/direct/composition evolve
+ladder, recursive decomposition, support-only admission, a separate held-out reporting rail, the wall
+ledger, and persistent memory with lifecycle decay.
 
 ## Figure 2: `fig2_cost.pdf` / `.png`
 
@@ -87,8 +89,25 @@ Entry identities were confirmed against each archive's `library/index.json` plus
 provenance in `library/entries/<key>.json`, matched to the admitting task via the run summary's
 `new_library_keys`.
 
+`fig5e_artifact_triptych.pdf` / `.png` is a deterministic layout plate: the portrait level-3 chain
+occupies the left column, while the repeated-macro assembly and probe champion are stacked on the
+right. The source pixels are not altered beyond scaling for layout.
+
 ## Figure 6: `fig6_motifs.png` (verbatim copy)
 
 `ai/archive/20260706_flagship/library/images/motifs.png`: the motif census atlas mined from the
 flagship run's post-GC library (`ai/archive/20260706_flagship/library/motifs.json`), motifs grouped
 by diversity class with support (`s`) and instance (`n`) counts.
+
+## Figure 7: `fig7_canary.pdf` / `.png`
+
+Literal best support accuracy and held-out query accuracy for the post-change July 15 full-method
+canary, one seed and one task per Icarus rung. A light connector exposes each available
+support/query gap. Rungs 14 and 17 are plotted in the `not evaluated` strip because no executable
+parent champion existed before the deadline; rung 11's held-out zero remains a real point at zero.
+No missing value is imputed.
+
+- Data: `ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_summary.json`, key
+  `tasks` (18 rows; fields `rung`, `support_accuracy`, `query_accuracy`, and availability status).
+- Blue circle: literal support accuracy; vermillion square: literal held-out query accuracy;
+  black x: neither measurement was available.

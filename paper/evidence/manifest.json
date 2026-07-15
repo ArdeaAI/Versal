@@ -1,14 +1,27 @@
 {
-  "schema_version": 1,
-  "manuscript": {
-    "path": "paper/preprint.md",
-    "sha256": "7c26890d3cefad836c38903ef0fcab25c12b03acbaf6941f24f64d5e4282a6bb",
-    "role": "manuscript"
-  },
+  "schema_version": 2,
+  "manuscripts": [
+    {
+      "id": "conference-core",
+      "artifact": {
+        "path": "paper/preprint.md",
+        "sha256": "57c29cec838c0efc86998193a8cdb1af59b6ab602bd8ac8ab82da18908d591e5",
+        "role": "manuscript"
+      }
+    },
+    {
+      "id": "technical-appendix",
+      "artifact": {
+        "path": "paper/technical_appendix.md",
+        "sha256": "d7f242d0bebaccf652ac3d3dc7680757d0bb6ffbcfd8a3adacc0a19b2b104885",
+        "role": "manuscript"
+      }
+    }
+  ],
   "claims": [
     {
       "id": "headline-compounding-run",
-      "section": "Abstract; Section 7.2",
+      "section": "Abstract; Section 6.1; Appendix D.1",
       "summary": "The cold 400-task run's outcomes, timing, solved families, refinement count, and library growth.",
       "evidence": [
         {
@@ -30,7 +43,7 @@
     },
     {
       "id": "two-spirals-gate-study",
-      "section": "Abstract; Section 7.3",
+      "section": "Appendix E",
       "summary": "The G0, G1 cold, G1 warm, and interrupted probe trajectories used in the representation-wall study.",
       "evidence": [
         {
@@ -57,7 +70,7 @@
     },
     {
       "id": "stone-seeded-snapshot",
-      "section": "Section 7.2; Section 7.4",
+      "section": "Appendices D.2, E.1, and H",
       "summary": "The stone-seeded sibling run and its retained library structure.",
       "evidence": [
         {
@@ -74,7 +87,7 @@
     },
     {
       "id": "flagship-motif-census",
-      "section": "Section 7.4",
+      "section": "Section 7; Appendices B.6 and H",
       "summary": "The motif counts and diversity classes reported for the frozen flagship library.",
       "evidence": [
         {
@@ -90,31 +103,9 @@
       ]
     },
     {
-      "id": "full-ladder-coverage",
-      "section": "Section 10",
-      "summary": "The one-task-per-rung coverage run, including bounded wall-rung outcomes and the smoke scorecard.",
-      "evidence": [
-        {
-          "path": "ai/archive/20260707_smoke18/results/run_summary.json",
-          "sha256": "49016a2ad95f47c04c4a91612f158c261b7857ef639d14401b7d2a42ddd59b18",
-          "role": "summary"
-        },
-        {
-          "path": "ai/archive/20260707_smoke18/scorecard.txt",
-          "sha256": "71bff5db5af16cec0802432affb009772e6c6a557f0b7cb839d0689719b3b659",
-          "role": "transcript"
-        },
-        {
-          "path": "ai/archive/20260707_smoke18/config_smoke_all_rungs.toml",
-          "sha256": "8c6b8680b5c40a9c86ccb62615a872bc45da52c390e507da6385ba1093bc0358",
-          "role": "config"
-        }
-      ]
-    },
-    {
-      "id": "full-ladder-canary",
-      "section": "Section 7.5; Appendices C-E",
-      "summary": "The completed ten-task-per-rung canary, its pinned configuration, reports, retained-library metadata, ARC transcript, and post-hoc motif evidence.",
+      "id": "pre-change-full-ladder-run",
+      "section": "Sections 3.2-3.3, 5, and 6.2; Appendices A, C, F, and I",
+      "summary": "The completed ten-task-per-rung pre-change preflight, its pinned configuration, reports, retained-library metadata, ARC transcript, and post-hoc motif evidence.",
       "evidence": [
         {
           "path": "ai/archive/20260712_preflight/results/run_summary.json",
@@ -194,8 +185,80 @@
       ]
     },
     {
+      "id": "current-method-canary",
+      "section": "Abstract; Sections 3.2-3.3 and 5-10; Appendices B-C, G, and I",
+      "summary": "The July 15 cold current-method canary's root metrics, mechanism traces, library growth, router-v2 layout, lifecycle state, and generated reports.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_summary.json",
+          "sha256": "e7d90e32100bcccb86d8ab4a40c48d41264241f71928855731bdc9a9e85bde72",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/config.toml",
+          "sha256": "3997aa63316d3d8f6dc3dceb45d64607916f25bab1fa45ec864244fb585b1ba1",
+          "role": "config"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/config.effective.json",
+          "sha256": "b4a089ab2c38f9b71bcf52c898b7b2c062429e9f9bddd168edd6b972438c0472",
+          "role": "config"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_report.json",
+          "sha256": "de5ddce635a924cec77b9e57596673c09429e5108880c312c6546eb32f10d0da",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_report.md",
+          "sha256": "80119dff621f4731dc84889d50e5cddcfd65ae35720cbcd59f3e10002f01f345",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/rung_summary.csv",
+          "sha256": "ca2e866d2cf1b32df7af37b54f6792c8b2b2d002c8215b9943245d343b5cebc1",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/index.json",
+          "sha256": "b6fd54e43cb43c826e3307a73bb75697e899810f10dff518a411228bab2b94b4",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/lifecycle.json",
+          "sha256": "6b82116cf7a8ab2910ed3b891d0b19d1583af8004d9806130f8dbc25338709c5",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/router/router_meta.json",
+          "sha256": "f677173169085df721a6a8d390f462946c219a76b0962f984c55755ee1ad550a",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/router/router_state.pt",
+          "sha256": "2879f561f2466f597da4339c6ee3f337229a00946e3fa5210d4c3ab07d15f6d3",
+          "role": "library"
+        },
+        {
+          "path": "paper/evidence/20260715_router_inventory.json",
+          "sha256": "bdb4b9d877081bd7ba8c799200eccf6ba5e11bdd72f8bd28f4c336bd0ecf0621",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/images/overmind.png",
+          "sha256": "943948037373f49c39af050284f69ad521875916eb0cffba36cc3fe7c7a8ffed",
+          "role": "render"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/images/overmind_pruned.png",
+          "sha256": "dd6ce0b285fabb9d4f2c8d6d4600d516ed0f2f3d6df101dd6eb572c7ceb42be7",
+          "role": "render"
+        }
+      ]
+    },
+    {
       "id": "compute-accounting",
-      "section": "Appendix D",
+      "section": "Section 5; Appendix C.2",
       "summary": "Per-task wall-clock rows underlying the reported aggregate experimental compute.",
       "evidence": [
         {
@@ -232,6 +295,11 @@
           "path": "ai/archive/20260712_preflight/results/run_summary.json",
           "sha256": "74bf3361d40047c37d6ac1a3829969cd9433a135d2b48536800f0e651218cf4b",
           "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_summary.json",
+          "sha256": "e7d90e32100bcccb86d8ab4a40c48d41264241f71928855731bdc9a9e85bde72",
+          "role": "summary"
         }
       ]
     }
@@ -244,31 +312,31 @@
       "evidence": [
         {
           "path": "paper/figures/make_figures.py",
-          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
           "role": "script"
         }
       ],
       "outputs": [
         {
           "path": "paper/figures/fig1_ladder.pdf",
-          "sha256": "d3b0695257241c66f781d02364393e6e87a339e1799ca377b931c42a6432cbdc",
+          "sha256": "57168e91494afca81545c2cd6caff8cdff8587a6d4e24dc94f85fc09a5b672f8",
           "role": "output"
         },
         {
           "path": "paper/figures/fig1_ladder.png",
-          "sha256": "771a21c3cb174d686318823e2320efbcb12b0d89375c7d4572461256034a1e87",
+          "sha256": "8e3668131032a48e2208785f8dce992fb8c96a9c3303e530d98ca2975b51a97f",
           "role": "output"
         }
       ]
     },
     {
       "id": "figure-2-marginal-cost",
-      "section": "Section 7.2",
+      "section": "Section 6.1",
       "summary": "Marginal cost per task encounter derived from the frozen flagship run.",
       "evidence": [
         {
           "path": "paper/figures/make_figures.py",
-          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
           "role": "script"
         },
         {
@@ -292,12 +360,12 @@
     },
     {
       "id": "figure-3-two-spirals",
-      "section": "Section 7.3",
+      "section": "Appendix E.2",
       "summary": "Per-attempt two-spirals trajectories for the four reported gate arms.",
       "evidence": [
         {
           "path": "paper/figures/make_figures.py",
-          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
           "role": "script"
         },
         {
@@ -336,12 +404,12 @@
     },
     {
       "id": "figure-4-structure-vs-weights",
-      "section": "Section 7.3",
+      "section": "Appendix E.2",
       "summary": "Hybrid-evaluator champions plotted by structure-only and trained metrics.",
       "evidence": [
         {
           "path": "paper/figures/make_figures.py",
-          "sha256": "ff2fd955b43110b95cf8a3c792838a8228955fcecc1de5dc9dcc03f0f78d814f",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
           "role": "script"
         },
         {
@@ -395,9 +463,14 @@
     },
     {
       "id": "figure-5-library-artifacts",
-      "section": "Section 7.4",
-      "summary": "Verbatim frozen renders for the router, macro artifact, macro chain, and probe champion.",
+      "section": "Appendices G.2 and H",
+      "summary": "Frozen renders for the router and three library artifacts, plus their deterministic comparison plate.",
       "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
+          "role": "script"
+        },
         {
           "path": "ai/archive/20260706_flagship/library/images/overmind.png",
           "sha256": "236e01b655f103f377f985720fe3d4e47d805fcb09cfe6d5a04cf8afbd343679",
@@ -439,12 +512,22 @@
           "path": "paper/figures/fig5d_probe_champion.png",
           "sha256": "e73b96bb2b98801a7fd33b9fd44fa22a8738976c7fdc927561f69014e991e2c8",
           "role": "output"
+        },
+        {
+          "path": "paper/figures/fig5e_artifact_triptych.pdf",
+          "sha256": "5705c846539e50d54d14fe2a79a4b61d3e809154582bf74949622ec2f9422852",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig5e_artifact_triptych.png",
+          "sha256": "a8c3398e73488ce2f0ade7253cb46c7ba6cfb98300e0e08f45d2dc99a158afe5",
+          "role": "output"
         }
       ]
     },
     {
       "id": "figure-6-motif-atlas",
-      "section": "Section 7.4",
+      "section": "Appendix H",
       "summary": "Verbatim motif atlas produced from the frozen flagship library census.",
       "evidence": [
         {
@@ -462,6 +545,35 @@
         {
           "path": "paper/figures/fig6_motifs.png",
           "sha256": "8ef8c7d1b44b93c773a72ca09d3ba8b2abfe881e00bef8a55e574b73b48f45bf",
+          "role": "output"
+        }
+      ]
+    },
+    {
+      "id": "figure-7-current-canary",
+      "section": "Section 6.3",
+      "summary": "Per-rung support and held-out query accuracy from the July 15 current-method canary, preserving valid zeroes and unavailable measurements.",
+      "evidence": [
+        {
+          "path": "paper/figures/make_figures.py",
+          "sha256": "ace7bdc56704cda588ac59d533be5dc717033a0963545870ce3915192e139870",
+          "role": "script"
+        },
+        {
+          "path": "ai/archive/20260715_canary/results/20260715_014520_orchestrated/run_summary.json",
+          "sha256": "e7d90e32100bcccb86d8ab4a40c48d41264241f71928855731bdc9a9e85bde72",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "paper/figures/fig7_canary.pdf",
+          "sha256": "e14bec4dec925399e0dee473a0f91d2c2b65a5ee9c6825939eb409e562565b25",
+          "role": "output"
+        },
+        {
+          "path": "paper/figures/fig7_canary.png",
+          "sha256": "d752889acaab8a22e248656b84045a26f420fb91fe180bcbf0cfb01ccfa9e06e",
           "role": "output"
         }
       ]
