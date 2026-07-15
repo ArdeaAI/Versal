@@ -141,7 +141,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         # task switches) and the batch program's serial fallback still need a sequential op. Bind
         # the SAME kind's sequential form when one exists (gradient_refine must keep deep
         # supervision on refine genomes everywhere), else `gradient`. The compute device resolves
-        # from the run config unless the table pins one, so a LatticeCUDA run lands population
+        # from the run config unless the table pins one, so either Lattice CUDA mode lands population
         # training on cuda with zero config edits; the padding budget widens on GPU (CIFAR-scale
         # n fits comfortably once the batch stacks compact [P, n, h] columns).
         population_params = {k: v for k, v in train_cfg.items() if k not in ("kind", "batched", "compute_policy_path")}

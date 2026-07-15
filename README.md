@@ -113,12 +113,25 @@ All live profiles inherit the complete method in [`configs/canary.toml`](configs
 | `canary.toml` | Exercise the complete local method | One deep task per rung; about 1–2 hours |
 | `brute.toml` | Repeatedly search one editable rung for capability and simpler solutions | Long, deep task-family campaign |
 | `preflight.toml` | Establish workstation confidence before renting compute | Ten tasks per rung; about 14–25 hours on an M4 Max |
-| `canary-lattice.toml` | Check CUDA parity within a 10 GiB device envelope | One task per rung on an RTX 3080 |
+| `canary-lattice.toml` | Check CUDA parity while ClearML observes the local process | One task per rung on an RTX 3080 |
 | `full_cluster.toml` | Run the flagship multi-seed campaign with adaptive resource limits | Twenty tasks per rung per seed |
 
 The brute profile’s target is the `schedule.rungs` value in its file. Its always-on refinement
 budget keeps revisiting solved signatures, with novelty and complexity pressure seeking a better or
 simpler topology before the known-good solution is retained as fallback.
+
+On the Lattice workstation, these commands keep execution in the current terminal while attaching
+the run to ClearML:
+
+```bash
+uv run app --config configs/smoke.toml --machine LocalLatticeCUDA --clearml
+uv run app --config configs/canary-lattice.toml
+uv run app --config configs/preflight.toml --machine LocalLatticeCUDA
+```
+
+Use `LocalLatticeCPU` to force local CPU execution instead. The older `LatticeCUDA` and
+`LatticeCPU` labels deliberately retain their original meaning: enqueue to the corresponding
+ClearML agent and exit the submitting process.
 
 ## What a run records
 

@@ -22,10 +22,23 @@ if TYPE_CHECKING:
 # value (the import happens lazily inside _create_task, where the task is actually built).
 HAS_CLEARML = importlib.util.find_spec("clearml") is not None
 
-VALID_MACHINE_ENVS = {"local", "LatticeCPU", "LatticeCUDA", "MonadCPU", "MonadMetal", "ClusterCUDA"}
+VALID_MACHINE_ENVS = {
+    "local",
+    "LatticeCPU",
+    "LatticeCUDA",
+    "LocalLatticeCPU",
+    "LocalLatticeCUDA",
+    "MonadCPU",
+    "MonadMetal",
+    "ClusterCUDA",
+}
 QUEUE_BY_MACHINE = {
     "LatticeCPU": "lattice_cpu",
     "LatticeCUDA": "lattice_cuda",
+    # These labels select Lattice hardware without delegating to its ClearML agents. ClearML
+    # still owns the task and telemetry; only execution remains in the invoking process.
+    "LocalLatticeCPU": "local",
+    "LocalLatticeCUDA": "local",
     "MonadCPU": "local",
     "MonadMetal": "local",
     # Generic rented clusters run the current process locally under their own launcher (Slurm,

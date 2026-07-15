@@ -70,7 +70,7 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert brute["orchestrator"]["max_total_task_seconds"] == 7200
 
     lattice = Config(Config.PROJECT_ROOT / "configs" / "canary-lattice.toml").current
-    assert lattice["machine_env"] == "LatticeCUDA"
+    assert lattice["machine_env"] == "LocalLatticeCUDA"
     assert lattice["orchestrator"]["direct"]["train"]["batched"] is True
     assert lattice["resources"]["device_fraction"] == 0.65
     assert lattice["tf32"] is False

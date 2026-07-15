@@ -7,7 +7,7 @@ from typing import Any
 from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from ardevo.utils.config import Config
 from ardevo.utils.logging import Logger
-from ardevo.utils.pipelines import Pipeline
+from ardevo.utils.pipelines import VALID_MACHINE_ENVS, Pipeline
 
 
 def require_orchestrator(config: dict[str, Any]) -> None:
@@ -76,6 +76,11 @@ def main() -> None:
     parser.add_argument("--resume", type=str, default=None, help="Resume a run from its directory (e.g. results/<ts>_orchestrated).")
     parser.add_argument("--seed", type=int, default=None, help="Override [run] seed (the multi-seed matrix driver's seam; the config file stays frozen).")
     parser.add_argument("--library-dir", type=str, default=None, help="Override [orchestrator] library_dir (cold/warm arms without editing the config).")
+    parser.add_argument("--machine", choices=sorted(VALID_MACHINE_ENVS), default=None, help="Override [run] machine for this run without editing the selected profile.")
+    clearml = parser.add_mutually_exclusive_group()
+    clearml.add_argument("--clearml", dest="clearml", action="store_true", help="Enable ClearML telemetry for this run.")
+    clearml.add_argument("--no-clearml", dest="clearml", action="store_false", help="Disable ClearML telemetry for this run.")
+    parser.set_defaults(clearml=None)
     parser.add_argument("--verbose", action="store_true", help="Show concise operational diagnostics in addition to the Rich run display.")
     args = parser.parse_args()
     Logger.configure(verbose=args.verbose)
@@ -88,6 +93,10 @@ def main() -> None:
         config.current["seed"] = args.seed
     if args.library_dir is not None:
         config.current["orchestrator"]["library_dir"] = args.library_dir
+    if args.machine is not None:
+        config.current["machine_env"] = args.machine
+    if args.clearml is not None:
+        config.current["clearml_run"] = args.clearml
     configure_precision(config.current)
     configure_assess_pool(config.current)
     logger = Logger.get_logger()

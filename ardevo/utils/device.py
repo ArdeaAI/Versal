@@ -5,9 +5,9 @@ tiny and dispatch-bound, and the workers are pinned to one intra-op thread each.
 only for population-batched tensor programs (the `gradient_batched` family), so this resolver is
 consumed at those sites, threaded in by `build_evolver`, plus `Proctor`'s informational device.
 Resolution order: an explicit per-op knob (`device = ...` on the train table) wins, then the
-`[run] compute` override, then the `[run] machine` mapping (MonadMetal -> mps, LatticeCUDA ->
-cuda, ClusterCUDA -> cuda). Every rung of the ladder falls back to CPU with a warning rather than crashing a queue job
-on an agent whose GPU is missing or unconfigured.
+`[run] compute` override, then the `[run] machine` mapping (MonadMetal -> mps, either Lattice
+CUDA mode -> cuda, ClusterCUDA -> cuda). Every rung of the ladder falls back to CPU with a warning
+rather than crashing a run whose accelerator is missing or unconfigured.
 
 Calibration is deliberately separate from device resolution. A caller supplies named execution
 mode runners and, optionally, an explicit path under gitignored run state. Merely importing this
@@ -32,7 +32,14 @@ from ardevo.utils.logging import Logger
 
 logger = Logger.get_logger()
 
-_MACHINE_DEVICE = {"MonadMetal": "mps", "LatticeCUDA": "cuda", "ClusterCUDA": "cuda"}
+_MACHINE_DEVICE = {
+    "MonadMetal": "mps",
+    "LatticeCUDA": "cuda",
+    "LocalLatticeCUDA": "cuda",
+    "LatticeCPU": "cpu",
+    "LocalLatticeCPU": "cpu",
+    "ClusterCUDA": "cuda",
+}
 
 SERIAL_MODE = "serial"
 POPULATION_CPU_MODE = "population_cpu"

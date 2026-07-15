@@ -43,6 +43,12 @@ def test_machine_env_mapping(monkeypatch) -> None:
     assert resolve_compute_device({}).type == "cpu"
 
 
+def test_local_lattice_machine_env_mapping(monkeypatch) -> None:
+    _force(monkeypatch, cuda=True, mps=True)
+    assert resolve_compute_device({"machine_env": "LocalLatticeCPU"}).type == "cpu"
+    assert resolve_compute_device({"machine_env": "LocalLatticeCUDA"}).type == "cuda"
+
+
 def test_unavailable_backends_fall_back_to_cpu(monkeypatch) -> None:
     _force(monkeypatch, cuda=False, mps=False)
     assert resolve_compute_device({"machine_env": "MonadMetal"}).type == "cpu"
@@ -238,6 +244,54 @@ def test_cluster_cuda_uses_local_launcher_with_clearml_telemetry(monkeypatch) ->
     pipe = pipelines.Pipeline({"machine_env": "ClusterCUDA", "clearml_run": True})
     assert pipe.queue == "local"
     assert pipe.clearml_run is True
+
+
+@pytest.mark.parametrize("machine_env", ["LocalLatticeCPU", "LocalLatticeCUDA"])
+def test_local_lattice_runs_inline_once_with_clearml_telemetry(monkeypatch, machine_env: str) -> None:
+    from ardevo.utils import pipelines
+
+    calls = {"task_init": 0, "trial_run": 0, "execute_remotely": 0, "close": 0}
+
+    class FakeRun:
+        def connect(self, _values) -> None:
+            pass
+
+        def set_repo(self, **_values) -> None:
+            pass
+
+        def execute_remotely(self, **_values) -> None:
+            calls["execute_remotely"] += 1
+
+        def close(self) -> None:
+            calls["close"] += 1
+
+    class FakeTask:
+        TaskTypes = SimpleNamespace(custom="custom")
+
+        @staticmethod
+        def init(**_values):
+            calls["task_init"] += 1
+            return FakeRun()
+
+    class FakeTrial:
+        def __init__(self, *, config, task) -> None:
+            assert config["machine_env"] == machine_env
+            assert isinstance(task, FakeRun)
+
+        def run(self) -> dict[str, str]:
+            calls["trial_run"] += 1
+            return {"machine_env": machine_env}
+
+    monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
+    monkeypatch.setitem(sys.modules, "clearml", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(pipelines, "get_current_branch", lambda: "")
+
+    pipeline = pipelines.Pipeline({"machine_env": machine_env, "clearml_run": True})
+    pipeline.add_trial(FakeTrial)
+
+    assert pipeline.queue == "local"
+    assert pipeline.run_task() == [{"machine_env": machine_env}]
+    assert calls == {"task_init": 1, "trial_run": 1, "execute_remotely": 0, "close": 1}
 
 
 def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
