@@ -408,6 +408,12 @@ class OrchestratedTrial(Proctor):
     def _release_evolution_task_adapters(self, orchestrator: Orchestrator) -> None:
         """Drop main-process encoded adapters before a different task payload is decoded."""
 
+        # Keep spill paths alive until every shared worker has finished earlier queued work and
+        # acknowledged dropping its one-slot task payload.  This matters when crash cleanup follows
+        # a main-process exception while hybrid map_async work is still outstanding.
+        from ardevo.evolution.evolver import release_shared_task_adapters
+
+        release_shared_task_adapters()
         evolvers: list[Any] = [self.loop.evolver]
         evolvers.extend(getattr(strategy, "evolver", None) for _name, strategy in orchestrator.strategies)
         seen: set[int] = set()
@@ -418,9 +424,6 @@ class OrchestratedTrial(Proctor):
             release = getattr(evolver, "release_task_adapter", None)
             if callable(release):
                 release()
-        from ardevo.evolution.evolver import release_shared_task_adapters
-
-        release_shared_task_adapters()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

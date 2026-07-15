@@ -34,7 +34,7 @@ from ardevo.evolution.composition import (
     minimal_composition,
     writeback_composition,
 )
-from ardevo.evolution.evolver import Evolver, get_shared_pool, get_worker_library
+from ardevo.evolution.evolver import AdapterRef, Evolver, _resolve_adapter, get_shared_pool, get_worker_library
 from ardevo.evolution.fitness import stamp_complexity_metrics
 from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from ardevo.evolution.mutation import MutationContext
@@ -91,7 +91,15 @@ class AssessedComposition:
     comp: CompositionGenome
     metrics: dict[str, float]
     fitness: float
-    net: ComposedNet | None  # None when assembly failed (floor fitness)
+    net: ComposedNet | None  # None for an assembly failure or a compact non-champion pooled result
+    # Process workers must not return ``ComposedNet``: torch's Linux multiprocessing reducer
+    # transports every tensor storage through a shared-memory file descriptor.  A composition
+    # generation can contain hundreds of storages and exhaust the parent's descriptor limit before
+    # the old population is released.  Workers instead return these plain Genome writebacks; the
+    # main process applies the winning set and reconstructs only the generation champion's net.
+    # None means assembly failed or this assessment ran in the main process; an empty dict is a
+    # successfully assembled pooled composition with no live-module references.
+    live_writebacks: dict[str, Genome] | None = None
 
 
 @dataclass(frozen=True)
@@ -172,7 +180,7 @@ def assess_composition_pure(
 def _assess_comp_in_worker(
     comp: CompositionGenome,
     *,
-    spec: CompTaskSpec,
+    spec: CompTaskSpec | AdapterRef,
     species_champions: dict[int, Genome],
     max_inline_depth: int,
     train: bool,
@@ -180,9 +188,15 @@ def _assess_comp_in_worker(
     evaluate_op: Callable[..., dict[str, float]],
     fitness: Callable[..., float],
 ) -> AssessedComposition:
-    """Process-pool entry: assess one composition using the worker's own on-disk library handle, and
-    return the AssessedComposition (with the trained net) for the main process's serial writeback."""
-    return assess_composition_pure(
+    """Assess one composition and return an fd-safe, tensor-free result.
+
+    Glue is already copied into ``CompositionGenome`` by ``assess_composition_pure``.  Live inner
+    modules need one additional Lamarckian writeback, which is compacted into ordinary Genome
+    dataclasses here.  Returning a trained ``ComposedNet`` would make torch send every parameter and
+    buffer through ``SCM_RIGHTS`` on Linux and eventually exhaust the parent's open-file limit.
+    """
+    spec = _resolve_adapter(spec)
+    assessed = assess_composition_pure(
         comp,
         spec,
         species_champions,
@@ -193,6 +207,22 @@ def _assess_comp_in_worker(
         evaluate_op=evaluate_op,
         fitness=fitness,
         rng=_COMP_WORKER_RNG,
+    )
+    if assessed.net is None:
+        return assessed
+    live_writebacks: dict[str, Genome] = {}
+    for ref, inner in assessed.net.inner_modules.items():
+        if not ref.startswith("live:"):
+            continue
+        champion = species_champions.get(int(ref.removeprefix("live:")))
+        if champion is not None:
+            live_writebacks[ref] = _writeback(champion, inner)
+    return AssessedComposition(
+        comp=assessed.comp,
+        metrics=assessed.metrics,
+        fitness=assessed.fitness,
+        net=None,
+        live_writebacks=live_writebacks,
     )
 
 
@@ -366,13 +396,20 @@ class HierarchicalLoop:
 
         Results are identical to the serial loop: candidates share no trainable state, assessment
         consumes no rng (a throwaway rng in workers is safe), and floored candidates (assembly errors)
-        are produced INSIDE the pure assessor. The champion's trained `net` is returned intact so the
-        serial `_attribute` / `_module_writeback` reductions run unchanged afterward."""
+        are produced INSIDE the pure assessor. Pooled results carry trained glue and live-module
+        writebacks as plain genes; no torch storage crosses the process boundary."""
         pool = get_shared_pool()
         if pool is not None and len(comps) > 1:
+            # The encoded task can itself contain large torch tensors. Spill it once and let each
+            # worker's one-slot payload cache resolve the path; binding the full spec into every
+            # map chunk would recreate the same fragile torch fd transport on the input side.
+            pooled_spec = self.evolver._pooled_adapter(spec)
+            if not isinstance(pooled_spec, AdapterRef):
+                logger.warning("composition task payload could not be spilled; assessing this batch in the main process")
+                return [self._assess(comp, spec, state, train=train) for comp in comps]
             worker = partial(
                 _assess_comp_in_worker,
-                spec=spec,
+                spec=pooled_spec,
                 species_champions=state.species_champions,
                 max_inline_depth=self.max_inline_depth,
                 train=train,
@@ -428,7 +465,19 @@ class HierarchicalLoop:
         if self.writeback_mode != "champion":
             return
         best = max(assessed, key=lambda item: item.fitness)
-        if best.net is None or best.fitness <= FLOOR_FITNESS:
+        if best.fitness <= FLOOR_FITNESS:
+            return
+        if best.live_writebacks is not None:
+            for ref, updated in best.live_writebacks.items():
+                species_id = int(ref.removeprefix("live:"))
+                if species_id not in state.species_champions:
+                    continue
+                state.species_champions[species_id] = updated
+                champion_index = state.species_champion_index.get(species_id)
+                if champion_index is not None and champion_index < len(state.modules):
+                    state.modules[champion_index].genome = updated
+            return
+        if best.net is None:
             return
         for ref, inner in best.net.inner_modules.items():
             if not ref.startswith("live:"):
@@ -442,6 +491,38 @@ class HierarchicalLoop:
             champion_index = state.species_champion_index.get(species_id)
             if champion_index is not None and champion_index < len(state.modules):
                 state.modules[champion_index].genome = updated
+
+    def _restore_champion_net(self, assessed: AssessedComposition, spec: CompTaskSpec, state: HierarchicalState) -> None:
+        """Rebuild only a pooled generation champion in the main process.
+
+        The returned genes contain the exact trained glue and live-module weights that produced the
+        worker metrics, so assembly restores the executable network without another optimization or
+        evaluation pass.  Keeping one such net preserves the strategy/verification API while the
+        rest of the population remains compact and descriptor-free.
+        """
+        if assessed.net is not None or assessed.live_writebacks is None:
+            return
+        live_writebacks = assessed.live_writebacks
+
+        def live_resolver(species_id: str) -> Genome:
+            ref = f"live:{species_id}"
+            genome = live_writebacks.get(ref)
+            if genome is None:
+                genome = state.species_champions.get(int(species_id))
+            if genome is None:
+                raise CompositionAssemblyError(f"live species {species_id} no longer exists")
+            return genome
+
+        ctx = AssemblyContext(
+            bank_columns=dict(spec.bank_columns),
+            live_resolver=live_resolver,
+            library=self.library,
+            max_inline_depth=self.max_inline_depth,
+        )
+        try:
+            assessed.net = assemble(assessed.comp, ctx, spec.n_inputs)
+        except CompositionAssemblyError as error:
+            logger.debug("pooled champion could not be reconstructed: %s", error)
 
     # --- reproduction -----------------------------------------------------------------------------------
 
@@ -630,6 +711,7 @@ class HierarchicalLoop:
         self._attribute(assessed, state)
         self._module_writeback(assessed, state)
         best = max(assessed, key=lambda item: item.fitness)
+        self._restore_champion_net(best, spec, state)
 
         for generation in range(budget):
             if stop is not None and stop(generation, best):
@@ -642,6 +724,7 @@ class HierarchicalLoop:
             self._attribute(assessed, state)
             self._module_writeback(assessed, state)
             generation_best = max(assessed, key=lambda item: item.fitness)
+            self._restore_champion_net(generation_best, spec, state)
             if generation_best.fitness > best.fitness:
                 best = generation_best
             if on_generation is not None:

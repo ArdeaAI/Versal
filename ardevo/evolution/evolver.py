@@ -13,7 +13,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from multiprocessing.pool import Pool
@@ -32,6 +32,8 @@ from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_ke
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
+
+_TaskPayload = TypeVar("_TaskPayload")
 
 
 class Adapter(Protocol):
@@ -363,13 +365,18 @@ class Evolver:
         results = pool.map(worker, genomes, chunksize=chunksize)
         return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
 
-    def _pooled_adapter(self, adapter: Adapter) -> "Adapter | AdapterRef":
-        """Spill the adapter to disk ONCE per task so pool.map pickles a tiny path per chunk
-        instead of the encoded tensors every time (~4MB x chunks x generations for CIFAR).
+    def _pooled_adapter(self, adapter: _TaskPayload) -> "_TaskPayload | AdapterRef":
+        """Spill an encoded task payload ONCE so pool.map pickles a tiny path per chunk.
+
+        This serves both flat task adapters and composition task specs; workers resolve either
+        through the same one-slot cache instead of transporting their torch tensors through Linux
+        shared-memory descriptors every generation.
+
         Content-addressed under `<library_dir>/encoded_cache/`, so a stale file is impossible;
         the previous task's spill is unlinked on replacement (its map calls have completed: assess
-        is synchronous per generation). Any failure falls back to pickling the adapter directly."""
-        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
+        is synchronous per generation). Any failure returns the original payload; callers that
+        require fd-free transport can then fall back to main-process assessment."""
+        slot: tuple[Any, str] | None = getattr(self, "_adapter_spill", None)
         if slot is not None and slot[0] is adapter:
             return AdapterRef(slot[1])
         try:
@@ -424,7 +431,13 @@ class Evolver:
         Shared assessment workers replace their own one-slot adapter on the first evaluation of
         the next task; they are intentionally not restarted because ClearML patches process spawn.
         """
-        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
+        # A main-process training failure can leave map_async work queued.  Let an owned pool drain
+        # through the acknowledged release barrier before unlinking the path those jobs may still
+        # need.  The trial performs the equivalent shared-pool barrier before calling this method.
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            _release_pool_task_adapters(pool)
+        slot: tuple[Any, str] | None = getattr(self, "_adapter_spill", None)
         if slot is not None:
             from pathlib import Path
 
@@ -433,9 +446,6 @@ class Evolver:
         import gc
 
         gc.collect()
-        pool = getattr(self, "_pool", None)
-        if pool is not None:
-            _release_pool_task_adapters(pool)
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -702,7 +712,7 @@ def _init_worker(library_dir: str) -> None:
 
 # One-slot adapter cache per worker: tasks are processed sequentially, so a worker only ever needs
 # the CURRENT task's tensors; a growing cache would hold every visited task's encodings in memory.
-_WORKER_ADAPTER: tuple[str, Adapter] | None = None
+_WORKER_ADAPTER: tuple[str, Any] | None = None
 
 
 def _release_worker_task_adapter(_token: int) -> int:
@@ -717,7 +727,7 @@ def _release_worker_task_adapter(_token: int) -> int:
     return os.getpid()
 
 
-def _resolve_adapter(adapter: "Adapter | AdapterRef") -> Adapter:
+def _resolve_adapter(adapter: "_TaskPayload | AdapterRef") -> _TaskPayload:
     if not isinstance(adapter, AdapterRef):
         return adapter
     global _WORKER_ADAPTER
@@ -734,7 +744,7 @@ def _resolve_adapter(adapter: "Adapter | AdapterRef") -> Adapter:
         # and safe: the path is only ever produced by this run's own `_pooled_adapter` spill into
         # its library dir, never taken from external input.
         _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False))
-    return _WORKER_ADAPTER[1]
+    return cast(_TaskPayload, _WORKER_ADAPTER[1])
 
 
 def _assess_in_worker(
