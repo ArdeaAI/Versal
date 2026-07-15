@@ -216,6 +216,47 @@ def test_bump_stats_defers_disk_writes_until_flush(tmp_path: Path, solving_genom
     library.flush_stats()  # clean flush is a no-op
 
 
+def test_route_eviction_has_a_separate_root_task_retirement_clock(tmp_path: Path, solving_genome: Genome) -> None:
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    key = _module_entry(library, solving_genome)
+    library.configure_lifecycle(library_patience_tasks=2)
+
+    library.mark_route_evicted(key)
+    assert library.finish_root_task() == []  # boundary of the task that evicted the route
+    assert library.finish_root_task() == []  # one subsequent completed root task
+    assert library.finish_root_task() == [key]  # two subsequent tasks with no evidence
+    assert library.is_retired(key)
+    summary = library.summary(key)
+    assert summary is not None and summary["retired_reason"] == "route_decay"
+
+    library.flush_stats()
+    reopened = ModuleLibrary(root)
+    reopened.configure_lifecycle(library_patience_tasks=2)
+    assert reopened.task_epoch == 3
+    assert reopened.is_retired(key)
+
+
+def test_lookup_or_composition_evidence_revives_only_route_decay_tombstones(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    decayed = _module_entry(library, solving_genome)
+    policy = _module_entry(library, linear_genome)
+    library.configure_lifecycle(library_patience_tasks=1)
+
+    library.mark_route_evicted(decayed)
+    library.finish_root_task()
+    library.finish_root_task()
+    assert library.is_retired(decayed)
+    assert library.note_reuse(decayed, channel="lookup")
+    assert not library.is_retired(decayed)
+    summary = library.summary(decayed)
+    assert summary is not None and summary["stats"]["last_lookup_epoch"] == 3
+
+    library.retire(policy, reason="policy")
+    assert not library.note_reuse(policy, channel="composition")
+    assert library.is_retired(policy)
+
+
 def test_record_refinement_increments_and_resets(tmp_path: Path, solving_genome: Genome) -> None:
     root = tmp_path / "lib"
     library = ModuleLibrary(root)

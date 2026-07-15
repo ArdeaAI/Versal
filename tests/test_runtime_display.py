@@ -2,6 +2,7 @@
 
 import io
 import logging
+import re
 from types import SimpleNamespace
 
 from rich.console import Console
@@ -79,6 +80,17 @@ def test_recursive_diagnostic_never_becomes_parent_support() -> None:
     assert "BEST SUPPORT ACCURACY" in output and "N/A" in output
     assert "Best diagnostic" in output and "darcy_flow.b3.h0" in output
     assert "none — no executable parent champion" in output
+
+
+def test_task_panel_reports_lifecycle_changes_without_dumping_metrics() -> None:
+    display, stream = _render_display(width=180)
+    attempt = _attempt(strategy_metrics={"router_vertices_expired": 2.0, "router_vertices_revived": 1.0, "library_inactivity_retired": 3.0})
+    display.task_finished(5, 18, 5, "mnist.b1", attempt, solved=False, task_seconds=2.0, new_library_keys=[], library_size=12)
+    output = stream.getvalue()
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
+    assert "Overmind upkeep" in output
+    assert "removed 2 dormant experts" in plain and "revived 1" in plain and "tombstoned 3 long-idle entries" in plain
+    assert "router_vertices_expired" not in output
 
 
 def test_stage_catalog_explains_actions_instead_of_repeating_command_names() -> None:

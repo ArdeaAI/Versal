@@ -252,6 +252,46 @@ def test_seed_state_without_seeded_front_is_unchanged(xor_adapter) -> None:
     assert [genome_to_dict(item.genome) for item in baseline.population] == [genome_to_dict(item.genome) for item in explicit_none.population]
 
 
+def test_refinement_filters_weight_only_initial_population_before_assessment(tmp_path: Path, xor_task: Task, xor_adapter, solving_genome) -> None:
+    from ardevo.evolution.registry import build_evolver
+    from ardevo.library import ModuleLibrary, graft
+    from ardevo.topology import TopologyTabuSession, TopologyTabuStore
+
+    library = ModuleLibrary(tmp_path / "lib")
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={})
+    entry = library.load(key)
+    store = TopologyTabuStore(library.root / "topology_tabu.sqlite3")
+
+    def run(context: str):
+        evolver = build_evolver(_loop_config())
+        session = TopologyTabuSession(store, context, library)
+        session.prime(MODULE, entry.payload)
+        evolver.topology_tabu = session
+        batch_sizes: list[int] = []
+        assess_many = evolver.assess_many
+
+        def capture(genomes, adapter, state):
+            batch_sizes.append(len(genomes))
+            return assess_many(genomes, adapter, state)
+
+        setattr(evolver, "assess_many", capture)
+        state = evolver.seed_state(xor_adapter, random.Random(0), seeded_front=lambda tracker: [graft(entry, tracker)])
+        return batch_sizes, session, evolver, state
+
+    first_batches, first, _first_evolver, _first_state = run("same-task-lineage-config")
+    assert first_batches == [2]  # warm incumbent plus one minimal architecture; six reweighted clones skipped
+    first.commit()
+    repeated_batches, repeated, repeated_evolver, repeated_state = run("same-task-lineage-config")
+    assert repeated_batches == [1]  # the already-tested minimal architecture is skipped persistently
+    assert repeated.duplicates == 7
+
+    setattr(repeated_evolver, "crossover_op", lambda parent_a, parent_b, *, rng: parent_a.clone())
+    setattr(repeated_evolver, "mutation", lambda genome, context, *, rng: genome)
+    repeated_evolver.advance(repeated_state, xor_adapter)
+    assert repeated_batches == [1]  # retries were rejected before another assessment batch
+    assert repeated_state.topology_exhausted and repeated.exhausted
+
+
 def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Path, xor_task: Task, solving_genome) -> None:
     from ardevo.orchestrator import comp_task_spec
 

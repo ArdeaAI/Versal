@@ -177,6 +177,7 @@ class OrchestratedTrial(Proctor):
                     module_pool_sizes = {}
                 task_seconds = time.perf_counter() - task_started
                 task_cursor += 1
+                orchestrator.finish_root_task(attempt)
                 self.library.flush_stats()  # deferred bump_stats writes land at the task boundary
                 new_library_keys = [key for key in self.library.keys() if key not in library_keys_before]
                 if hasattr(self.scheduler, "observe"):  # feedback-driven schedulers (regret); others untouched

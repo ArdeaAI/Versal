@@ -17,6 +17,7 @@ the Icarus dataset.
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -308,6 +309,7 @@ class ModuleLibrary:
         self.root = Path(root)
         self._entries_dir = self.root / "entries"
         self._index_path = self.root / "index.json"
+        self._lifecycle_path = self.root / "lifecycle.json"
         self._index: dict[str, dict[str, Any]] = {}
         self._macro_depth_cache: dict[str, int] = {}  # entries are immutable, so depths never change
         self._expanded_complexity_cache: dict[str, int] = {}
@@ -317,8 +319,16 @@ class ModuleLibrary:
         self._entry_cache: dict[str, LibraryEntry] = {}
         # Keys whose stats mutated in memory but not yet on disk (bump_stats defers; flush_stats writes).
         self._dirty_stats: set[str] = set()
+        self._lifecycle_enabled = False
+        self._library_patience_tasks = 0
+        self._task_epoch = 0
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
+        if self._lifecycle_path.exists():
+            try:
+                self._task_epoch = int(json.loads(self._lifecycle_path.read_text()).get("task_epoch", 0))
+            except (OSError, ValueError, json.JSONDecodeError):
+                self._task_epoch = 0
 
     def __len__(self) -> int:
         return len(self._index)
@@ -398,14 +408,26 @@ class ModuleLibrary:
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
         self._write_index()
 
-    def retire(self, key: str) -> None:
+    def retire(self, key: str, *, reason: str = "policy") -> None:
         """Tombstone an entry: hidden from query/catalog/lookup, but `load()` keeps working forever
         so existing composition refs never dangle. Entries are NEVER deleted."""
         summary = self._index.get(key)
         if summary is None:
             return
         summary["retired"] = True
+        summary["retired_reason"] = reason
         self._write_index()
+
+    def revive(self, key: str) -> bool:
+        """Revive only route-decay tombstones; quality and dominance decisions stay final."""
+
+        summary = self._index.get(key)
+        if summary is None or not summary.get("retired", False) or summary.get("retired_reason") != "route_decay":
+            return False
+        summary["retired"] = False
+        summary.pop("retired_reason", None)
+        self._write_index()
+        return True
 
     def is_retired(self, key: str) -> bool:
         summary = self._index.get(key)
@@ -575,6 +597,75 @@ class ModuleLibrary:
         stats["use_count"] = int(stats.get("use_count", 0)) + 1
         stats["max_attributed_fitness"] = max(float(stats.get("max_attributed_fitness", 0.0)), attributed_fitness)
         self._dirty_stats.add(key)
+        self.note_reuse(key, channel="composition")
+
+    def configure_lifecycle(self, *, library_patience_tasks: int) -> None:
+        """Enable task-clock lifecycle accounting without rewriting existing state eagerly."""
+
+        self._lifecycle_enabled = library_patience_tasks > 0
+        self._library_patience_tasks = max(0, int(library_patience_tasks))
+
+    @property
+    def task_epoch(self) -> int:
+        return self._task_epoch
+
+    def note_reuse(self, key: str, *, channel: str) -> bool:
+        """Record current-task evidence and revive a route-decayed entry when possible."""
+
+        if not self._lifecycle_enabled:
+            return False
+        summary = self._index.get(key)
+        if summary is None:
+            return False
+        revived = self.revive(key)
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats["last_reuse_epoch"] = self._task_epoch + 1
+        stats[f"last_{channel}_epoch"] = self._task_epoch + 1
+        stats["route_evicted_epoch"] = None
+        self._dirty_stats.add(key)
+        return revived
+
+    def mark_route_evicted(self, key: str) -> None:
+        if not self._lifecycle_enabled:
+            return
+        summary = self._index.get(key)
+        if summary is None:
+            return
+        stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+        stats.setdefault("last_reuse_epoch", self._task_epoch)
+        stats["route_evicted_epoch"] = self._task_epoch + 1
+        self._dirty_stats.add(key)
+
+    def finish_root_task(self) -> list[str]:
+        """Advance the durable root-task clock and tombstone long-idle router evictees."""
+
+        if not self._lifecycle_enabled:
+            return []
+        self._task_epoch += 1
+        retired: list[str] = []
+        for key, summary in self._index.items():
+            if summary.get("retired", False):
+                continue
+            stats = summary.setdefault("stats", {"use_count": 0, "max_attributed_fitness": 0.0})
+            evicted = stats.get("route_evicted_epoch")
+            if evicted is None:
+                continue
+            last_reuse = int(stats.get("last_reuse_epoch", int(evicted)))
+            if self._task_epoch - max(int(evicted), last_reuse) < self._library_patience_tasks:
+                continue
+            summary["retired"] = True
+            summary["retired_reason"] = "route_decay"
+            retired.append(key)
+        if retired:
+            self._write_index()
+        self._write_lifecycle()
+        return sorted(retired)
+
+    def _write_lifecycle(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        temporary = self._lifecycle_path.with_name(f".{self._lifecycle_path.name}.tmp")
+        temporary.write_text(json.dumps({"schema_version": 1, "task_epoch": self._task_epoch}, indent=2) + "\n")
+        os.replace(temporary, self._lifecycle_path)
 
     def flush_stats(self) -> None:
         """Persist deferred `bump_stats` mutations: rewrite each dirty entry's file, then the index

@@ -204,6 +204,19 @@ class RuntimeDisplay:
         else:
             persistence = "nothing retained"
         grid.add_row("Persistence", f"{persistence} · library size {library_size}")
+        strategy_metrics = getattr(attempt, "strategy_metrics", None) or {}
+        expired = int(strategy_metrics.get("router_vertices_expired", 0.0))
+        revived = int(strategy_metrics.get("router_vertices_revived", 0.0))
+        retired = int(strategy_metrics.get("library_inactivity_retired", 0.0))
+        if expired or revived or retired:
+            details = []
+            if expired:
+                details.append(f"removed {expired} dormant expert{'s' if expired != 1 else ''}")
+            if revived:
+                details.append(f"revived {revived}")
+            if retired:
+                details.append(f"tombstoned {retired} long-idle entr{'ies' if retired != 1 else 'y'}")
+            grid.add_row("Overmind upkeep", " · ".join(details))
 
         timing = Tree(Text(f"Timing · {_duration(task_seconds)} total", style="bold"), guide_style="dim")
         for stage, seconds in (getattr(attempt, "stage_seconds", None) or {}).items():

@@ -18,7 +18,10 @@ as task-shaped MODULE entries the composition strategy can immediately reference
 
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from ardevo.topology import TopologyTabuSession
 
 from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output_features, support_loader
 from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
@@ -51,6 +54,7 @@ class StrategyRuntime:
     on_generation: Callable[[str, int, Any, float], None] | None = None  # (strategy, gen, best, mean)
     accepts: Callable[[Any], bool] | None = None
     deadline_exceeded: Callable[[], bool] | None = None
+    topology_tabu: "TopologyTabuSession | None" = None
 
     def accepted(self, item: Any) -> bool:
         return self.accepts(item) if self.accepts is not None else self.metric_of(item) >= self.accept_threshold
@@ -460,6 +464,8 @@ class DirectStrategy:
             if runtime.accepted(best) or stop(generation, best):
                 break
             self.evolver.advance(state, adapter)
+            if state.topology_exhausted:
+                break
 
         # Verification: the genome PAYLOAD (not the live module object) must reproduce the metric,
         # because the payload is what admission persists and lookups re-decode.

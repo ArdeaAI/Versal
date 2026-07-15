@@ -499,6 +499,65 @@ def test_record_traffic_accumulates_usage_and_transitions(tmp_path: Path, xor_ta
         assert sum(steps) == pytest.approx(service.usage_totals[name])
 
 
+def test_route_life_ages_once_per_routed_task_and_reuse_revives_the_expert(tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome) -> None:
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    inactive_key = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
+    active_key = next(key for key in library.keys() if key != inactive_key)
+    library.configure_lifecycle(library_patience_tasks=48)
+    router_dir = tmp_path / "lib" / "router"
+    service = RouterService(
+        library,
+        d_model=16,
+        top_k=1,
+        max_steps=1,
+        persist_dir=router_dir,
+        lifecycle_enabled=True,
+        route_patience_tasks=2,
+        route_traffic_decay=0.5,
+    )
+    assert service.sync() == 2
+    active_name = sanitize_key(active_key)
+    inactive_name = sanitize_key(inactive_key)
+
+    def record_active_route() -> dict[str, float]:
+        active_index = service.net._vertex_order.index(active_name)
+        service.net.last_selections = [torch.tensor([[active_index]], dtype=torch.long)]
+        service.net.last_probs = [torch.tensor([[1.0]])]
+        service.net.last_gate_stats = {active_name: 1.0}
+        return service.record_traffic()
+
+    assert record_active_route() == {}
+    assert service.route_epoch == 1
+    assert service.route_life[inactive_name] == 1
+    metrics = record_active_route()
+    assert metrics["router_vertices_expired"] == 1.0
+    assert service.route_epoch == 2
+    assert inactive_name not in service.net._vertex_order
+    assert inactive_key in service.evicted
+    assert service.usage_totals[active_name] == pytest.approx(1.5)  # previous traffic decayed before this task
+
+    service.save()
+    reloaded = RouterService(
+        library,
+        d_model=16,
+        top_k=1,
+        max_steps=1,
+        persist_dir=router_dir,
+        lifecycle_enabled=True,
+        route_patience_tasks=2,
+        route_traffic_decay=0.5,
+    )
+    assert reloaded.route_epoch == 2
+    assert inactive_name not in reloaded.net._vertex_order
+    assert inactive_key in reloaded.evicted
+
+    assert not library.note_reuse(inactive_key, channel="lookup")  # live in the library, absent only from routing
+    assert reloaded.sync() == 1
+    assert inactive_name in reloaded.net._vertex_order
+    assert inactive_key not in reloaded.evicted
+    assert reloaded.last_lifecycle_metrics == {"router_vertices_revived": 1.0}
+
+
 def test_traffic_persists_through_meta_round_trip(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     torch.manual_seed(0)
     library = _seed_library(tmp_path, xor_task, solving_genome)

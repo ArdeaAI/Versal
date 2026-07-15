@@ -615,15 +615,22 @@ def test_refine_skipped_when_matching_strategy_not_configured(tmp_path: Path, xo
 
 def test_refine_retrained_clone_never_admits(tmp_path: Path, xor_task: Task, solving_genome) -> None:
     """The clone-factory guard: entry keys hash weights, so a topology-identical champion with
-    retrained weights always gets a fresh key; the structural fingerprint must catch it instead
+    retrained weights always gets a fresh key; exact topology identity must catch it even after ids
+    are restamped
     (the 2026-07-03 incident admitted 11 such clones and tombstoned their parents)."""
-    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    orchestrator = _orchestrator(tmp_path, table=_refine_table(deduplicate_topologies=True))
     old_key = orchestrator.library.add(
         entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0, "weight_robustness": 0.5}
     )
     reweighted = genome_to_dict(solving_genome)
+    remap = {node["id"]: node["id"] + 100 for node in reweighted["nodes"]}
+    for node in reweighted["nodes"]:
+        node["id"] = remap[node["id"]]
     for connection in reweighted["connections"]:
+        connection["in"] = remap[connection["in"]]
+        connection["out"] = remap[connection["out"]]
         connection["weight"] += 0.5
+        connection["innovation"] += 1000
     calls: list[dict] = []
     # Metric tie at 1.0, robustness 0.9 vs stored 0.5: the comparator ALONE would admit this.
     orchestrator.strategies = [("direct", _fake_direct(1.0, 0.9, genome_from_dict(reweighted), calls))]
@@ -633,6 +640,7 @@ def test_refine_retrained_clone_never_admits(tmp_path: Path, xor_task: Task, sol
     assert len(orchestrator.library) == 1 and not orchestrator.library.is_retired(old_key)
     assert orchestrator.counters["refine_no_gain"] == 1 and orchestrator.counters["refine_improvements"] == 0
     assert orchestrator.library.load(old_key).stats["refine_failures_since_gain"] == 1  # decay bites
+    assert "topology_duplicates_skipped" in orchestrator.attempts[-1].strategy_metrics  # survives into JSON/report aggregation
 
 
 def test_refine_seed_metric_is_the_incumbent_baseline(tmp_path: Path, xor_task: Task, solving_genome, linear_genome) -> None:

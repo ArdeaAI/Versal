@@ -45,6 +45,7 @@ from ardevo.library import (
 from ardevo.strategy import StrategyResult, StrategyRuntime, build_strategies
 from ardevo.substrate import decode_module, decode_recurrent
 from ardevo.temporal import temporal_adapter
+from ardevo.topology import TopologyTabuSession, TopologyTabuStore, refinement_context, refinement_lineage_root, same_topology, task_content_fingerprint, topology_record
 from ardevo.utils.logging import Logger
 from ardevo.utils.resources import format_bytes
 from ardevo.utils.runtime_display import NULL_DISPLAY
@@ -339,6 +340,10 @@ class Orchestrator:
         # "gc" is the trial's run-end sweep flag, not an admission-policy knob.
         self.admission = LIBRARY_ADMISSION.get(library_cfg.get("admission", "accept_all"))(**{k: v for k, v in library_cfg.items() if k not in ("admission", "gc")})
         self.strategies = build_strategies(config)
+        routed_lifecycle = (table.get("routed", {}) or {}).get("lifecycle", {}) or {}
+        self.route_lifecycle_enabled = bool(routed_lifecycle.get("enabled", False))
+        self.library_patience_tasks = max(0, int(routed_lifecycle.get("library_patience_tasks", 0)))
+        library.configure_lifecycle(library_patience_tasks=self.library_patience_tasks if self.route_lifecycle_enabled else 0)
         shares = table.get("evolve_budget", {})
         self.evolve_shares = {name: float(shares.get(name, 1.0)) for name, _strategy in self.strategies}
         # Learn-mode refinement of library hits ([orchestrator.refine]). budget_k = 0 is live mode:
@@ -355,6 +360,9 @@ class Orchestrator:
         self.refine_min_generations = int(refine.get("min_generations", 4))
         self.refine_stall_generations = int(refine.get("stall_generations", 8))
         self.refine_retire_superseded = bool(refine.get("retire_superseded", True))
+        self.refine_deduplicate_topologies = bool(refine.get("deduplicate_topologies", False))
+        self.refine_topology_retry_limit = max(0, int(refine.get("topology_retry_limit", 8)))
+        self.config_fingerprint = str(config.get("config_effective_sha256", config.get("config_sha256", "unversioned")))
         # WALL LEDGER ([orchestrator.wall]): a depth-0 failure shelves its best champion as a
         # below-bar stepping stone, and later attempts on that signature warm-start from it, so
         # assaults on a hard task family (the two_spirals wall) accumulate instead of restarting.
@@ -400,11 +408,22 @@ class Orchestrator:
                     "refine_generations": 0,
                 }
             )
+            if self.refine_deduplicate_topologies:
+                self.counters.update(
+                    {
+                        "topology_unique_evaluated": 0,
+                        "topology_duplicates_skipped": 0,
+                        "topology_retry_exhaustions": 0,
+                        "topology_exhausted_attempts": 0,
+                    }
+                )
         if any(name == "routed" for name, _strategy in self.strategies):  # registered only when the routed strategy is configured
             # routed_solved counts DISTILLED admissions (the router's win became a library composition);
             # no_experts = short-circuited on an empty vertex set; undistillable = won in router space
             # but the pathway did not survive verification as a composition (reported as a miss).
             self.counters.update({"routed_solved": 0, "routed_zero_shot": 0, "routed_no_experts": 0, "routed_undistillable": 0, "routed_resource_declined": 0})
+            if self.route_lifecycle_enabled:
+                self.counters.update({"router_vertices_expired": 0, "router_vertices_revived": 0, "router_edges_expired": 0, "library_inactivity_retired": 0})
         if self.wall_ledger:
             self.counters.update({"wall_stones_admitted": 0, "wall_stones_improved": 0, "wall_seeded_attempts": 0})
         if self.max_task_seconds > 0 or self.max_total_task_seconds > 0:  # absent limits keep legacy summaries byte-identical
@@ -419,6 +438,7 @@ class Orchestrator:
         self._failure_op: str | None = None
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
         self._stepping_stone = False  # marks the admission inside a wall-ledger shelving
+        self._last_refine_strategy_metrics: dict[str, float] = {}
 
     # --- public API ---------------------------------------------------------------------------------
 
@@ -710,6 +730,13 @@ class Orchestrator:
                 for marker in ("routed_no_experts", "routed_undistillable", "routed_resource_declined"):
                     if outcome.champion_metrics.get(marker):
                         self.counters[marker] += 1
+                for metric, counter in (
+                    ("router_vertices_expired", "router_vertices_expired"),
+                    ("router_vertices_revived", "router_vertices_revived"),
+                    ("router_edges_expired", "router_edges_expired"),
+                ):
+                    if counter in self.counters:
+                        self.counters[counter] += int(outcome.strategy_metrics.get(metric, 0.0))
             resource_metrics.update(outcome.resource_metrics)
             declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
             if declined and "resource_declines" in self.counters:
@@ -771,6 +798,7 @@ class Orchestrator:
         zero side effects, so budget_k = 0 (live mode) is byte-identical to the plain hit path. The
         task can never regress: a failed refinement returns the original hit."""
         refine_generations = 0
+        self._last_refine_strategy_metrics = {}
         if self.refine_budget_k > 0 and depth <= self.refine_depth_max and hit.key is not None and not self._total_deadline_exceeded():
             improved, refine_generations = self._refine_hit(hit, task, spec, depth)
             if improved is not None:
@@ -791,6 +819,7 @@ class Orchestrator:
                 query_accuracy=hit.query_accuracy,
                 support_status=hit.support_status,
                 query_status=hit.query_status,
+                strategy_metrics=dict(self._last_refine_strategy_metrics),
             )
         )
         return hit
@@ -818,11 +847,27 @@ class Orchestrator:
         # The target is deliberately NOT clamped to 1.0: an incumbent at 1.0 makes it unreachable,
         # so the strategy runs to its (refine-local) stall and the tie-breaks decide afterward;
         # a beatable incumbent lets the strategy's early exit stop the moment it wins.
-        runtime = self._refine_runtime(hit.metric + self.refine_metric_epsilon)
-        if entry.entry_type == MODULE:
-            result = strategy(task, spec, runtime, budget=effective_budget, seed_entries=[entry])
-        else:
-            result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
+        topology_tabu = self._topology_tabu(entry, task) if self.refine_deduplicate_topologies else None
+        runtime = self._refine_runtime(hit.metric + self.refine_metric_epsilon, topology_tabu=topology_tabu)
+        target = self.loop.evolver if entry.entry_type == MODULE else self.loop
+        previous_tabu = target.topology_tabu
+        target.topology_tabu = topology_tabu
+        try:
+            if entry.entry_type == MODULE:
+                result = strategy(task, spec, runtime, budget=effective_budget, seed_entries=[entry])
+            else:
+                result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
+        finally:
+            target.topology_tabu = previous_tabu
+        if topology_tabu is not None:
+            topology_tabu.commit()
+            topology_metrics = topology_tabu.metrics()
+            result.strategy_metrics.update(topology_metrics)
+            self.counters["topology_unique_evaluated"] += int(topology_metrics["topology_unique_evaluated"])
+            self.counters["topology_duplicates_skipped"] += int(topology_metrics["topology_duplicates_skipped"])
+            self.counters["topology_retry_exhaustions"] += int(topology_metrics["topology_retry_exhaustions"])
+            self.counters["topology_exhausted_attempts"] += int(topology_metrics["topology_exhausted"])
+        self._last_refine_strategy_metrics = dict(result.strategy_metrics)
         if self.blind_query:
             result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
         self.counters["refine_generations"] += result.generations_used
@@ -835,16 +880,19 @@ class Orchestrator:
             and self._accepts_result(result)
             # Identity check FIRST: the incumbent topology retrained on this variant is NOT a new
             # solution (entry keys hash weights, so a key comparison can never catch this).
-            and self._candidate_fingerprint(result) != structural_fingerprint(entry.entry_type, entry.payload)
+            and not self._candidate_matches_entry(result, entry)
             and refinement_improves(candidate, incumbent, metric_epsilon=self.refine_metric_epsilon, robustness_epsilon=self.refine_robustness_epsilon)
         )
         if not improves:
             self.library.record_refinement(hit.key, improved=False)
             self.counters["refine_no_gain"] += 1
             support, _query, _support_status, _query_status = self._quality_of_result(result)
-            self.display.stage_result(
-                "refine", "continue", "retrieved solution remains stronger", seconds=time.perf_counter() - refine_started, depth=depth, support_accuracy=support
-            )
+            detail = "retrieved solution remains stronger"
+            if topology_tabu is not None:
+                detail += f" · tested {topology_tabu.unique} new architectures · skipped {topology_tabu.duplicates} repeats"
+                if topology_tabu.exhausted:
+                    detail += " · architecture search exhausted"
+            self.display.stage_result("refine", "continue", detail, seconds=time.perf_counter() - refine_started, depth=depth, support_accuracy=support)
             return None, result.generations_used
 
         # Scalars, not the stats dict: `summary` copies shallowly, and record_refinement below
@@ -886,7 +934,7 @@ class Orchestrator:
         failures = int((summary.get("stats") or {}).get("refine_failures_since_gain", 0))
         return int(self.refine_budget_k * (self.refine_decay**failures))
 
-    def _refine_runtime(self, target_metric: float) -> StrategyRuntime:
+    def _refine_runtime(self, target_metric: float, *, topology_tabu: TopologyTabuSession | None = None) -> StrategyRuntime:
         """Like `_runtime`, but the bar is beating the incumbent and the flatline window is the
         refine-local one (K is a cap, not a fixed cost: a saturated refinement stalls out early).
         The detector's half-budget floor check can never fire: the seed already scores above floor."""
@@ -905,7 +953,31 @@ class Orchestrator:
             on_generation=self._on_generation,
             accepts=lambda item: self._metric(item) >= target_metric,
             deadline_exceeded=self._deadline_exceeded,
+            topology_tabu=topology_tabu,
         )
+
+    def _topology_tabu(self, entry: LibraryEntry, task: Task) -> TopologyTabuSession:
+        root = refinement_lineage_root(self.library, entry.key)
+        context = refinement_context(lineage_root=root, task_fingerprint=task_content_fingerprint(task), config_fingerprint=self.config_fingerprint)
+        session = TopologyTabuSession(
+            TopologyTabuStore(self.library.root / "topology_tabu.sqlite3"),
+            context,
+            self.library,
+            retry_limit=self.refine_topology_retry_limit,
+        )
+        current = entry
+        visited: set[str] = set()
+        while current.key not in visited:
+            visited.add(current.key)
+            session.prime(current.entry_type, current.payload)
+            parent = current.provenance.get("refined_from")
+            if not parent:
+                break
+            try:
+                current = self.library.load(str(parent))
+            except KeyError:
+                break
+        return session
 
     def _candidate_rank(self, result: StrategyResult) -> RefinementRank | None:
         robustness = float(result.champion_metrics.get("weight_robustness", 0.0))
@@ -935,6 +1007,20 @@ class Orchestrator:
         if result.champion_comp is not None:
             return structural_fingerprint(COMPOSITION, comp_to_dict(result.champion_comp.comp))
         return None
+
+    def _candidate_matches_entry(self, result: StrategyResult, entry: LibraryEntry) -> bool:
+        """Exact architecture identity for refinement; hashes are only the fast bucket."""
+
+        if result.champion_genome is not None and entry.entry_type == MODULE:
+            candidate_type, candidate_payload = MODULE, genome_to_dict(result.champion_genome)
+        elif result.champion_comp is not None and entry.entry_type == COMPOSITION:
+            candidate_type, candidate_payload = COMPOSITION, comp_to_dict(result.champion_comp.comp)
+        else:
+            return False
+        return same_topology(
+            topology_record(candidate_type, candidate_payload, library=self.library),
+            topology_record(entry.entry_type, entry.payload, library=self.library),
+        )
 
     def _incumbent_rank(self, hit: Solution, entry: LibraryEntry, *, seed_metric: float | None = None) -> RefinementRank:
         # The metric baseline is the STRONGER of the quick metric just measured on THIS task and the
@@ -1005,7 +1091,7 @@ class Orchestrator:
             return None
         incumbent_stone = next(iter(self._wall_stones(task, spec)), None)
         if incumbent_stone is not None:
-            if self._candidate_fingerprint(result) == structural_fingerprint(incumbent_stone.entry_type, incumbent_stone.payload):
+            if self._candidate_matches_entry(result, incumbent_stone):
                 return None
             stone_solution = Solution(key=incumbent_stone.key, entry_type=incumbent_stone.entry_type, metric=float(incumbent_stone.provenance.get("accepted_metric", 0.0)))
             stone_rank = self._incumbent_rank(stone_solution, incumbent_stone)
@@ -1044,6 +1130,7 @@ class Orchestrator:
             assessment = self._quick_assessment(entry, task, spec)
             if assessment is None or not self._accepts_item(assessment):
                 continue
+            self.library.note_reuse(entry.key, channel="lookup")
             metric = self._metric(assessment)
             report_assessment = self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment
             report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else metric
@@ -1062,6 +1149,16 @@ class Orchestrator:
                 query_status="evaluated" if query_accuracy is not None else "evaluation_unavailable",
             )
         return None
+
+    def finish_root_task(self, attempt: Attempt | None) -> list[str]:
+        """Advance lifecycle state after a durable root task and annotate its operational record."""
+
+        retired = self.library.finish_root_task()
+        if retired and "library_inactivity_retired" in self.counters:
+            self.counters["library_inactivity_retired"] += len(retired)
+        if attempt is not None and retired:
+            attempt.strategy_metrics["library_inactivity_retired"] = float(len(retired))
+        return retired
 
     @staticmethod
     def _entry_is_temporal(entry: LibraryEntry) -> bool:

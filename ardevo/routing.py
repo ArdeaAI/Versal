@@ -327,6 +327,7 @@ class RoutedNet(nn.Module):
         pending_embeddings: dict[str, torch.Tensor] | None = None,
         max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
         lazy_residency: bool = False,
+        excluded_keys: set[str] | None = None,
     ) -> int:
         """Append vertices for library keys not yet in the table; refresh the retired mask. Returns
         the number of new vertices. The vertex set only grows (entries tombstone, never delete).
@@ -336,6 +337,8 @@ class RoutedNet(nn.Module):
         known = {vertex.original_key for vertex in self._vertices.values()}
         for summary in library.summaries(include_retired=True):
             key = summary["key"]
+            if excluded_keys and key in excluded_keys:
+                continue
             sanitized = sanitize_key(key)
             if summary.get("retired", False):
                 if sanitized in self.vertex_embeddings:
@@ -356,6 +359,20 @@ class RoutedNet(nn.Module):
             self.register_vertex(vertex, embedding=embedding)
             added += 1
         return added
+
+    def remove_vertex(self, key: str) -> bool:
+        """Remove one expert from the complete routing candidate set at a task boundary."""
+
+        if key not in self._vertices:
+            return False
+        for container in (self.vertex_embeddings, self.vertex_in_adapters, self.vertex_out_adapters, self.vertex_edge_out, self.vertex_edge_in):
+            if key in container:
+                del container[key]
+        self._vertices.pop(key, None)
+        self._vertex_order = [name for name in self._vertex_order if name != key]
+        self._retired.discard(key)
+        self.last_gate_stats.pop(key, None)
+        return True
 
     # --- lazy per-signature surfaces ------------------------------------------------------------------
 
@@ -573,6 +590,10 @@ class RouterService:
         image_dir: Path | None = None,
         max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
         lazy_residency: bool = False,
+        lifecycle_enabled: bool = False,
+        route_patience_tasks: int = 24,
+        route_activity_floor: float = 0.01,
+        route_traffic_decay: float = 0.95,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
@@ -581,6 +602,14 @@ class RouterService:
         self.adapter_rank = adapter_rank
         self.max_inline_depth = max_inline_depth
         self.lazy_residency = lazy_residency
+        self.lifecycle_enabled = lifecycle_enabled
+        self.route_patience_tasks = max(1, int(route_patience_tasks))
+        self.route_activity_floor = max(0.0, float(route_activity_floor))
+        self.route_traffic_decay = min(1.0, max(0.0, float(route_traffic_decay)))
+        self.route_epoch = 0
+        self.route_life: dict[str, int] = {}
+        self.evicted: dict[str, dict[str, int]] = {}
+        self.last_lifecycle_metrics: dict[str, float] = {}
         self.version = 0
         self.train_history: list[dict[str, Any]] = []
         # fingerprint -> task embedding for freshly distilled entries awaiting their vertex; in-memory
@@ -613,6 +642,15 @@ class RouterService:
             self._load(persist_dir)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
+        revived = 0
+        for key, record in list(self.evicted.items()):
+            summary = self.library.summary(key)
+            if summary is None or summary.get("retired", False):
+                continue
+            stats = summary.get("stats") or {}
+            if int(stats.get("last_reuse_epoch", 0)) > int(record.get("reuse_epoch", 0)):
+                self.evicted.pop(key, None)
+                revived += 1
         added = self.net.sync_with_library(
             self.library,
             include_compositions=include_compositions,
@@ -620,7 +658,11 @@ class RouterService:
             pending_embeddings=self.pending_embeddings,
             max_inline_depth=self.max_inline_depth,
             lazy_residency=self.lazy_residency,
+            excluded_keys=set(self.evicted),
         )
+        for name in self.net._vertex_order:
+            self.route_life.setdefault(name, self.route_patience_tasks)
+        self.last_lifecycle_metrics = {"router_vertices_revived": float(revived)} if revived else {}
         if added:
             self.render_overmind()  # a new expert is the "significant addition" that refreshes the portrait
         return added
@@ -628,17 +670,38 @@ class RouterService:
     def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
         self.pending_embeddings[fingerprint] = embedding.detach().clone()
 
-    def record_traffic(self) -> None:
+    def record_traffic(self) -> dict[str, float]:
         """Fold the LAST route()'s gate decisions into the lifetime traffic ledgers: per-vertex gate
         mass (usage_totals) and consecutive-step co-firing (transition_totals, directed). Called once
         per routed task after its final evaluation, so the ledgers reflect what the router actually
         did, batch-averaged, across its whole life."""
         net = self.net
         if not net.last_selections:
-            return
+            return dict(self.last_lifecycle_metrics)
         live_names = [name for name in net._vertex_order if name not in net._retired]
         if not live_names:
-            return
+            return dict(self.last_lifecycle_metrics)
+        expired_edges = 0
+        if self.lifecycle_enabled:
+            self.route_epoch += 1
+            for name in list(self.usage_totals):
+                self.usage_totals[name] *= self.route_traffic_decay
+                if self.usage_totals[name] < 1e-4:
+                    self.usage_totals.pop(name, None)
+            for name, values in list(self.step_usage_totals.items()):
+                decayed = [value * self.route_traffic_decay for value in values]
+                if max(decayed, default=0.0) < 1e-4:
+                    self.step_usage_totals.pop(name, None)
+                else:
+                    self.step_usage_totals[name] = decayed
+            for source, row in list(self.transition_totals.items()):
+                for target in list(row):
+                    row[target] *= self.route_traffic_decay
+                    if row[target] < 1e-4:
+                        row.pop(target, None)
+                        expired_edges += 1
+                if not row:
+                    self.transition_totals.pop(source, None)
         step_weights: list[torch.Tensor] = []
         for selections, probs in zip(net.last_selections, net.last_probs):
             weights = torch.zeros(len(live_names)).scatter_add_(0, selections.reshape(-1), probs.reshape(-1).to(torch.float32)) / selections.shape[0]
@@ -662,6 +725,49 @@ class RouterService:
                     if target_weight <= 1e-3:
                         continue
                     row[target] = row.get(target, 0.0) + source_weight * target_weight
+
+        expired: list[str] = []
+        if self.lifecycle_enabled:
+            active = {name for name, mass in net.last_gate_stats.items() if mass >= self.route_activity_floor}
+            for name in live_names:
+                vertex = net._vertices.get(name)
+                if vertex is None:
+                    continue
+                if name in active:
+                    self.route_life[name] = self.route_patience_tasks
+                    self.library.note_reuse(vertex.original_key, channel="route")
+                else:
+                    self.route_life[name] = self.route_life.get(name, self.route_patience_tasks) - 1
+                    if self.route_life[name] <= 0:
+                        expired.append(name)
+            for name in expired:
+                vertex = net._vertices.get(name)
+                if vertex is None:
+                    continue
+                original_key = vertex.original_key
+                self.library.mark_route_evicted(original_key)
+                summary = self.library.summary(original_key) or {}
+                reuse_epoch = int((summary.get("stats") or {}).get("last_reuse_epoch", self.library.task_epoch + 1))
+                self.evicted[original_key] = {"route_epoch": self.route_epoch, "reuse_epoch": reuse_epoch}
+                self._remove_vertex(name)
+        metrics = dict(self.last_lifecycle_metrics)
+        if expired:
+            metrics["router_vertices_expired"] = float(len(expired))
+        if expired_edges:
+            metrics["router_edges_expired"] = float(expired_edges)
+        self.last_lifecycle_metrics = metrics
+        return dict(metrics)
+
+    def _remove_vertex(self, name: str) -> None:
+        self.route_life.pop(name, None)
+        self.usage_totals.pop(name, None)
+        self.step_usage_totals.pop(name, None)
+        self.transition_totals.pop(name, None)
+        for row in self.transition_totals.values():
+            row.pop(name, None)
+        self.net.remove_vertex(name)
+        if self.persist_dir is not None:
+            (self.persist_dir / "shards" / "vertices" / f"{name}.pt").unlink(missing_ok=True)
 
     def _pathways(self, ordered_names: list[str], *, per_vertex: int = 3, floor: float = 1e-3) -> list[tuple[int, int, float]]:
         """Directed (source, target, weight) pathway edges over `ordered_names` indices: observed
@@ -803,6 +909,9 @@ class RouterService:
             "usage_totals": {name: value for name, value in self.usage_totals.items() if name in known},
             "transition_totals": {source: {target: value for target, value in row.items() if target in known} for source, row in self.transition_totals.items() if source in known},
             "step_usage_totals": {name: values for name, values in self.step_usage_totals.items() if name in known},
+            "route_epoch": self.route_epoch,
+            "route_life": {name: value for name, value in self.route_life.items() if name in known},
+            "evicted": self.evicted,
         }
 
     def save(self) -> None:
@@ -967,7 +1076,12 @@ class RouterService:
         }
         # Optional key so pre-ledger meta files load clean; no format bump (a bump stales every router dir).
         self.step_usage_totals = {name: [float(value) for value in values] for name, values in (meta.get("step_usage_totals") or {}).items() if name in known}
-        self.net.sync_with_library(self.library, max_inline_depth=self.max_inline_depth, lazy_residency=self.lazy_residency)  # append anything admitted since the last save
+        self.route_epoch = int(meta.get("route_epoch", 0))
+        self.route_life = {name: int(value) for name, value in (meta.get("route_life") or {}).items() if name in known}
+        for name in known:
+            self.route_life.setdefault(name, self.route_patience_tasks)
+        self.evicted = {str(key): {str(name): int(value) for name, value in record.items()} for key, record in (meta.get("evicted") or {}).items()}
+        self.sync()  # append admissions and revive entries with newer external-use evidence
 
 
 @dataclass
@@ -1005,6 +1119,10 @@ class RoutedStrategy:
     ponder_cost: float = 0.001
     edge_bias: bool = False
     lazy_residency: bool = True
+    lifecycle_enabled: bool = False
+    route_patience_tasks: int = 24
+    route_activity_floor: float = 0.01
+    route_traffic_decay: float = 0.95
     name: str = "routed"
     service: RouterService | None = None
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
@@ -1028,6 +1146,10 @@ class RoutedStrategy:
                 persist_strict=self.persist_strict,
                 image_dir=Path(self.library_dir) / "images",  # overmind.png lands beside the entry renders
                 lazy_residency=self.lazy_residency,
+                lifecycle_enabled=self.lifecycle_enabled,
+                route_patience_tasks=self.route_patience_tasks,
+                route_activity_floor=self.route_activity_floor,
+                route_traffic_decay=self.route_traffic_decay,
             )
         return self.service
 
@@ -1056,7 +1178,13 @@ class RoutedStrategy:
             # Nothing to route over: a "solve" here would be pure adapter memorization that leaves
             # no trace in the DSL. Fall straight through to the evolutionary strategies, which is
             # what populates the vertex set in the first place.
-            return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"routed_no_experts": 1.0})
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"routed_no_experts": 1.0},
+                strategy_metrics=dict(service.last_lifecycle_metrics),
+            )
         io = task_io(task)
         input_key = net.ensure_input_adapter(io["inputs"][0]["signature"], io["inputs"][0]["width"])
         head_key = net.ensure_output_head(io["output"]["signature"], io["output"]["width"])
@@ -1201,6 +1329,7 @@ class RoutedStrategy:
                 size_metrics=comp_size_metrics(assessed.comp),
                 resource_metrics=dict(self._last_distill_resource_metrics),
                 strategy_metrics={
+                    **service.last_lifecycle_metrics,
                     "router_score": float(metric),
                     "distilled_score": float(distilled_metric),
                     "distillation_gap": float(metric - distilled_metric),
@@ -1233,6 +1362,7 @@ class RoutedStrategy:
             size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
             resource_metrics=dict(self._last_distill_resource_metrics),
             strategy_metrics={
+                **service.last_lifecycle_metrics,
                 "router_score": float(metric),
                 "distilled_score": float(distilled_metric),
                 "distillation_gap": float(metric - distilled_metric),
@@ -1396,12 +1526,13 @@ class RoutedStrategy:
             generations_used=generations_used,
             champion_routed=solution if (accepted or not self.distill) else None,
             champion_metrics=stamped,
-            strategy_metrics={"router_score": float(metric), "handoff_count": 0.0},
+            strategy_metrics={**service.last_lifecycle_metrics, "router_score": float(metric), "handoff_count": 0.0},
         )
 
 
 def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
     table = config.get("orchestrator", {}).get("routed", {}) or {}
+    lifecycle = table.get("lifecycle", {}) or {}
     return RoutedStrategy(
         library_dir=str(config.get("orchestrator", {}).get("library_dir", "library")),
         d_model=int(table.get("d_model", 64)),
@@ -1430,4 +1561,8 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         ponder_cost=float(table.get("ponder_cost", 0.001)),
         edge_bias=bool(table.get("edge_bias", False)),
         lazy_residency=bool(table.get("lazy_residency", True)),
+        lifecycle_enabled=bool(lifecycle.get("enabled", False)),
+        route_patience_tasks=max(1, int(lifecycle.get("route_patience_tasks", 24))),
+        route_activity_floor=max(0.0, float(lifecycle.get("activity_floor", 0.01))),
+        route_traffic_decay=min(1.0, max(0.0, float(lifecycle.get("traffic_decay", 0.95)))),
     )

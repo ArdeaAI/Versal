@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from multiprocessing.pool import Pool
 
     from ardevo.library import ModuleLibrary
+    from ardevo.topology import TopologyTabuSession
 
 from ardevo.dataset.icarus import Level0Encoder
 from ardevo.evaluation import evaluate
@@ -125,6 +126,8 @@ class EvolverState:
     # Rolling novelty archive ([evolution.novelty]): per-task by construction, since this state is
     # born fresh per solve and task attempts are checkpoint-atomic (no serialization needed).
     novelty_archive: list[tuple[float, ...]] = field(default_factory=list)
+    # Transient refinement signal: no unseen offspring survived topology deduplication.
+    topology_exhausted: bool = False
 
 
 @dataclass
@@ -169,6 +172,8 @@ class Evolver:
     # Empty (the default) = off, byte-identical.
     halving_stages: list[float] = field(default_factory=list)
     halving_keep: float = 0.5
+    # Set only around post-solve refinement. Ordinary unsolved evolution leaves this None.
+    topology_tabu: "TopologyTabuSession | None" = None
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(
@@ -437,7 +442,20 @@ class Evolver:
         if seeded_front is not None:
             for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
                 genomes[index] = genome
+        if self.topology_tabu is not None:
+            from ardevo.evolution.genome import genome_to_dict
+
+            # One warm seed is the assessed anchor selection needs. Every other initial candidate
+            # crosses the same pre-evaluation identity gate as offspring; minimal populations often
+            # differ only in weights, so assessing all of them was the largest remaining repeat.
+            filtered = genomes[:1]
+            filtered.extend(genome for genome in genomes[1:] if self.topology_tabu.reserve("module", genome_to_dict(genome)))
+            genomes = filtered
         state.population = self.assess_many(genomes, adapter, state)
+        if self.topology_tabu is not None:
+            for item in state.population:
+                self.topology_tabu.observe_evaluated("module", genome_to_dict(item.genome))
+            self.topology_tabu.commit()  # durable only after the batch finished assessment
         self._apply_novelty(state.population, state, adapter)
         state.best = max(state.population, key=lambda item: item.fitness)
         self.species_history = state.species_history
@@ -486,6 +504,9 @@ class Evolver:
         state: EvolverState,
         adapter: Adapter,
     ) -> list[Assessed]:
+        from ardevo.evolution.genome import genome_to_dict
+
+        state.topology_exhausted = False
         genomes = [item.genome for item in assessed]
         fitnesses = [item.fitness for item in assessed]
         # Pareto mode: vectors are (re)computed here, not at the Assessed construction sites, so the
@@ -527,13 +548,30 @@ class Evolver:
             else:
                 parents = self.selection_op(species_genomes, species_fitnesses, rng=state.rng, count=2 * plan.n_offspring)
             for k in range(plan.n_offspring):
-                child = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
-                child = self.mutation(child, ctx, rng=state.rng)
+                child: Genome | None = None
+                attempts = self.topology_tabu.retry_limit + 1 if self.topology_tabu is not None else 1
+                for _attempt in range(attempts):
+                    candidate = self.crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
+                    candidate = self.mutation(candidate, ctx, rng=state.rng)
+                    if self.topology_tabu is None or self.topology_tabu.reserve("module", genome_to_dict(candidate)):
+                        child = candidate
+                        break
+                if child is None:
+                    assert self.topology_tabu is not None
+                    self.topology_tabu.retry_exhaustions += 1
+                    next_assessed.append(members[k % len(members)])
+                    continue
                 child_slots.append(len(next_assessed))
                 next_assessed.append(None)
                 children.append(child)
 
-        for slot, item in zip(child_slots, self.assess_many(children, adapter, state)):
+        if self.topology_tabu is not None and child_slots == [] and any(plan.n_offspring > 0 for plan in plans):
+            state.topology_exhausted = True
+            self.topology_tabu.exhausted = True
+        assessed_children = self.assess_many(children, adapter, state) if children else []
+        if self.topology_tabu is not None:
+            self.topology_tabu.commit()  # a later crash must not cause this generation to repeat
+        for slot, item in zip(child_slots, assessed_children):
             next_assessed[slot] = item
         next_population = [item for item in next_assessed if item is not None]
         self._apply_novelty(next_population, state, adapter)

@@ -30,6 +30,7 @@ from ardevo.evolution.composition import (
     CompositionGenome,
     RefSpec,
     assemble,
+    comp_to_dict,
     minimal_composition,
     writeback_composition,
 )
@@ -82,6 +83,7 @@ class HierarchicalState:
     module_species_history: list[dict[int, int]] = field(default_factory=list)
     repaired_refs: int = 0
     absorbed_keys: list[str] = field(default_factory=list)  # library entries already grafted into the pool
+    topology_exhausted: bool = False  # transient; reset for each composition refinement
 
 
 @dataclass
@@ -234,6 +236,8 @@ class HierarchicalLoop:
     # building blocks IN the soup, mid-run, not just at fresh_state.
     absorb_top_k: int = 0
     library: ModuleLibrary | None = None
+    # Set only around post-solve composition refinement.
+    topology_tabu: Any | None = None
 
     def attach_library(self, library: ModuleLibrary | None) -> None:
         self.library = library
@@ -534,11 +538,13 @@ class HierarchicalLoop:
         # resolve against modules that moved since last generation, so cached fitness goes stale.
         # Repair dead live refs FIRST: module species die during advance_modules, and an elite
         # pointing at one would otherwise be silently floored (champion lineage lost).
-        elites = [self._repair_refs(item.comp, state) for item in ordered[: self.comp_elitism]]
+        elite_items = ordered[: self.comp_elitism]
+        elites = [self._repair_refs(item.comp, state) for item in elite_items]
         n_offspring = max(self.comp_pop_size - len(elites), 0)
         # ALL rng draws happen up front (selection, crossover, mutation, repair); assessment is
         # rng-free, so deferring it into one (possibly parallel) batch is stream-identical.
         children: list[CompositionGenome] = []
+        carried: list[AssessedComposition] = []
         if n_offspring > 0:
             comps = [item.comp for item in ordered]
             fitnesses = [item.fitness for item in ordered]
@@ -551,13 +557,32 @@ class HierarchicalLoop:
                 glue_storage=self.glue_storage,
             )
             for k in range(n_offspring):
-                if state.rng.random() < self.comp_crossover_rate:
-                    child = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
-                else:
-                    child = parents[2 * k].clone()
-                child = self.comp_mutation(child, comp_ctx, rng=state.rng)
-                children.append(self._repair_refs(child, state))
-        return self._assess_all(elites, spec, state, train=False) + self._assess_all(children, spec, state, train=True)
+                child: CompositionGenome | None = None
+                attempts = self.topology_tabu.retry_limit + 1 if self.topology_tabu is not None else 1
+                for _attempt in range(attempts):
+                    if state.rng.random() < self.comp_crossover_rate:
+                        candidate = self.comp_crossover_op(parents[2 * k], parents[2 * k + 1], rng=state.rng)
+                    else:
+                        candidate = parents[2 * k].clone()
+                    candidate = self._repair_refs(self.comp_mutation(candidate, comp_ctx, rng=state.rng), state)
+                    if self.topology_tabu is None or self.topology_tabu.reserve("composition", comp_to_dict(candidate)):
+                        child = candidate
+                        break
+                if child is None:
+                    assert self.topology_tabu is not None
+                    self.topology_tabu.retry_exhaustions += 1
+                    parent = parents[2 * k]
+                    carried.append(next((item for item in assessed if item.comp is parent), ordered[0]))
+                    continue
+                children.append(child)
+        if self.topology_tabu is not None and not children and n_offspring > 0:
+            state.topology_exhausted = True
+            self.topology_tabu.exhausted = True
+        assessed_elites = elite_items if self.topology_tabu is not None else self._assess_all(elites, spec, state, train=False)
+        assessed_children = self._assess_all(children, spec, state, train=True)
+        if self.topology_tabu is not None:
+            self.topology_tabu.commit()  # durable only after every selected child was assessed
+        return assessed_elites + carried + assessed_children
 
     # --- the per-task drive ---------------------------------------------------------------------------
 
@@ -572,6 +597,7 @@ class HierarchicalLoop:
         on_generation: Callable[[int, AssessedComposition, float], None] | None = None,
     ) -> AssessedComposition:
         """Evolve a composition population against one task for up to `budget` generations."""
+        state.topology_exhausted = False
         population: list[CompositionGenome] = [comp.clone() for comp in (seed_comps or [])][: self.comp_pop_size]
         while len(population) < self.comp_pop_size:
             population.append(
@@ -589,7 +615,18 @@ class HierarchicalLoop:
             )
         population = [self._repair_refs(comp, state) for comp in population]
 
+        if self.topology_tabu is not None:
+            # Keep one warm incumbent as the parent/fitness anchor, then reject repeated initial
+            # structures before glue fitting. Minimal compositions otherwise spend a full batch on
+            # the same graph with different random glue values.
+            filtered = population[:1]
+            filtered.extend(comp for comp in population[1:] if self.topology_tabu.reserve("composition", comp_to_dict(comp)))
+            population = filtered
         assessed = self._assess_all(population, spec, state, train=True)
+        if self.topology_tabu is not None:
+            for item in assessed:
+                self.topology_tabu.observe_evaluated("composition", comp_to_dict(item.comp))
+            self.topology_tabu.commit()
         self._attribute(assessed, state)
         self._module_writeback(assessed, state)
         best = max(assessed, key=lambda item: item.fitness)
@@ -600,6 +637,8 @@ class HierarchicalLoop:
             if self.advance_every > 0 and generation % self.advance_every == self.advance_every - 1:
                 self.advance_modules(state)
             assessed = self._reproduce_comps(assessed, spec, state)
+            if state.topology_exhausted:
+                break
             self._attribute(assessed, state)
             self._module_writeback(assessed, state)
             generation_best = max(assessed, key=lambda item: item.fitness)

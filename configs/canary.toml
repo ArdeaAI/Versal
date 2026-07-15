@@ -102,6 +102,14 @@ decompose_probe_generations = 6
   ponder_cost = 0.001
   edge_bias = true
 
+    # Dormant experts leave routing after 24 routed tasks, then leave the library after 48 unused tasks.
+    [orchestrator.routed.lifecycle]
+    enabled = true
+    route_patience_tasks = 24
+    library_patience_tasks = 48
+    activity_floor = 0.01
+    traffic_decay = 0.95
+
   # Grammar search recombines structures independently rediscovered across multiple lineages.
   [orchestrator.grammar]
   max_productions = 12
@@ -140,6 +148,8 @@ decompose_probe_generations = 6
   min_generations = 4
   stall_generations = 8
   retire_superseded = true
+  deduplicate_topologies = true
+  topology_retry_limit = 8
 
   # Below-threshold champions become warm starts instead of being discarded between related tasks.
   [orchestrator.wall]
