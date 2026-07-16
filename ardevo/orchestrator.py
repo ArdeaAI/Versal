@@ -695,24 +695,29 @@ class Orchestrator:
         return None
 
     def _wants_decompose_first(self, task: Task, spec: CompTaskSpec) -> bool:
-        """True when the task's dense-init gene estimate marks it too wide to evolve flat first."""
+        """Decompose only when every configured native representation refuses pre-allocation."""
         if self.decompose_first_above != "adaptive" and int(self.decompose_first_above) <= 0:
             return False
+        if self.decompose_first_above != "adaptive":
+            io = self._io_of(task, spec)
+            init_genes = (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"])
+            return init_genes > int(self.decompose_first_above)
+        consulted = False
+        runtime = self._runtime()
+        for _name, strategy in self.strategies:
+            preflight = getattr(strategy, "preflight", None)
+            if preflight is None:
+                continue
+            consulted = True
+            decision = preflight(task, runtime)
+            if decision.eligible:
+                return False
+        if consulted:
+            return True
+        # Compatibility for ladders containing only strategies without a native preflight.
         io = self._io_of(task, spec)
         init_genes = (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"])
-        if self.decompose_first_above != "adaptive":
-            return init_genes > int(self.decompose_first_above)
-        direct = next((strategy for name, strategy in self.strategies if name == "direct"), None)
-        evolver = getattr(direct, "evolver", None)
-        population_execution = str(getattr(evolver, "execution_mode", "serial")).startswith("population_")
-        estimate = self.loop.assess_glue_resources(
-            init_genes,
-            stage="decompose_first",
-            storage="tuple",
-            fixed_limit=0,
-            population_multiplicity=max(1, int(getattr(evolver, "pop_size", 1))),
-            concurrent_trainers=max(1, int(getattr(evolver, "pop_size", 1))) if population_execution else max(1, int(getattr(evolver, "assess_workers", 1))),
-        )
+        estimate = self.loop.assess_glue_resources(init_genes, stage="decompose_first", storage="tuple", fixed_limit=0)
         return not estimate.accepted
 
     def _with_deadline(self, detector: StallDetector) -> Callable[[int, Any], bool]:

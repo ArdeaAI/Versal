@@ -16,6 +16,7 @@ is what finally makes recurrent genes execute in the orchestrated path. Its cham
 as task-shaped MODULE entries the composition strategy can immediately reference.
 """
 
+import math
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
@@ -34,11 +35,20 @@ from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, structura
 from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
-from ardevo.utils.resources import format_bytes
+from ardevo.utils.resources import StageDecision, StageFootprint, format_bytes
 
 logger = Logger.get_logger()
 
 EVOLVE_STRATEGY: Registry = Registry("evolve_strategy")
+
+
+@dataclass(frozen=True)
+class StrategyPreflight:
+    eligible: bool
+    representation: str
+    footprint: StageFootprint | None = None
+    decision: StageDecision | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -316,6 +326,41 @@ class DirectStrategy:
     # once on the full task below, after evolution has ended.
     blind_query: bool = False
 
+    def preflight(self, task: Task, runtime: StrategyRuntime) -> StrategyPreflight:
+        """Price the configured initializer and its decoded compact GraphNet exactly enough to
+        reject certain OOMs.  This intentionally does not instantiate a Genome."""
+
+        from ardevo.evolution.init import estimate_initialization
+
+        support_input, support_output = support_loader(task)
+        n_inputs = math.prod(int(dim) for dim in support_input.data.shape[1:])
+        positions = math.prod(int(dim) for dim in support_output.data.shape[1:])
+        n_outputs = model_output_features(support_output.descriptor, positions)
+        try:
+            init = estimate_initialization(self.evolver.init_kind, n_inputs, n_outputs, **self.evolver.init_params)
+        except KeyError as error:
+            if runtime.loop.resource_policy.mode == "adaptive":
+                return StrategyPreflight(False, "explicit_flat", reason=str(error))
+            return StrategyPreflight(True, "explicit_flat", reason=str(error))
+        computed = max(0, init.nodes - n_inputs - 1)
+        decoded_cells = init.nodes * computed
+        # Python genes are a conservative lower-bound proxy (not a claim about exact CPython
+        # layout); decoded weights+mask are exact cell counts. Adam/grad state is 12 bytes/cell.
+        candidate_bytes = init.nodes * 32 + init.edges * 64 + decoded_cells * 5
+        population = max(1, self.evolver.pop_size)
+        optimizer_bytes = decoded_cells * 12 * (population if self.evolver.execution_mode.startswith("population_") else max(1, self.evolver.assess_workers))
+        footprint = StageFootprint(
+            stage="direct_population",
+            representation=f"explicit_flat/{self.evolver.init_kind}",
+            candidate_bytes=candidate_bytes,
+            population_size=population,
+            optimizer_bytes=optimizer_bytes,
+            work_operations=decoded_cells,
+            detail=f"{init.nodes} initial nodes, {init.edges} initial edges, {decoded_cells} decoded GraphNet cells",
+        )
+        decision = runtime.loop.resource_policy.assess_stage(footprint)
+        return StrategyPreflight(decision.accepted, footprint.representation, footprint, decision, decision.reason)
+
     def _adapter(self, task: Task, *, include_query: bool = True) -> TaskAdapter | TemporalTaskAdapter:
         max_inline_depth = int(getattr(self.evolver, "max_inline_depth", DEFAULT_MAX_INLINE_DEPTH))
         support_input, _support_output = support_loader(task)
@@ -377,35 +422,24 @@ class DirectStrategy:
             flat_inputs = 1
             for dim in support_input.data.shape[1:]:
                 flat_inputs *= int(dim)
-            init_genes = (flat_inputs + 1) * flat_outputs
+            from ardevo.evolution.init import estimate_initialization
+
+            init_genes = estimate_initialization(self.evolver.init_kind, flat_inputs, flat_outputs, **self.evolver.init_params).edges
             if self.max_init_genes != "adaptive" and 0 < int(self.max_init_genes) < init_genes:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
-            if self.max_init_genes == "adaptive" or self.max_flat_outputs == "adaptive":
-                population_execution = str(getattr(self.evolver, "execution_mode", "serial")).startswith("population_")
-                estimate = runtime.loop.assess_glue_resources(
-                    init_genes,
-                    stage="direct_population",
-                    storage="tuple",
-                    population_multiplicity=self.evolver.pop_size,
-                    concurrent_trainers=self.evolver.pop_size if population_execution else max(1, self.evolver.assess_workers),
-                    fixed_limit=0,
-                )
-                if not estimate.accepted:
-                    logger.warning(
-                        "direct evolution declined before allocation: dense init needs %s genes (%s host, %s device; adaptive limit %s)",
-                        f"{init_genes:,}",
-                        format_bytes(estimate.host_required_bytes),
-                        format_bytes(estimate.device_required_bytes),
-                        f"{estimate.limit_values:,}",
-                    )
-                    return StrategyResult(
-                        strategy=self.name,
-                        metric=0.0,
-                        generations_used=0,
-                        champion_metrics={"declined_init_genes": float(init_genes), **estimate.metrics("direct_resource")},
-                        resource_metrics=estimate.metrics("direct_resource"),
-                    )
-                resource_metrics = estimate.metrics("direct_resource")
+        preflight = self.preflight(task, runtime)
+        if not preflight.eligible:
+            metrics = preflight.decision.metrics("direct_resource") if preflight.decision is not None else {}
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"declined_preflight": 1.0, **metrics},
+                resource_metrics=metrics,
+                strategy_metrics={"preflight_ineligible": 1.0},
+            )
+        if preflight.decision is not None:
+            resource_metrics.update(preflight.decision.metrics("direct_resource"))
         adapter = self._adapter(task, include_query=not self.blind_query)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
@@ -415,6 +449,7 @@ class DirectStrategy:
         # mutators (add_local_node and friends) can grow local receptive fields.
         grid = self._grid_shape(task) if not isinstance(adapter, TemporalTaskAdapter) else None
         original_init = self.evolver.init_op
+        self.evolver.deadline_exceeded = runtime.deadline_exceeded
         if grid is not None:
             from ardevo.evolution.init import stamp_input_coordinates
 

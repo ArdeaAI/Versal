@@ -69,8 +69,9 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     default_activation = substrate.get("default_activation", "tanh")
 
     init_cfg = evolution.get("init", {})
+    init_kind = str(init_cfg.get("kind", "minimal"))
     init_op = partial(
-        init.INIT.get(init_cfg.get("kind", "minimal")),
+        init.INIT.get(init_kind),
         default_activation=default_activation,
         **{k: v for k, v in init_cfg.items() if k != "kind"},
     )
@@ -203,6 +204,8 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
         max_inline_depth=configured_max_inline_depth(config),
         seed=int(config.get("seed", 0)),
         init_op=init_op,
+        init_kind=init_kind,
+        init_params={k: v for k, v in init_cfg.items() if k != "kind"},
         selection_op=selection_op,
         crossover_op=crossover_op,
         mutation=mutation_pipeline,

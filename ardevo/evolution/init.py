@@ -14,7 +14,8 @@ regularity prior (weight patterns tend to be spatially coherent), never an archi
 
 import math
 import random
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import torch
 
@@ -25,6 +26,33 @@ from ardevo.substrate import _ACTIVATIONS
 InitOp = Callable[..., Genome]
 
 INIT: Registry[InitOp] = Registry("init")
+
+
+@dataclass(frozen=True)
+class InitEstimate:
+    nodes: int
+    edges: int
+
+
+def estimate_initialization(kind: str, n_inputs: int, n_outputs: int, **params: Any) -> InitEstimate:
+    """Exact allocation counts for built-in seeds, computed without constructing genes."""
+
+    dense = (n_inputs + 1) * n_outputs
+    threshold = int(params.get("threshold", 4096))
+    if kind == "minimal" or (kind in {"factored", "sparse"} and dense <= threshold):
+        return InitEstimate(n_inputs + 1 + n_outputs, dense)
+    if kind == "factored":
+        rank = max(1, int(params.get("rank", 8)))
+        return InitEstimate(n_inputs + 1 + n_outputs + rank, (n_inputs + 1) * rank + rank * n_outputs + n_outputs)
+    if kind == "sparse":
+        density = float(params.get("density", 0.01))
+        return InitEstimate(n_inputs + 1 + n_outputs, min(n_inputs * n_outputs, max(n_outputs, round(n_inputs * n_outputs * density))) + n_outputs)
+    if kind == "cppn":
+        hidden = max(1, int(params.get("hidden", 16)))
+        density = float(params.get("density", 0.3))
+        edges = max(1, round(n_inputs * hidden * density)) + max(1, round(hidden * n_outputs * density)) + hidden + n_outputs
+        return InitEstimate(n_inputs + 1 + n_outputs + hidden, edges)
+    raise KeyError(f"initializer {kind!r} has no resource estimator")
 
 
 @INIT.register("minimal")

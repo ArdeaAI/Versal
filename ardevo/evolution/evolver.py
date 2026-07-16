@@ -177,6 +177,11 @@ class Evolver:
     halving_keep: float = 0.5
     # Set only around post-solve refinement. Ordinary unsolved evolution leaves this None.
     topology_tabu: "TopologyTabuSession | None" = None
+    # Resource preflight provenance.  Keeping the registry name/arguments avoids constructing a
+    # giant seed merely to discover how large it would have been.
+    init_kind: str = "minimal"
+    init_params: dict[str, Any] = field(default_factory=dict)
+    deadline_exceeded: Callable[[], bool] | None = None
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(
@@ -219,7 +224,12 @@ class Evolver:
                 return self._assess_staged(genomes, adapter, state)
             if self.assess_workers > 1 and len(genomes) > 1:
                 return self._assess_pooled(genomes, adapter)
-            return [self.assess(genome, adapter, state) for genome in genomes]
+            assessed: list[Assessed] = []
+            for genome in genomes:
+                if assessed and self.deadline_exceeded is not None and self.deadline_exceeded():
+                    break
+                assessed.append(self.assess(genome, adapter, state))
+            return assessed
         decoded: list[SubstrateModule | None] = []
         for genome in genomes:
             try:
@@ -470,7 +480,11 @@ class Evolver:
         `seeded_front` (a callback because grafting needs the run's tracker, which is born here)
         replaces the FRONT of the init population with warm-start genomes; they flow through the
         same assess_many as every other member. None is byte-identical to the unseeded path."""
-        genomes = [self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng) for _ in range(self.pop_size)]
+        genomes: list[Genome] = []
+        for _ in range(self.pop_size):
+            if genomes and self.deadline_exceeded is not None and self.deadline_exceeded():
+                break
+            genomes.append(self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng))
         state = EvolverState(population=[], innovations=InnovationTracker.from_genomes(genomes), rng=rng)
         if seeded_front is not None:
             for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
