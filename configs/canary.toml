@@ -27,11 +27,11 @@ min_fixed_query_samples = 32
 kind = "interleave_rungs"
 rungs = "all"
 require_all_rungs = true
-tasks_per_rung = 1
+tasks_per_rung = 2
 shuffle = true
 
 [orchestrator]
-tasks = 18
+tasks = 36
 # Search uses dense support feedback, admission respects task-level semantics, and reporting is held out.
 search_metric = "support_accuracy"
 accept_metric = "support_task_appropriate"

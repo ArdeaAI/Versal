@@ -1,0 +1,14 @@
+extends = "canary.toml"
+
+# Workstation-scale confidence run: the complete canary methodology over ten tasks per rung.
+# On an M4 Max this is expected to take roughly 14-25 hours and can be safely resumed.
+
+[run]
+experiment = "orchestrated_overmind_preflight_lattice"
+machine = "LocalLatticeCUDA"
+
+[schedule]
+tasks_per_rung = 10
+
+[orchestrator]
+tasks = 180

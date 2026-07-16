@@ -405,8 +405,13 @@ def resolve_execution_mode(
 
 
 def resolve_worker_count(value: int | str) -> int:
-    """The `assess_workers` knob: `"auto"` sizes to the machine (cpu_count - 4 leaves headroom for
-    the main process, the OS, and a GPU feeder); anything else is an explicit integer count."""
+    """Resolve ``assess_workers``, keeping CPU and memory headroom for the parent process.
+
+    Auto sizing respects allocation/affinity, leaves four logical CPUs for the parent and OS, and
+    caps at physical cores minus two. CPU-bound Torch workers do not benefit enough from sibling
+    hyperthreads to justify duplicating a large task payload into all of them. Explicit integers
+    remain exact overrides.
+    """
     if value == "auto":
         import os
 
@@ -423,7 +428,11 @@ def resolve_worker_count(value: int | str) -> int:
                 allocated = 0
             if allocated > 0:
                 counts.append(allocated)
-        return max(1, min(counts) - 4)
+        limits = [min(counts) - 4]
+        physical = psutil.cpu_count(logical=False)
+        if physical is not None and physical > 0:
+            limits.append(physical - 2)
+        return max(1, min(limits))
     return int(value)
 
 

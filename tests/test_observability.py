@@ -250,6 +250,44 @@ def test_run_summary_carries_streaming_pool_provenance_and_loading_metrics(tmp_p
     assert summary["task_pool"] == {"path": "task_pool.json", "schema_version": 1, "ready": True, "entries": 1, "load_seconds": 1.25}
 
 
+def test_task_switch_releases_raw_payload_before_worker_barrier(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
+    """Large root-task memory is reclaimed before every worker concurrently drops its adapter."""
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    events: list[str] = []
+    old_ref = StreamingTaskRef(13, "old", "rung_13", "old.parquet", 0, "a" * 40)
+    new_ref = StreamingTaskRef(14, "new", "rung_14", "new.parquet", 0, "a" * 40)
+
+    class Materializer:
+        current_ref: StreamingTaskRef | None = old_ref
+
+        def release(self) -> None:
+            events.append("release_raw")
+            self.current_ref = None
+
+    materializer = Materializer()
+    trial.pool_report = cast(
+        Any,
+        SimpleNamespace(
+            materializer=materializer,
+            materialize=lambda _entry: events.append("load_new") or xor_task,
+        ),
+    )
+    trial.display = cast(
+        Any,
+        SimpleNamespace(
+            stage_started=lambda *_args, **_kwargs: events.append("display_start"),
+            stage_result=lambda *_args, **_kwargs: events.append("display_result"),
+        ),
+    )
+    monkeypatch.setattr(trial, "_release_evolution_task_adapters", lambda _orchestrator: events.append("release_workers"))
+
+    task, _seconds = trial._materialize_task(reference_entry(new_ref), orchestrator)
+
+    assert task is xor_task
+    assert events[:3] == ["release_raw", "release_workers", "display_start"]
+
+
 def test_task_pool_manifest_records_exact_resume_locators_atomically(tmp_path: Path) -> None:
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)

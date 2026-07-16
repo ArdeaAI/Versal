@@ -32,6 +32,7 @@ from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_ke
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
+from ardevo.utils.memory import release_unused_host_memory
 
 _TaskPayload = TypeVar("_TaskPayload")
 
@@ -379,29 +380,36 @@ class Evolver:
         slot: tuple[Any, str] | None = getattr(self, "_adapter_spill", None)
         if slot is not None and slot[0] is adapter:
             return AdapterRef(slot[1])
+        staging = None
         try:
             import hashlib
-            import io
             import os
+            import tempfile
             from pathlib import Path
 
             import torch
 
-            buffer = io.BytesIO()
-            torch.save(adapter, buffer)
-            payload = buffer.getvalue()
             directory = Path(self.library_dir) / "encoded_cache"
             directory.mkdir(parents=True, exist_ok=True)
-            path = directory / f"{hashlib.sha256(payload).hexdigest()[:16]}.pt"
-            if not path.exists():
-                staging = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-                staging.write_bytes(payload)
+            # Serialize directly to disk. BytesIO doubled the resident size of large encoded tasks
+            # (PSICOV is nearly 1 GiB on disk) before any worker even started evaluating it.
+            with tempfile.NamedTemporaryFile(prefix=f".payload.{os.getpid()}.", suffix=".pt", dir=directory, delete=False) as handle:
+                staging = Path(handle.name)
+            torch.save(adapter, staging)
+            with staging.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            path = directory / f"{digest[:16]}.pt"
+            if path.exists():
+                staging.unlink()
+            else:
                 staging.replace(path)
             if slot is not None and slot[1] != str(path):
                 Path(slot[1]).unlink(missing_ok=True)
             self._adapter_spill = (adapter, str(path))
             return AdapterRef(str(path))
         except Exception:  # pragma: no cover - spill is an optimization, never a failure mode
+            if staging is not None:
+                staging.unlink(missing_ok=True)
             return adapter
 
     def _ensure_pool(self) -> "Pool":
@@ -446,6 +454,7 @@ class Evolver:
         import gc
 
         gc.collect()
+        release_unused_host_memory()
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -723,6 +732,7 @@ def _release_worker_task_adapter(_token: int) -> int:
     import time
 
     gc.collect()
+    release_unused_host_memory()
     time.sleep(0.01)
     return os.getpid()
 
@@ -738,12 +748,16 @@ def _resolve_adapter(adapter: "_TaskPayload | AdapterRef") -> _TaskPayload:
         import gc
 
         gc.collect()
+        release_unused_host_memory()
         import torch
 
         # weights_only=False is required (the spill holds adapter dataclasses, not bare tensors)
         # and safe: the path is only ever produced by this run's own `_pooled_adapter` spill into
         # its library dir, never taken from external input.
-        _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False))
+        # mmap keeps immutable encoded tensor storages backed by the one spill file. Spawned workers
+        # get private Python wrappers but share the physical file-cache pages instead of allocating
+        # one anonymous copy per worker (16 PSICOV copies exhausted a 64 GiB Lattice host).
+        _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False, mmap=True))
     return cast(_TaskPayload, _WORKER_ADAPTER[1])
 
 

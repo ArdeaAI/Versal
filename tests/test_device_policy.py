@@ -206,7 +206,9 @@ def test_explicit_scheduled_batching_overrides_missing_profile(monkeypatch) -> N
 def test_resolve_worker_count(monkeypatch) -> None:
     import os
 
-    from ardevo.utils.device import resolve_worker_count
+    from ardevo.utils import device as device_module
+
+    resolve_worker_count = device_module.resolve_worker_count
 
     assert resolve_worker_count(12) == 12
     assert resolve_worker_count(0) == 0
@@ -214,8 +216,9 @@ def test_resolve_worker_count(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     if hasattr(os, "sched_getaffinity"):
         monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(64)))
+    monkeypatch.setattr(device_module.psutil, "cpu_count", lambda *, logical: 16 if logical else 8)
     monkeypatch.setattr(os, "cpu_count", lambda: 16)
-    assert resolve_worker_count("auto") == 12  # cpu_count - 4
+    assert resolve_worker_count("auto") == 6  # physical cores - 2 is tighter than logical - 4
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "10")
     assert resolve_worker_count("auto") == 6
     monkeypatch.delenv("SLURM_CPUS_PER_TASK")

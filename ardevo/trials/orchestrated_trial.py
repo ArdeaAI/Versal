@@ -396,6 +396,11 @@ class OrchestratedTrial(Proctor):
             return entry.task, 0.0
         cached = entry.reference is not None and report.materializer is not None and report.materializer.current_ref == entry.reference
         if not cached:
+            # Drop the raw task and return Arrow/native allocator pages before asking every worker
+            # to release its encoded view. On a large modality boundary this creates the headroom
+            # needed for concurrent worker GC instead of retaining the old root task throughout it.
+            if report.materializer is not None:
+                report.materializer.release()
             self._release_evolution_task_adapters(orchestrator)
         self.display.stage_started("load_task", detail="reuse the active payload or stream its selected Parquet row from the Hugging Face cache")
         started = time.perf_counter()

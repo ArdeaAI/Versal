@@ -23,6 +23,7 @@ from datasets import load_dataset
 from huggingface_hub import HfApi, hf_hub_download
 
 from ardevo.dataset.icarus import Task, deserialize_task
+from ardevo.utils.memory import release_unused_host_memory
 
 SELECTION_ALGORITHM = "shard_round_robin_v1"
 _IDENTITY_COLUMNS = ("name", "rung", "kind", "fixed_split")
@@ -444,6 +445,7 @@ class OneTaskMaterializer:
             import pyarrow
 
             pyarrow.default_memory_pool().release_unused()
+            release_unused_host_memory()
 
     def close(self) -> None:
         self.release()

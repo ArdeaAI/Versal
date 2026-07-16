@@ -189,6 +189,7 @@ def test_adapter_spill_is_cached_resolves_exactly_and_cleans_up(xor_adapter, tmp
 
     evolver.close_pool()
     assert not Path(ref.path).exists()
+    assert not list((tmp_path / "encoded_cache").glob(".payload.*"))
 
 
 def test_task_switch_releases_main_and_worker_adapter_before_loading_next(xor_adapter, tmp_path, monkeypatch) -> None:
@@ -225,6 +226,7 @@ def test_task_switch_releases_main_and_worker_adapter_before_loading_next(xor_ad
 
     def load_after_release(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202 - torch.load seam
         assert ev_mod._WORKER_ADAPTER is None
+        assert _kwargs["mmap"] is True
         return xor_adapter
 
     monkeypatch.setattr(torch, "load", load_after_release)
@@ -252,6 +254,20 @@ def test_shared_task_release_collects_an_acknowledgement_from_every_worker() -> 
         ev_mod.release_shared_task_adapters()
     finally:
         ev_mod.set_shared_pool(previous)
+
+
+def test_worker_task_release_returns_native_heap_before_acknowledging(xor_adapter, monkeypatch) -> None:
+    from ardevo.evolution import evolver as ev_mod
+
+    trims: list[bool] = []
+    monkeypatch.setattr(ev_mod, "release_unused_host_memory", lambda: trims.append(True))
+    ev_mod._WORKER_ADAPTER = ("old-task.pt", xor_adapter)
+    try:
+        assert ev_mod._release_worker_task_adapter(0) > 0
+        assert ev_mod._WORKER_ADAPTER is None
+        assert trims == [True]
+    finally:
+        ev_mod._WORKER_ADAPTER = None
 
 
 def test_owned_pool_acknowledges_release_before_spill_is_unlinked(xor_adapter, tmp_path) -> None:

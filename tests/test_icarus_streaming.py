@@ -153,6 +153,8 @@ def test_manifest_pinned_source_resumes_without_hub_api_access(tmp_path: Path) -
 
 
 def test_one_task_materializer_reuses_immediate_repeat_and_releases_on_switch(tmp_path: Path, monkeypatch) -> None:
+    from ardevo.dataset import icarus_streaming as streaming_module
+
     _write_shard(tmp_path, 6, 0, [_task("first", rung=6), _task("second", rung=6)])
     source = IcarusStreamingSource(str(tmp_path))
     refs = source.select(rungs=[6], n_tasks=2, shuffle=False, seed=0)
@@ -164,6 +166,8 @@ def test_one_task_materializer_reuses_immediate_repeat_and_releases_on_switch(tm
         return original(ref, **kwargs)
 
     monkeypatch.setattr(source, "materialize", counted)
+    trims: list[bool] = []
+    monkeypatch.setattr(streaming_module, "release_unused_host_memory", lambda: trims.append(True))
     materializer = OneTaskMaterializer(source, n_samples=4, support_fraction=0.5, shuffle=False, seed=0, min_fixed_query_samples=0)
 
     first = materializer.get(refs[0])
@@ -176,3 +180,4 @@ def test_one_task_materializer_reuses_immediate_repeat_and_releases_on_switch(tm
 
     materializer.release()
     assert materializer.current_ref is None
+    assert trims == [True, True]  # switch plus explicit release
