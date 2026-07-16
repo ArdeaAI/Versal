@@ -137,6 +137,7 @@ def assess_composition_pure(
     evaluate_op: Callable[..., dict[str, float]],
     fitness: Callable[..., float],
     rng: random.Random,
+    deadline: float | None = None,
 ) -> AssessedComposition:
     """Assemble, optionally train, evaluate, and score ONE composition. Pure w.r.t. shared state: it
     reads only the passed champions + library, decodes its OWN inner-module copies (fresh context), and
@@ -158,7 +159,7 @@ def assess_composition_pure(
     if train:
         # writeback=False: the op returns the SAME comp/net; glue lands on the comp genes here and
         # module weights flow via the champion policy (in _module_writeback), not the flat writeback.
-        comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False))
+        comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False, deadline=deadline))
         comp = writeback_composition(comp, net)
     metrics = evaluate_op(comp, net, _CompositionEvalAdapter(spec))
     stamp_complexity_metrics(comp, metrics, library)
@@ -187,6 +188,7 @@ def _assess_comp_in_worker(
     train_op: Callable[..., Any],
     evaluate_op: Callable[..., dict[str, float]],
     fitness: Callable[..., float],
+    deadline: float | None = None,
 ) -> AssessedComposition:
     """Assess one composition and return an fd-safe, tensor-free result.
 
@@ -207,6 +209,7 @@ def _assess_comp_in_worker(
         evaluate_op=evaluate_op,
         fitness=fitness,
         rng=_COMP_WORKER_RNG,
+        deadline=deadline,
     )
     if assessed.net is None:
         return assessed
@@ -307,7 +310,7 @@ class HierarchicalLoop:
             entries = [
                 entry
                 for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
-                if self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+                if "field_template" not in entry.payload and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
             ][:wanted]
             for index, entry in enumerate(entries):
                 genomes[index] = graft(entry, tracker)
@@ -337,6 +340,10 @@ class HierarchicalLoop:
         if self.library is not None:
             tolerance = self.catalog_width_tolerance
             for entry in self.library.query():
+                # Field programs execute against site features through the field adapter. A flat
+                # composition cannot silently reinterpret their symbolic H/W contract.
+                if entry.entry_type == MODULE and "field_template" in entry.payload:
+                    continue
                 # Adding this entry as a composition MODULE follows one new library edge, leaving
                 # max_inline_depth - 1 levels for the entry's own mixed module/composition subtree.
                 if self.library.reference_subtree_depth(entry.key) > self.max_inline_depth - 1:
@@ -388,6 +395,7 @@ class HierarchicalLoop:
             evaluate_op=self.evolver.evaluate_op,
             fitness=self.evolver.fitness,
             rng=state.rng,
+            deadline=self.evolver.deadline,
         )
 
     def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
@@ -416,6 +424,7 @@ class HierarchicalLoop:
                 train_op=self.evolver.train_op,
                 evaluate_op=self.evolver.evaluate_op,
                 fitness=self.evolver.fitness,
+                deadline=self.evolver.deadline,
             )
             chunksize = max(1, len(comps) // (4 * (getattr(pool, "_processes", 12) or 12)))
             return pool.map(worker, comps, chunksize=chunksize)
@@ -586,7 +595,7 @@ class HierarchicalLoop:
         ranked = [
             entry
             for entry in self.library.query(entry_type=MODULE, input_width=self.in_ports, output_width=self.out_ports)
-            if entry.key not in state.absorbed_keys and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
+            if "field_template" not in entry.payload and entry.key not in state.absorbed_keys and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
         ]
         # Graft BEHAVIORALLY DIVERSE entries first: one per unseen niche by rank, then fill. A pool of
         # varied building blocks recombines into more than a cluster of near-duplicate top-metric ones.

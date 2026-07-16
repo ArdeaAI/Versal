@@ -385,6 +385,10 @@ def _build_entry(
             stack=stack,
             max_inline_depth=max_inline_depth,
         )
+        if "field_template" in entry.payload:
+            version = entry.payload["field_template"].get("version", "unknown")
+            label = f"{label}  repeated field H×W  {version}"
+            built.spec.containers.append(SpecContainer(0.0, 0.0, built.spec.width, built.spec.height, label=label, depth=depth))
     elif entry.entry_type == COMPOSITION:
         built = _build_comp(
             comp_from_dict(entry.payload),

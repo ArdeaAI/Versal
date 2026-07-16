@@ -3,6 +3,7 @@ import random
 import pytest
 
 from ardevo.evolution.init import INIT, estimate_initialization
+from ardevo.substrate import decode
 
 
 @pytest.mark.parametrize(
@@ -14,3 +15,6 @@ def test_builtin_estimate_matches_tiny_seed(kind: str, params: dict) -> None:
     estimate = estimate_initialization(kind, 7, 5, **params)
     assert estimate.nodes == len(genome.nodes)
     assert estimate.edges == len(genome.connections)
+    net = decode(genome, 7, 5)
+    assert net.weights.numel() == estimate.nodes * (estimate.nodes - 8)
+    assert net.mask.numel() == net.weights.numel()

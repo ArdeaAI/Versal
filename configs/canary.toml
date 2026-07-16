@@ -48,7 +48,7 @@ quick_eval_top_k = 5
 library_dir = "library"
 # Oversized dense initializations decompose before trying a flat network.
 decompose_first_above = 2000000
-evolve = ["routed", "grammar", "direct", "composition"]
+evolve = ["routed", "grammar", "field", "direct", "composition"]
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 output_slices_max_output_features = 1024
@@ -57,6 +57,8 @@ time_windows_n_windows = 2
 spatial_patches_n_patches = 2
 decompose_solvability_floor = 0.6
 decompose_probe_generations = 6
+decompose_probe_seconds = 30
+decompose_leaf_cap = 64
 
   # Deeper subproblems receive progressively smaller evolutionary searches.
   [orchestrator.budgets]
@@ -73,8 +75,28 @@ decompose_probe_generations = 6
   [orchestrator.evolve_budget]
   routed = 0.15
   grammar = 0.15
-  direct = 0.45
-  composition = 0.25
+  field = 0.25
+  direct = 0.30
+  composition = 0.15
+
+  [orchestrator.field]
+  train_sites = 4096
+  audit_sites = 16384
+  verify_top_k = 5
+  verify_chunk_size = 32768
+  pop_size = 64
+  elitism = 2
+  assess_workers = 0
+
+    [orchestrator.field.train]
+    kind = "gradient_scheduled"
+    steps = 20
+    lr = 0.01
+    writeback = true
+    weight_decay = 0.0001
+
+    [orchestrator.field.evaluate]
+    kind = "standard"
 
   # The router selects frozen library experts, then distills successful pathways into reusable compositions.
   [orchestrator.routed]

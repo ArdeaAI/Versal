@@ -129,6 +129,7 @@ class Attempt:
     query_accuracy: float | None = None
     support_status: str = "legacy_missing"
     query_status: str = "legacy_missing"
+    representation: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -171,6 +172,8 @@ class Attempt:
                     "query_status": self.query_status,
                 }
             )
+        if self.representation is not None:
+            data["representation"] = self.representation
         return data
 
     @classmethod
@@ -199,6 +202,7 @@ class Attempt:
             query_accuracy=float(data["query_accuracy"]) if data.get("query_accuracy") is not None else None,
             support_status=str(data.get("support_status", "legacy_missing")),
             query_status=str(data.get("query_status", "legacy_missing")),
+            representation=str(data["representation"]) if data.get("representation") is not None else None,
         )
 
 
@@ -331,6 +335,8 @@ class Orchestrator:
         # the whole budget on unsolvable parts (the two_spirals-class 0-for-N decompose failures).
         self.decompose_solvability_floor = float(table.get("decompose_solvability_floor", 0.0))
         self.decompose_probe_generations = int(table.get("decompose_probe_generations", 6))
+        self.decompose_probe_seconds = min(30.0, max(0.1, float(table.get("decompose_probe_seconds", 30.0))))
+        self.decompose_leaf_cap = min(64, max(2, int(table.get("decompose_leaf_cap", 64))))
         # DECOMPOSE-FIRST ([orchestrator] decompose_first_above): a task whose dense-init gene
         # estimate ((n_in + 1) x n_out) exceeds this runs the decompose registry BEFORE the evolve
         # ladder, because decompose is otherwise the LAST stage and an init-wall task (rungs 11-14,
@@ -483,6 +489,7 @@ class Orchestrator:
             self._failure_op = None
             self._best_diagnostic_observation: dict[str, Any] | None = None
             self._best_parent_result: StrategyResult | None = None
+            self._decomposition_leaf_count = 1
         if self._shutdown_requested():
             return self._record_shutdown(task, depth)
         if self._total_deadline_exceeded():
@@ -699,6 +706,13 @@ class Orchestrator:
         if self.decompose_first_above != "adaptive" and int(self.decompose_first_above) <= 0:
             return False
         if self.decompose_first_above != "adaptive":
+            runtime = self._runtime()
+            for name, strategy in self.strategies:
+                if name != "field":
+                    continue
+                preflight = getattr(strategy, "preflight", None)
+                if preflight is not None and preflight(task, runtime).eligible:
+                    return False
             io = self._io_of(task, spec)
             init_genes = (int(io["inputs"][0]["width"]) + 1) * int(io["output"]["width"])
             return init_genes > int(self.decompose_first_above)
@@ -747,6 +761,7 @@ class Orchestrator:
             accepts=self._accepts_item,
             deadline_exceeded=self._deadline_exceeded,
             shutdown_requested=self._shutdown_requested,
+            deadline=getattr(self, "_solve_deadline", None),
         )
 
     def _evolve(
@@ -833,10 +848,14 @@ class Orchestrator:
                 if ladder_metrics.get("handoff_count", 0.0):
                     notes.append("executable handoff prepared")
             if declined:
-                notes.append("resource guard declined allocation")
+                notes.append(
+                    "explicit flat substrate cannot fit; continuing with field search/composition"
+                    if name == "direct"
+                    else "resource guard skipped allocation"
+                )
             self.display.stage_result(
                 name,
-                "accepted" if self._accepts_result(outcome) else "continue",
+                "accepted" if self._accepts_result(outcome) else ("skipped" if declined else "continue"),
                 " · ".join(notes),
                 seconds=stage_elapsed,
                 depth=getattr(self, "_display_depth", 0),
@@ -888,6 +907,7 @@ class Orchestrator:
                 support_status=hit.support_status,
                 query_status=hit.query_status,
                 strategy_metrics=dict(self._last_refine_strategy_metrics),
+                representation=("field" if hit.key is not None and "field_template" in self.library.load(hit.key).payload else hit.entry_type),
             )
         )
         return hit
@@ -900,7 +920,7 @@ class Orchestrator:
         self.display.stage_started("refine")
         refine_started = time.perf_counter()
         entry = self.library.load(hit.key)
-        strategy_name = "direct" if entry.entry_type == MODULE else "composition"
+        strategy_name = "field" if entry.entry_type == MODULE and "field_template" in entry.payload else ("direct" if entry.entry_type == MODULE else "composition")
         strategy = dict(self.strategies).get(strategy_name)
         if strategy is None:
             self.counters["refine_skipped_no_strategy"] += 1
@@ -917,7 +937,7 @@ class Orchestrator:
         # a beatable incumbent lets the strategy's early exit stop the moment it wins.
         topology_tabu = self._topology_tabu(entry, task) if self.refine_deduplicate_topologies else None
         runtime = self._refine_runtime(hit.metric + self.refine_metric_epsilon, topology_tabu=topology_tabu)
-        target = self.loop.evolver if entry.entry_type == MODULE else self.loop
+        target = getattr(strategy, "evolver", self.loop.evolver) if entry.entry_type == MODULE else self.loop
         previous_tabu = target.topology_tabu
         target.topology_tabu = topology_tabu
         try:
@@ -1023,6 +1043,7 @@ class Orchestrator:
             deadline_exceeded=self._deadline_exceeded,
             shutdown_requested=self._shutdown_requested,
             topology_tabu=topology_tabu,
+            deadline=getattr(self, "_solve_deadline", None),
         )
 
     def _topology_tabu(self, entry: LibraryEntry, task: Task) -> TopologyTabuSession:
@@ -1072,7 +1093,10 @@ class Orchestrator:
     @staticmethod
     def _candidate_fingerprint(result: StrategyResult) -> str | None:
         if result.champion_genome is not None:
-            return structural_fingerprint(MODULE, genome_to_dict(result.champion_genome))
+            payload = genome_to_dict(result.champion_genome)
+            if result.field_template is not None:
+                payload["field_template"] = result.field_template
+            return structural_fingerprint(MODULE, payload)
         if result.champion_comp is not None:
             return structural_fingerprint(COMPOSITION, comp_to_dict(result.champion_comp.comp))
         return None
@@ -1082,6 +1106,8 @@ class Orchestrator:
 
         if result.champion_genome is not None and entry.entry_type == MODULE:
             candidate_type, candidate_payload = MODULE, genome_to_dict(result.champion_genome)
+            if result.field_template is not None:
+                candidate_payload["field_template"] = result.field_template
         elif result.champion_comp is not None and entry.entry_type == COMPOSITION:
             candidate_type, candidate_payload = COMPOSITION, comp_to_dict(result.champion_comp.comp)
         else:
@@ -1141,7 +1167,7 @@ class Orchestrator:
         """The warm start for a fresh assault on a known wall, split by shape for the seeding rails
         (MODULE stones graft into the direct population, COMPOSITION stones seed the comp loop)."""
         stones = self._wall_stones(task, spec)[: self.wall_seed_top_k]
-        modules = [stone for stone in stones if stone.entry_type == MODULE]
+        modules = [stone for stone in stones if stone.entry_type == MODULE and "field_template" not in stone.payload]
         comps = [comp_from_dict(stone.payload) for stone in stones if stone.entry_type == COMPOSITION]
         return modules, comps
 
@@ -1187,12 +1213,19 @@ class Orchestrator:
 
     def _lookup(self, task: Task, spec: CompTaskSpec) -> Solution | None:
         io = self._io_of(task, spec)
-        candidates = self.library.query(
+        from ardevo.field import field_contract
+
+        contract = field_contract(task)
+        candidates = self.library.query_field(contract, limit=self.quick_eval_top_k) if contract is not None else []
+        exact = self.library.query(
             input_signature=io["inputs"][0]["signature"],
             input_width=io["inputs"][0]["width"],
             output_width=io["output"]["width"],
             limit=self.quick_eval_top_k,
         )
+        seen = {entry.key for entry in candidates}
+        candidates.extend(entry for entry in exact if entry.key not in seen)
+        candidates = candidates[: self.quick_eval_top_k]
         for entry in candidates:
             if self._total_deadline_exceeded():
                 return None
@@ -1204,6 +1237,10 @@ class Orchestrator:
             report_assessment = self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment
             report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else metric
             combined = dict(assessment.metrics) | (dict(report_assessment.metrics) if report_assessment is not None else {})
+            task_metrics = _task_metrics(combined)
+            if "field_template" in entry.payload:
+                task_metrics["cross_resolution_reuse"] = float(entry.io != io)
+                task_metrics["representation_field"] = 1.0
             support_accuracy = _finite_accuracy(assessment.metrics, "support_accuracy")
             query_accuracy = _finite_accuracy(report_assessment.metrics, "query_accuracy", loss_key="query_loss") if report_assessment is not None else None
             return Solution(
@@ -1211,7 +1248,7 @@ class Orchestrator:
                 entry_type=entry.entry_type,
                 metric=metric,
                 report_metric=report_metric,
-                task_metrics=_task_metrics(combined),
+                task_metrics=task_metrics,
                 support_accuracy=support_accuracy,
                 query_accuracy=query_accuracy,
                 support_status="evaluated" if support_accuracy is not None else "evaluation_unavailable",
@@ -1253,6 +1290,18 @@ class Orchestrator:
         from ardevo.evolution.composition import AssemblyContext, CompositionAssemblyError, assemble
 
         try:
+            if entry.entry_type == MODULE and "field_template" in entry.payload:
+                from ardevo.field import decode_field_payload, evaluate_field_module, field_contract
+
+                wanted = field_contract(task)
+                module, contract = decode_field_payload(entry.payload, library=self.library, max_inline_depth=self.loop.max_inline_depth)
+                if wanted is None or wanted != contract:
+                    return None
+                metrics = evaluate_field_module(module, task, contract, split="support", deadline=getattr(self, "_solve_deadline", None))
+                metrics.update({"query_accuracy": 0.0, "query_loss": float("inf"), "cross_resolution_reuse": 1.0})
+                if spec.encoded.query_input is not None and task.query:
+                    metrics.update(evaluate_field_module(module, task, contract, split="query", deadline=getattr(self, "_solve_deadline", None)))
+                return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None)
             if entry.entry_type == MODULE and self._entry_is_temporal(entry):
                 adapter = temporal_adapter(task, max_inline_depth=self.loop.max_inline_depth)
                 if spec.encoded.query_input is None:
@@ -1286,7 +1335,7 @@ class Orchestrator:
                     expansion_stack=[entry.key],
                 )
                 module = assemble(comp, ctx, spec.n_inputs)
-        except (ValueError, CompositionAssemblyError) as error:
+        except (ValueError, CompositionAssemblyError, TimeoutError) as error:
             logger.debug("library candidate %s not evaluable here: %s", entry.key, error)
             return None
         metrics = evaluate(module, spec.encoded, spec.encoder)
@@ -1311,10 +1360,16 @@ class Orchestrator:
             produced = op(task, rng=self.state.rng)
             if len(produced) < 2:
                 continue
+            projected_leaves = getattr(self, "_decomposition_leaf_count", 1) + len(produced) - 1
+            if projected_leaves > self.decompose_leaf_cap:
+                self._failure_stage = "representation_limit"
+                self._failure_op = op_name
+                continue
             if not self._subtasks_promising(produced, depth):
                 logger.debug("decompose op %s produced subtasks that fail the solvability probe; skipping", op_name)
                 continue
             chosen_name, subtasks = op_name, produced
+            self._decomposition_leaf_count = projected_leaves
             break
         if not subtasks:
             self.display.stage_result("decompose", "miss", "no registered split produced useful independent subtasks", seconds=time.perf_counter() - decompose_started, depth=depth)
@@ -1414,11 +1469,61 @@ class Orchestrator:
             if self._total_deadline_exceeded():
                 return False
             spec = comp_task_spec(subtask.task, include_query=not self.blind_query, structured_grid=self.structured_grid)
-            probe = self._evolve(subtask.task, spec, self.decompose_probe_generations)
+            # An oversized child has not failed empirically; it simply needs another planning split.
+            if self._wants_decompose_first(subtask.task, spec):
+                continue
+            probe = self._bounded_decomposition_probe(subtask.task, spec)
             self._consider_diagnostic_result(probe, task=subtask.task.meta.name, depth=parent_depth + 1)
             if probe.champion_metrics.get("support_accuracy", 0.0) < self.decompose_solvability_floor:
                 return False
         return True
+
+    def _bounded_decomposition_probe(self, task: Task, spec: CompTaskSpec) -> StrategyResult:
+        """Support-only, two-candidate/two-step probe with a hard per-operator wall cap."""
+
+        # White-box/embedding compatibility: callers may provide a purpose-built bounded probe by
+        # shadowing `_evolve` on this instance.
+        if "_evolve" in self.__dict__:
+            return self.__dict__["_evolve"](task, spec, min(2, self.decompose_probe_generations))
+
+        from functools import partial
+
+        from ardevo.evolution.evaluate import standard
+
+        probe_task = Task(meta=task.meta, support=list(task.support[:2048]), query=[])
+        probe_spec = comp_task_spec(probe_task, include_query=False, structured_grid=self.structured_grid)
+
+        runtime = self._runtime()
+        probe_deadline = time.perf_counter() + self.decompose_probe_seconds
+        runtime.deadline = min(value for value in (runtime.deadline, probe_deadline) if value is not None)
+        bounded_deadline = runtime.deadline
+        runtime.deadline_exceeded = lambda: bounded_deadline is not None and time.perf_counter() >= bounded_deadline
+        for name in ("field", "direct"):
+            strategy: Any = dict(self.strategies).get(name)
+            if strategy is None:
+                continue
+            preflight = getattr(strategy, "preflight", None)
+            if preflight is not None and not preflight(probe_task, runtime).eligible:
+                continue
+            evolver = getattr(strategy, "evolver", None)
+            if evolver is None:
+                continue
+            saved = (evolver.pop_size, evolver.assess_workers, evolver.train_op, evolver.evaluate_op)
+            field_saved = None
+            if name == "field":
+                field_saved = (strategy.train_sites, strategy.audit_sites, strategy.verify_top_k)
+                strategy.train_sites, strategy.audit_sites, strategy.verify_top_k = 2048, 2048, 2
+            try:
+                evolver.pop_size = min(2, evolver.pop_size)
+                evolver.assess_workers = 0
+                evolver.train_op = partial(evolver.train_op, steps=2)
+                evolver.evaluate_op = standard
+                return strategy(probe_task, probe_spec, runtime, budget=1)
+            finally:
+                evolver.pop_size, evolver.assess_workers, evolver.train_op, evolver.evaluate_op = saved
+                if field_saved is not None:
+                    strategy.train_sites, strategy.audit_sites, strategy.verify_top_k = field_saved
+        return StrategyResult("decomposition_probe", 0.0, 0, strategy_metrics={"probe_no_feasible_representation": 1.0})
 
     def _consider_diagnostic_result(self, result: StrategyResult, *, task: str, depth: int) -> None:
         support = _finite_accuracy(result.champion_metrics, "support_accuracy")
@@ -1508,10 +1613,19 @@ class Orchestrator:
         if self._stepping_stone:
             provenance["stepping_stone"] = True  # a below-bar wall-ledger trace, not a solution
         level = module_level(result.champion_genome, self.library)
+        payload = genome_to_dict(result.champion_genome)
+        io = self._io_of(task, spec)
+        if result.field_template is not None:
+            from ardevo.field import FieldContract
+
+            payload["field_template"] = result.field_template
+            provenance["representation"] = "field"
+            provenance["field_identity"] = FieldContract.from_dict(result.field_template).identity
+            io = dict(io) | {"field_identity": provenance["field_identity"]}
         return self._gated_add(
             entry_type=MODULE,
-            payload=genome_to_dict(result.champion_genome),
-            io=self._io_of(task, spec),
+            payload=payload,
+            io=io,
             provenance=provenance,
             level=level,
             dependency=depth > 0 or self._stepping_stone,
@@ -1779,6 +1893,7 @@ class Orchestrator:
             query_accuracy=query,
             support_status=support_status,
             query_status=query_status if query is None and query_status is not None else observed_query_status,
+            representation=result.representation,
         )
 
     def _solution_from_result(self, result: StrategyResult, key: str | None) -> Solution:

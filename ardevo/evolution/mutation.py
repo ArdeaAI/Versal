@@ -560,7 +560,9 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     assert isinstance(library, ModuleLibrary)
     # The entry payload is copied into the candidate root, so its own root is free and its deepest
     # remaining library path may consume the full configured boundary budget.
-    entries = [entry for entry in library.query(entry_type=MODULE_ENTRY) if library.reference_subtree_depth(entry.key) <= ctx.max_inline_depth]
+    from ardevo.library import is_field_entry
+
+    entries = [entry for entry in library.query(entry_type=MODULE_ENTRY) if not is_field_entry(entry) and library.reference_subtree_depth(entry.key) <= ctx.max_inline_depth]
     if not entries:
         return genome
     entry = entries[rng.randrange(len(entries))]
@@ -635,7 +637,11 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
     if not host_sources or not host_outputs:
         return genome
     candidates = []
+    from ardevo.library import is_field_entry
+
     for entry in library.query(entry_type=MODULE_ENTRY):
+        if is_field_entry(entry):
+            continue
         # k/m are the inner genome's actual INPUT/OUTPUT NODE counts (what the macro decode validates
         # against), NOT the io widths: a temporal module's io width is the FLATTENED width (e.g. 24)
         # while its genome has only per-step input nodes (e.g. 3), and trusting io would wire a macro

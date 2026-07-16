@@ -78,6 +78,58 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
     assert orchestrator.counters["library_hits"] == 1
 
 
+def test_field_library_hit_matches_across_resolution_after_full_support_check(tmp_path: Path) -> None:
+    from ardevo.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
+    from ardevo.evolution.init import minimal
+    from ardevo.field import field_contract, field_feature_width, field_payload
+    from tests.test_field import _task
+
+    source = _task()
+    contract = field_contract(source)
+    assert contract is not None
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(0))
+    orchestrator = _orchestrator(tmp_path, table={"accept_metric": "support_accuracy", "accept_threshold": 0.0})
+    orchestrator.library.add(entry_type=MODULE, payload=field_payload(genome, contract), io=task_io(source), provenance={"accepted_metric": 1.0})
+
+    axes = (Axis.CHANNEL, Axis.HEIGHT, Axis.WIDTH)
+    input_field = Field(torch.zeros(2, 6, 7), axes, ValueType.CONTINUOUS, None, None, None)
+    output_field = Field(torch.zeros(1, 6, 7), axes, ValueType.CONTINUOUS, None, None, None)
+    target = Task(TaskMeta(0, TaskKind.MAP, "foreign", fixed_split=True), [(input_field, output_field)], [])
+    solution = orchestrator.solve(target)
+    assert solution is not None and solution.entry_type == MODULE
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert orchestrator.attempts[-1].task_metrics["cross_resolution_reuse"] == 1.0
+
+
+def test_field_admission_uses_isolated_library_and_persists_metadata(tmp_path: Path) -> None:
+    from tests.test_field import _task
+
+    table = {
+        "accept_metric": "support_accuracy",
+        "search_metric": "support_accuracy",
+        "accept_threshold": 0.0,
+        "max_depth": 0,
+        "evolve": ["field"],
+        "budgets": {"depth0": 1},
+        "decompose": [],
+        "field": {
+            "pop_size": 2,
+            "elitism": 1,
+            "train_sites": 8,
+            "audit_sites": 8,
+            "verify_top_k": 1,
+            "train": {"kind": "gradient", "steps": 1, "lr": 0.01, "writeback": True},
+            "evaluate": {"kind": "standard"},
+        },
+    }
+    orchestrator = _orchestrator(tmp_path, table=table)
+    solution = orchestrator.solve(_task())
+    assert solution is not None and solution.key is not None
+    entry = orchestrator.library.load(solution.key)
+    assert entry.entry_type == MODULE
+    assert entry.payload["field_template"]["version"] == "local_multiscale_v1"
+
+
 def test_shutdown_request_records_graceful_stop_without_deadline_accounting(tmp_path: Path, xor_task: Task) -> None:
     requested = True
     orchestrator = _orchestrator(tmp_path, shutdown_requested=lambda: requested)
@@ -420,6 +472,19 @@ def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposab
     assert orchestrator._subtasks_promising(subtasks) is True
     diagnostic = orchestrator._best_diagnostic_observation
     assert diagnostic is not None and diagnostic["score"] == 0.95
+
+
+def test_decomposition_leaf_cap_reports_representation_limit(tmp_path: Path) -> None:
+    from tests.test_field import _task
+
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"decompose": ["spatial_patches"], "spatial_patches_n_patches": 2, "decompose_leaf_cap": 2, "decompose_solvability_floor": 0.0},
+    )
+    orchestrator._decomposition_leaf_count = 2
+    task = _task()
+    assert orchestrator._decompose_and_recurse(task, comp_task_spec(task), 0, 1, 0.0) is None
+    assert orchestrator._failure_stage == "representation_limit"
 
 
 def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Task) -> None:

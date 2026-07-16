@@ -8,7 +8,7 @@ from ardevo.dataset.icarus import Task
 from ardevo.evolution.genome import InnovationTracker, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import build_loop
-from ardevo.library import MODULE, task_io
+from ardevo.library import MODULE, ModuleLibrary, task_io
 from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
@@ -51,6 +51,34 @@ def test_verification_reassembles_against_current_state(xor_task: Task) -> None:
     assert fresh_weights != stale
     expected = {(conn.in_id, conn.out_id, conn.recurrent): conn.weight for conn in moved.connections if conn.enabled}
     assert all(abs(fresh_weights[key] - expected[key]) < 1e-6 for key in fresh_weights)
+
+
+def test_field_strategy_runs_compact_program_and_full_verifies(tmp_path: Path) -> None:
+    from ardevo.strategy import FieldStrategy
+    from tests.test_field import _task
+
+    config = _loop_config()
+    config["orchestrator"] = {
+        "field": {
+            "pop_size": 2,
+            "elitism": 1,
+            "train_sites": 8,
+            "audit_sites": 8,
+            "verify_top_k": 1,
+            "train": {"kind": "gradient", "steps": 1, "lr": 0.01, "writeback": True},
+            "evaluate": {"kind": "standard"},
+        }
+    }
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    strategy = EVOLVE_STRATEGY.get("field")(config)
+    assert isinstance(strategy, FieldStrategy)
+    result = strategy(_task(), _spec(_task()), _runtime_for(loop, state, threshold=2.0), budget=1)
+    assert result.champion_genome is not None and result.field_template is not None
+    assert result.champion_metrics["support_accuracy"] == result.champion_metrics["full_support_accuracy"]
+    assert result.strategy_metrics["field_application_sites"] == 20.0
 
 
 def test_composition_declines_oversized_initial_glue_before_run_task(monkeypatch, xor_task: Task) -> None:

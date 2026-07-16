@@ -191,7 +191,13 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
         return None
     in_width, out_width = _entry_widths(entry)
     try:
-        if entry.entry_type == MODULE:
+        if entry.entry_type == MODULE and "field_template" in entry.payload:
+            from ardevo.field import decode_field_payload, field_feature_width
+
+            module, contract = decode_field_payload(entry.payload, library=library, max_inline_depth=max_inline_depth)
+            in_width = field_feature_width(contract.input_channels)
+            out_width = len(genome_from_dict(entry.payload).output_ids)
+        elif entry.entry_type == MODULE:
             module: SubstrateModule = decode_module(
                 genome_from_dict(entry.payload),
                 in_width,

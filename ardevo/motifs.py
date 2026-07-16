@@ -403,6 +403,8 @@ def motif_census(
     scanned = {"modules": 0, "compositions": 0}
     scanned_keys: dict[str, list[str]] = {"modules": [], "compositions": []}
     for entry in entries:
+        if entry.entry_type == MODULE and "field_template" in entry.payload:
+            continue
         if entry.entry_type == MODULE:
             labels, edges = module_motif_graph(entry.payload)
             found, truncated_sizes = _mine_entry(labels, edges, sizes, per_entry_cap, canonical_cache)

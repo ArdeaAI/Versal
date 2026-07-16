@@ -479,6 +479,8 @@ def induce_grammar(
     groups: dict[tuple[str, str, tuple[BoundaryPort, ...]], list[_Occurrence]] = {}
     for key in selected_keys:
         entry = all_entries[key]
+        if entry.entry_type == MODULE and "field_template" in entry.payload:
+            continue
         sizes = module_sizes if entry.entry_type == MODULE else composition_sizes
         root = _lineage_root(key, all_entries)
         for occurrence in _entry_occurrences(entry, sizes, per_entry_cap, root):

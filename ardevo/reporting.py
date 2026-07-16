@@ -187,6 +187,11 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
     support = [value for row in tasks if (value := _support(row)) is not None]
     outcome_counts = Counter(str(row.get("outcome", "unknown")) for row in tasks)
     strategy_counts = Counter(str(row.get("strategy")) for row in tasks if row.get("strategy") is not None)
+    representation_counts = Counter(
+        str(row.get("representation") or ("field" if row.get("strategy") == "field" else ("composition" if row.get("strategy") == "composition" else "flat")))
+        for row in tasks
+        if row.get("strategy") is not None
+    )
     stage_seconds: Counter[str] = Counter()
     resource_events: Counter[str] = Counter()
     strategy_metrics: dict[str, list[float]] = defaultdict(list)
@@ -222,6 +227,8 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "index_sha256": _sha256(index_path) if index_path.is_file() else None,
             "motifs_sha256": _sha256(motifs_path) if motifs_path.is_file() else None,
             "motif_count": len(motifs.get("motifs", [])) if isinstance(motifs, dict) and isinstance(motifs.get("motifs"), list) else None,
+            "field_entries": sum(row.get("representation") == "field" for row in index) if isinstance(index, list) else None,
+            "field_exclusions": ["flat_grafting", "flat_macros", "live_flat_module_pool", "grammar_induction", "motif_claims"],
         }
 
     start_size = 0
@@ -263,6 +270,7 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
         "outcomes": dict(sorted(outcome_counts.items())),
         "strategies": {
             "task_usage": dict(sorted(strategy_counts.items())),
+            "representations": dict(sorted(representation_counts.items())),
             "stage_seconds": dict(sorted(stage_seconds.items())),
             "metrics": {name: {"count": len(values), "mean": _mean(values), "max": max(values)} for name, values in sorted(strategy_metrics.items())},
         },
@@ -271,6 +279,7 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "refinement_count": int(outcome_counts.get("refined", 0)),
             "library_hit_count": int(outcome_counts.get("library_hit", 0)),
             "deadline_count": sum(row.get("failure_stage") == "time_budget" for row in tasks),
+            "cross_resolution_reuse_count": sum(float((row.get("task_metrics") or {}).get("cross_resolution_reuse", 0.0)) > 0 for row in tasks),
         },
         "resources": {
             "events": dict(sorted(resource_events.items())),

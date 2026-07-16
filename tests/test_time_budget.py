@@ -10,6 +10,8 @@ import time
 import types
 from pathlib import Path
 
+import torch
+
 from ardevo.dataset.icarus import Task
 from ardevo.evolution.genome import Genome
 from ardevo.orchestrator import StallDetector
@@ -85,6 +87,22 @@ def test_expired_total_budget_is_recorded_without_starting_new_work(tmp_path: Pa
     assert orchestrator.attempts[-1].strategy == "time_budget"
     assert orchestrator.counters["time_budget_hits"] == 1
     assert orchestrator.counters["total_time_budget_hits"] == 1
+
+
+def test_gradient_deadline_interrupts_before_optimizer_step(solving_genome, xor_task: Task) -> None:
+    import random
+    import time
+
+    from ardevo.dataset.icarus import Level0Encoder, encode_task
+    from ardevo.evolution.train import gradient
+    from ardevo.substrate import decode
+
+    encoded = encode_task(xor_task, Level0Encoder(2))
+    module = decode(solving_genome, 2, 1)
+    before = [parameter.detach().clone() for parameter in module.parameters()]
+    gradient(solving_genome, module, encoded, rng=random.Random(0), steps=1000, deadline=time.perf_counter() - 1)
+    for old, current in zip(before, module.parameters()):
+        assert torch.equal(old, current)
 
 
 def test_total_timeout_finalizes_a_remembered_parent_champion(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:

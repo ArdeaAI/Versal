@@ -182,6 +182,7 @@ class Evolver:
     init_kind: str = "minimal"
     init_params: dict[str, Any] = field(default_factory=dict)
     deadline_exceeded: Callable[[], bool] | None = None
+    deadline: float | None = None
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(
@@ -198,7 +199,9 @@ class Evolver:
             module = self._decode(genome, adapter)
         except (ValueError, KeyError):
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
-        genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
+        genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng, deadline=self.deadline)
+        if self.deadline_exceeded is not None and self.deadline_exceeded():
+            return Assessed(genome, _floored_metrics() | {"deadline_stage_candidate_training": 1.0}, _FLOOR_FITNESS, None)
         metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self._score(genome, metrics), module)
 
@@ -239,7 +242,7 @@ class Evolver:
         if self.assess_workers > 1 and sum(module is not None for module in decoded) > 1:
             return self._assess_hybrid(genomes, decoded, adapter, state)
         viable = [(genome, module) for genome, module in zip(genomes, decoded) if module is not None]
-        pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng) if viable else []
+        pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng, deadline=self.deadline) if viable else []
         from ardevo.evolution import train as train_stage
 
         self.assess_stats = dict(train_stage.last_batch_stats)
@@ -283,7 +286,7 @@ class Evolver:
         pooled_adapter = self._pooled_adapter(adapter)
         serial_async = None
         if serial_indices:
-            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness, deadline=self.deadline)
             chunksize = max(1, len(serial_indices) // (self.assess_workers * 4))
             serial_async = pool.map_async(worker, [genomes[index] for index in serial_indices], chunksize=chunksize)
 
@@ -294,7 +297,9 @@ class Evolver:
 
         trained_pairs: list[tuple[Genome, SubstrateModule]] = []
         if batch_indices:
-            trained_pairs = self.train_population_op([genomes[index] for index in batch_indices], [decoded[index] for index in batch_indices], adapter.encoded, rng=state.rng)
+            trained_pairs = self.train_population_op(
+                [genomes[index] for index in batch_indices], [decoded[index] for index in batch_indices], adapter.encoded, rng=state.rng, deadline=self.deadline
+            )
         self.assess_stats = dict(train_stage.last_batch_stats)
         if viable_indices:
             self.assess_stats["fallback"] = len(serial_indices) / len(viable_indices)
@@ -343,7 +348,7 @@ class Evolver:
         current = list(genomes)
         for stage_index, delta in enumerate(deltas):
             staged_op = partial(self.train_op, steps=delta)  # call-time kwargs override partial keywords
-            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness, deadline=self.deadline)
             if pool is not None:
                 chunksize = max(1, len(alive) // (self.assess_workers * 4))
                 triples = pool.map(worker, [current[index] for index in alive], chunksize=chunksize)
@@ -371,7 +376,14 @@ class Evolver:
         return (trained genome, metrics, fitness); the module is re-decoded here from the written-back
         genome (faithful and cheap, no retrain), so the returned Assessed matches the sequential path."""
         pool = self._ensure_pool()
-        worker = partial(_assess_in_worker, adapter=self._pooled_adapter(adapter), train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+        worker = partial(
+            _assess_in_worker,
+            adapter=self._pooled_adapter(adapter),
+            train_op=self.train_op,
+            evaluate_op=self.evaluate_op,
+            fitness=self.fitness,
+            deadline=self.deadline,
+        )
         chunksize = max(1, len(genomes) // (self.assess_workers * 4))
         results = pool.map(worker, genomes, chunksize=chunksize)
         return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
@@ -782,17 +794,26 @@ def _assess_in_worker(
     train_op: Callable[..., tuple[Genome, SubstrateModule]],
     evaluate_op: Callable[..., dict[str, float]],
     fitness: FitnessAggregator,
+    deadline: float | None = None,
 ) -> tuple[Genome, dict[str, float], float]:
     """Decode, train, and evaluate one genome in a worker process. Returns the plain-data triple
     (trained genome, metrics, fitness); the main process re-decodes the module from the genome.
     An undecodable genome floors here instead of raising: a worker exception would kill the WHOLE
     pool.map and with it the run (the two_spirals macro-nesting crash of 2026-07-04)."""
+    from ardevo.utils.deadline import expired
+
+    if expired(deadline):
+        metrics = _floored_metrics() | {"deadline_skipped": 1.0}
+        return genome, metrics, _FLOOR_FITNESS
     adapter = _resolve_adapter(adapter)
     try:
         module = Evolver._decode(genome, adapter)
     except (ValueError, KeyError):
         return genome, _floored_metrics(), _FLOOR_FITNESS
-    genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
+    genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG, deadline=deadline)
+    if expired(deadline):
+        metrics = _floored_metrics() | {"deadline_skipped": 1.0}
+        return genome, metrics, _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
     stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)
