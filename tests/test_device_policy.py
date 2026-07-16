@@ -297,7 +297,7 @@ def test_local_lattice_runs_inline_once_with_clearml_telemetry(monkeypatch, mach
     assert calls == {"task_init": 1, "trial_run": 1, "execute_remotely": 0, "close": 1}
 
 
-def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
+def test_clearml_disables_stream_and_pytorch_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
     from ardevo.utils import pipelines
 
     captured: dict[str, Any] = {}
@@ -332,4 +332,34 @@ def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetr
 
     assert pipeline.task is not None
     assert captured["init"]["auto_connect_frameworks"] == {"pytorch": False}
+    assert captured["init"]["auto_connect_streams"] == {"stdout": False, "stderr": False, "logging": True}
     assert captured["connected"] == {"seed": 1}
+
+
+def test_clearml_full_stream_capture_remains_an_opt_in(monkeypatch) -> None:
+    from ardevo.utils import pipelines
+
+    captured: dict[str, Any] = {}
+
+    class FakeRun:
+        def connect(self, _values) -> None:
+            pass
+
+        def set_repo(self, **_values) -> None:
+            pass
+
+    class FakeTask:
+        TaskTypes = SimpleNamespace(custom="custom")
+
+        @staticmethod
+        def init(**values):
+            captured.update(values)
+            return FakeRun()
+
+    monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
+    monkeypatch.setitem(sys.modules, "clearml", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(pipelines, "get_current_branch", lambda: None)
+
+    pipelines.Pipeline({"machine_env": "local", "clearml_run": True, "clearml_capture_streams": True})
+
+    assert captured["auto_connect_streams"] is True

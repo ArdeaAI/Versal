@@ -239,6 +239,7 @@
     "orchestrator.wall.min_metric",
     "orchestrator.wall.seed_top_k",
     "run.clearml",
+    "run.clearml_capture_streams",
     "run.duration.generations",
     "run.experiment",
     "run.live_status",
@@ -571,6 +572,7 @@
   "runtime_config_keys": [
     "archive",
     "campaign",
+    "clearml_capture_streams",
     "clearml_run",
     "compute",
     "config_effective_sha256",

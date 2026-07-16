@@ -193,6 +193,10 @@ listable, verifiable, and restorable.
 ## ClearML
 
 Set `[run] clearml = true` to record telemetry and artifacts; offline runs remain fully functional.
+By default, ArdEVO sends Python logging records but leaves stdout/stderr uncaptured so Rich's
+transient progress redraws stay local instead of flooding the ClearML console. Set
+`[run] clearml_capture_streams = true` only when a non-interactive run needs complete raw stream
+capture.
 ArdEVO deliberately disables ClearML’s automatic PyTorch model attachment. Router shards loaded by
 `torch.load` are internal evolving state, not alternative input models; automatic attachment made
 many identically named shard loads look like ambiguous model inputs. ArdEVO uploads deliberate

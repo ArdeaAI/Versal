@@ -5,6 +5,8 @@
 project = "ardevo"
 experiment = "orchestrated_overmind_canary"
 clearml = true
+# Keep Rich's transient progress footer local. Python logs, metrics, and artifacts still report.
+clearml_capture_streams = false
 machine = "MonadMetal"
 seed = 0
 log_level = "INFO"

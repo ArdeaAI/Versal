@@ -117,6 +117,7 @@ class Config:
             "project_name": run.get("project", "ardevo"),
             "experiment_name": run.get("experiment", "experiment"),
             "clearml_run": run.get("clearml", False),
+            "clearml_capture_streams": run.get("clearml_capture_streams", False),
             "machine_env": run.get("machine", "local"),
             "compute": run.get("compute", "auto"),
             "tf32": run.get("tf32", False),

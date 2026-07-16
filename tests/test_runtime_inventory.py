@@ -47,6 +47,7 @@ def test_preflight_only_scales_the_canary_task_count() -> None:
 def test_profiles_have_the_declared_scale_and_hardware() -> None:
     canary = Config(Config.PROJECT_ROOT / "configs" / "canary.toml").current
     assert canary["machine_env"] == "MonadMetal"
+    assert canary["clearml_capture_streams"] is False
     assert canary["schedule"]["rungs"] == "all"
     assert canary["orchestrator"]["max_depth"] == 8
     assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
