@@ -27,6 +27,16 @@ def test_render_all_entries_reports_rows(tmp_path: Path) -> None:
         assert Path(row["path"]).exists() and Path(row["path"]).stat().st_size > 0
 
 
+def test_render_all_entries_reports_density_portrait_as_ok(tmp_path: Path, solving_genome: Genome) -> None:
+    library = ModuleLibrary(tmp_path / "lib")
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={})
+
+    rows = render_all_entries(library, tmp_path / "renders", node_budget=1)
+
+    assert rows == [{"key": key, "entry_type": MODULE, "level": 1, "status": "OK", "path": str(tmp_path / "renders" / f"{key}.png")}]
+    assert Path(rows[0]["path"]).stat().st_size > 0
+
+
 def test_render_all_entries_filters_retired(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
     library = ModuleLibrary(tmp_path / "lib")
     kept = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={})

@@ -1,13 +1,14 @@
 """Recursive render specs: nested networks expand inline, every failure degrades to an opaque box."""
 
 import random
+from itertools import product
 from pathlib import Path
 
 import pytest
 
 from ardevo.evolution.composition import minimal_composition
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, genome_to_dict
-from ardevo.library import MODULE, LibraryEntry, ModuleLibrary
+from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
 from ardevo.rendering import (
     RENDER_MAX_DEPTH,
     THEME,
@@ -40,6 +41,43 @@ def _macro_host(key: str) -> Genome:
 
 def _entry(key: str, payload: dict) -> LibraryEntry:
     return LibraryEntry(key=key, entry_type=MODULE, level=1, io=_IO, payload=payload, weights_frozen=True, provenance={})
+
+
+def _spatial_entry(key: str, descriptors: list[tuple[str, tuple[int, ...]]]) -> LibraryEntry:
+    nodes: list[dict] = []
+    io_inputs: list[dict] = []
+    node_id = 0
+    for signature, shape in descriptors:
+        width = 1
+        for size in shape:
+            width *= size
+        io_inputs.append({"signature": signature, "width": width})
+        for coordinate in product(*(range(size) for size in shape)):
+            nodes.append({"id": node_id, "kind": "input", "activation": "identity", "coordinate": list(coordinate), "aggregation": "sum"})
+            node_id += 1
+    nodes.extend(
+        [
+            {"id": node_id, "kind": "bias", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+            {"id": node_id + 1, "kind": "hidden", "activation": "tanh", "coordinate": None, "aggregation": "product"},
+            {"id": node_id + 2, "kind": "output", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+        ]
+    )
+    connections = [
+        {"in": 0, "out": node_id + 1, "weight": 1.0, "enabled": True, "innovation": 0, "recurrent": False},
+        {"in": 1, "out": node_id + 1, "weight": -0.5, "enabled": True, "innovation": 1, "recurrent": False},
+        {"in": node_id, "out": node_id + 1, "weight": 0.25, "enabled": True, "innovation": 2, "recurrent": False},
+        {"in": node_id + 1, "out": node_id + 2, "weight": 0.75, "enabled": True, "innovation": 3, "recurrent": False},
+        {"in": node_id + 2, "out": node_id + 1, "weight": 0.2, "enabled": True, "innovation": 4, "recurrent": True},
+    ]
+    return LibraryEntry(
+        key=key,
+        entry_type=MODULE,
+        level=1,
+        io={"inputs": io_inputs, "output": {"signature": "CONTINUOUS|C", "width": 1}},
+        payload={"nodes": nodes, "connections": connections, "macros": []},
+        weights_frozen=True,
+        provenance={},
+    )
 
 
 def _render_chain() -> dict[str, LibraryEntry]:
@@ -297,6 +335,221 @@ def test_render_composition_network_writes_png(tmp_path: Path) -> None:
     comp = minimal_composition([("BINARY|K", 2)], "head", 1, InnovationTracker(_next_node_id=0), random.Random(0))
     image_path = render_composition_network(tmp_path, comp, title="composition")
     assert image_path.exists() and image_path.stat().st_size > 0
+
+
+def test_render_entry_density_dispatch_threshold_and_compositions(monkeypatch, tmp_path: Path) -> None:
+    import ardevo.rendering as rendering
+
+    density_calls: list[str] = []
+    detail_calls: list[str] = []
+
+    def density(path, entry):
+        density_calls.append(entry.key)
+        return rendering._LargeRenderMetadata(len(entry.payload["nodes"]), 0, 0, 0, "test")
+
+    def detail(entry, **_kwargs):
+        detail_calls.append(entry.key)
+        return rendering.RenderSpec()
+
+    monkeypatch.setattr(rendering, "_render_large_module_png", density)
+    monkeypatch.setattr(rendering, "build_entry_spec", detail)
+    monkeypatch.setattr(rendering, "_render_spec_png", lambda path, *_args, **_kwargs: path)
+
+    def bare(key: str, count: int, entry_type: str = MODULE) -> LibraryEntry:
+        return LibraryEntry(key, entry_type, 1, _IO, {"nodes": [{}] * count}, True, {})
+
+    rendering.render_entry(tmp_path / "at.png", bare("at", 1500))
+    rendering.render_entry(tmp_path / "over.png", bare("over", 1501))
+    rendering.render_entry(tmp_path / "custom-at.png", bare("custom-at", 7), node_budget=7)
+    rendering.render_entry(tmp_path / "custom-over.png", bare("custom-over", 8), node_budget=7)
+    rendering.render_entry(tmp_path / "composition.png", bare("composition", 2000, COMPOSITION))
+
+    assert density_calls == ["over", "custom-over"]
+    assert detail_calls == ["at", "custom-at", "composition"]
+
+
+def test_density_renderer_is_not_used_by_task_gallery_nested_or_overmind_paths(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
+    import ardevo.rendering as rendering
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("individual-entry density renderer was invoked")
+
+    monkeypatch.setattr(rendering, "_render_large_module_png", forbidden)
+    monkeypatch.setattr(rendering, "_render_spec_png", lambda path, *_args, **_kwargs: path)
+    rendering.render_network(tmp_path, solving_genome, title="task artifact")
+
+    composition = minimal_composition([("BINARY|K", 2)], "head", 1, InnovationTracker(_next_node_id=0), random.Random(0))
+    rendering.render_composition_network(tmp_path, composition, title="composition artifact")
+
+    wide_nodes = {node_id: NodeGene(node_id, NodeKind.INPUT, "identity") for node_id in range(1501)}
+    wide = Genome(nodes=wide_nodes, connections=[])
+    library = ModuleLibrary(tmp_path / "library")
+    wide_key = library.add(entry_type=MODULE, payload=genome_to_dict(wide), io={"inputs": [{"signature": "ANY", "width": 1501}], "output": _IO["output"]}, provenance={})
+    gallery = rendering.render_library_gallery(library, tmp_path / "gallery.png")
+    assert gallery.exists()
+
+    nested = rendering.build_genome_spec(_macro_host(wide_key), resolve=library_resolver(library))
+    assert any(box.opaque and wide_key in box.label for box in nested.containers)
+
+    view = rendering.OvermindView(
+        vertices=[rendering.OvermindVertex(key=wide_key, label="wide")],
+        input_signatures=["ANY:1501"],
+        output_signatures=["BINARY|K:1"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    overmind = rendering.build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    assert any(box.opaque and "wide" in box.label for box in overmind.containers)
+
+
+@pytest.mark.parametrize(
+    ("descriptors", "expected_panels"),
+    [
+        ([("CONTINUOUS|C,H,W", (2, 3, 4))], 2),
+        ([("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))], 4),
+        ([("CONTINUOUS|W,C,H", (4, 2, 3))], 2),
+        ([("CONTINUOUS|C,H,W", (1, 2, 3)), ("CONTINUOUS|E,H,W", (2, 2, 2))], 3),
+    ],
+)
+def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels) -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("spatial", descriptors)
+    first = _density_layout(entry)
+    second = _density_layout(entry)
+
+    assert first.mode == "semantic-spatial"
+    assert first.fallback_reason is None
+    assert len(first.panels) == expected_panels
+    assert first.positions == second.positions
+    assert all(0.0 <= coordinate <= 1.0 for position in first.positions.values() for coordinate in position)
+
+
+@pytest.mark.parametrize(
+    ("signature", "coordinate", "reason"),
+    [
+        ("CONTINUOUS|C", [0.0], "no unique H/W"),
+        ("CONTINUOUS|C,H,W", None, "do not match"),
+        ("CONTINUOUS|C,H,W", [0.0, "bad", 0.0], "not numeric"),
+    ],
+)
+def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coordinate, reason) -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("fallback", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    entry.io["inputs"][0]["signature"] = signature
+    for node in entry.payload["nodes"]:
+        if node["kind"] == "input":
+            node["coordinate"] = coordinate
+    layout = _density_layout(entry)
+
+    assert layout.mode == "packed-grid"
+    assert reason in (layout.fallback_reason or "")
+    assert len({layout.positions[node_id] for node_id in layout.input_ids}) == len(layout.input_ids)
+
+
+def test_density_duplicate_coordinates_use_packed_grid() -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("duplicate", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    entry.payload["nodes"][1]["coordinate"] = entry.payload["nodes"][0]["coordinate"]
+    layout = _density_layout(entry)
+
+    assert layout.mode == "packed-grid"
+    assert "duplicate coordinates" in (layout.fallback_reason or "")
+
+
+def test_density_rasterizes_every_edge_category_and_counts_all_enabled() -> None:
+    import datashader as ds
+    import numpy as np
+    import pandas as pd
+
+    from ardevo.rendering import _density_layout, _macro_implied_payload_edges, _rasterized_edge_layers
+
+    entry = _spatial_entry("layers", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    hidden_id = next(node["id"] for node in entry.payload["nodes"] if node["kind"] == "hidden")
+    entry.payload["macros"] = [{"ref": "library:m1_inner", "inputs": [2], "outputs": [hidden_id], "innovation": 9}]
+    layout = _density_layout(entry)
+    canvas = ds.Canvas(plot_width=64, plot_height=48, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
+    layers, enabled, rendered = _rasterized_edge_layers(
+        canvas,
+        layout.positions,
+        entry.payload["connections"],
+        _macro_implied_payload_edges(entry.payload),
+        ds,
+        pd,
+        np,
+    )
+
+    assert enabled == rendered == 5
+    assert all(layers[name] is not None for name in ("positive", "negative", "recurrent", "macro"))
+    assert all(float(np.asarray(layers[name].data).sum()) > 0 for name in layers)
+
+
+def test_density_edge_chunk_boundary_includes_every_enabled_edge() -> None:
+    import datashader as ds
+    import numpy as np
+    import pandas as pd
+
+    import ardevo.rendering as rendering
+
+    positions = {0: (0.1, 0.1), 1: (0.9, 0.9)}
+    connection = {"in": 0, "out": 1, "weight": 1.0, "enabled": True, "recurrent": False}
+    connections = [connection] * (rendering._DENSITY_EDGE_CHUNK + 1)
+    canvas = ds.Canvas(plot_width=16, plot_height=16, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
+    layers, enabled, rendered = rendering._rasterized_edge_layers(canvas, positions, connections, [], ds, pd, np)
+
+    assert enabled == rendered == rendering._DENSITY_EDGE_CHUNK + 1
+    assert layers["positive"] is not None
+
+
+def test_large_density_png_is_fixed_size_nonblank_and_deterministic(tmp_path: Path) -> None:
+    import matplotlib.image as mpimg
+    import numpy as np
+
+    from ardevo.rendering import _render_large_module_density
+
+    entry = _spatial_entry("portrait", [("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))])
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    first = _render_large_module_density(first_path, entry)
+    _render_large_module_density(second_path, entry)
+    first_pixels = mpimg.imread(first_path)
+    second_pixels = mpimg.imread(second_path)
+
+    assert first.canvas_width == 2400 and first.canvas_height == 1600
+    assert first.enabled_edge_count == first.rendered_edge_count == 5
+    assert first.isolated_input_count == 46
+    assert first.semantic_layout_mode == "semantic-spatial"
+    assert first_pixels.shape[:2] == (1600, 2400)
+    assert first_pixels.std() > 0.01
+    assert np.array_equal(first_pixels, second_pixels)
+
+
+def test_large_density_failure_atomically_replaces_with_opaque_summary(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
+    import ardevo.rendering as rendering
+
+    target = tmp_path / "portrait.png"
+    target.write_bytes(b"old portrait")
+    entry = _entry("wide", genome_to_dict(solving_genome))
+
+    def fail(path: Path, _entry: LibraryEntry):
+        path.write_bytes(b"partial density image")
+        raise ImportError("datashader unavailable")
+
+    def summary(path: Path, *_args, **_kwargs):
+        path.write_bytes(b"opaque summary")
+        return path
+
+    monkeypatch.setattr(rendering, "_render_large_module_density", fail)
+    monkeypatch.setattr(rendering, "_render_spec_png", summary)
+    metadata = rendering._render_large_module_png(target, entry)
+
+    assert target.read_bytes() == b"opaque summary"
+    assert metadata.semantic_layout_mode == "opaque-fallback"
+    assert "ImportError: datashader unavailable" == metadata.fallback_reason
+    assert not list(tmp_path.glob(".*.tmp.png"))
 
 
 def test_render_entry_writes_png_for_all_fixture_entries(tmp_path: Path) -> None:

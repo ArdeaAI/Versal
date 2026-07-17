@@ -18,11 +18,15 @@ reuse the exact same pipeline per cell. matplotlib is imported lazily inside the
 functions (and forced onto the headless Agg backend) per project convention.
 """
 
+import heapq
 import math
+import os
+import tempfile
 import textwrap
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from ardevo.evolution.composition import CompNodeKind, CompositionGenome, comp_from_dict, comp_topological_order
 from ardevo.evolution.genome import Genome, NodeKind, genome_from_dict, macro_implied_edges, make_acyclic, topological_order
@@ -111,6 +115,9 @@ _NETWORK_ANCHOR_INSET = 0.3
 _MAX_COLUMN_NODES = 64  # a layer taller than this wraps into a near-square block of sub-columns
 _MAX_STRAIGHT_EDGES = 60_000  # LineCollection cap; beyond it edges stride-subsample with a note
 _MAX_CURVED_EDGES = 2_000  # FancyArrowPatch is one artist per edge, so its cap is much lower
+_DENSITY_WIDTH = 2400
+_DENSITY_HEIGHT = 1600
+_DENSITY_EDGE_CHUNK = 250_000
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -175,6 +182,39 @@ class RenderSpec:
     @property
     def node_count(self) -> int:
         return len(self.nodes)
+
+
+@dataclass(slots=True)
+class _LargeRenderMetadata:
+    """Honest accounting for one aggregate portrait (kept internal; `render_entry` still returns a path)."""
+
+    node_count: int
+    enabled_edge_count: int
+    isolated_input_count: int
+    rendered_edge_count: int
+    semantic_layout_mode: str
+    canvas_width: int = _DENSITY_WIDTH
+    canvas_height: int = _DENSITY_HEIGHT
+    fallback_reason: str | None = None
+
+
+@dataclass(slots=True)
+class _DensityPanel:
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    label: str
+
+
+@dataclass(slots=True)
+class _DensityLayout:
+    positions: dict[int, tuple[float, float]]
+    input_ids: list[int]
+    computed_ids: list[int]
+    panels: list[_DensityPanel]
+    mode: str
+    fallback_reason: str | None
 
 
 def library_resolver(library: ModuleLibrary) -> ResolveFn:
@@ -826,6 +866,551 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int =
     return out_path
 
 
+# --- large individual module portraits ------------------------------------------------------------
+
+
+def _signature_axes(signature: object) -> tuple[str, ...]:
+    if not isinstance(signature, str) or "|" not in signature:
+        return ()
+    _value_type, encoded_axes = signature.split("|", 1)
+    return tuple(axis.strip() for axis in encoded_axes.split(",") if axis.strip())
+
+
+def _format_axis_value(value: float) -> str:
+    return str(int(value)) if value.is_integer() else f"{value:g}"
+
+
+def _packed_bank_positions(
+    bank: list[dict[str, Any]],
+    positions: dict[int, tuple[float, float]],
+    *,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> None:
+    if not bank:
+        return
+    aspect = max((x1 - x0) / max(y1 - y0, 1e-6), 0.1)
+    columns = max(1, math.ceil(math.sqrt(len(bank) * aspect)))
+    rows = math.ceil(len(bank) / columns)
+    x_span = max(x1 - x0, 1e-6)
+    y_span = max(y1 - y0, 1e-6)
+    for index, node in enumerate(bank):
+        row, column = divmod(index, columns)
+        x = x0 + (column + 0.5) * x_span / columns
+        y = y1 - (row + 0.5) * y_span / rows
+        positions[int(node["id"])] = (x, y)
+
+
+def _semantic_bank_positions(
+    bank: list[dict[str, Any]],
+    axes: tuple[str, ...],
+    signature: str,
+    positions: dict[int, tuple[float, float]],
+    panels: list[_DensityPanel],
+    *,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> str | None:
+    if "H" not in axes or "W" not in axes or axes.count("H") != 1 or axes.count("W") != 1:
+        return f"{signature or '(unknown)'} has no unique H/W axes"
+    if not bank:
+        return None
+
+    h_index, w_index = axes.index("H"), axes.index("W")
+    coordinate_values: list[set[float]] = [set() for _ in axes]
+    for node in bank:
+        raw = node.get("coordinate")
+        if not isinstance(raw, (list, tuple)) or len(raw) != len(axes):
+            return f"{signature} coordinates do not match its axes"
+        try:
+            coordinate = tuple(float(value) for value in raw)
+        except (TypeError, ValueError):
+            return f"{signature} coordinates are not numeric"
+        if not all(math.isfinite(value) for value in coordinate):
+            return f"{signature} coordinates are not finite"
+        for index, value in enumerate(coordinate):
+            coordinate_values[index].add(value)
+
+    # Detect malformed duplicates without retaining another set of large coordinate tuples. Axis
+    # ranks turn each tuple into one integer; sparse but valid spatial banks remain valid.
+    sorted_values = [sorted(values) for values in coordinate_values]
+    ranks = [{value: rank for rank, value in enumerate(values)} for values in sorted_values]
+    multipliers: list[int] = [1] * len(axes)
+    for index in range(len(axes) - 2, -1, -1):
+        multipliers[index] = multipliers[index + 1] * max(len(sorted_values[index + 1]), 1)
+    flattened_ids: set[int] = set()
+    combinations_set: set[tuple[float, ...]] = set()
+    panel_axis_indices = tuple(index for index in range(len(axes)) if index not in (h_index, w_index))
+    for node in bank:
+        coordinate = tuple(float(value) for value in node["coordinate"])
+        flattened_ids.add(sum(ranks[index][value] * multipliers[index] for index, value in enumerate(coordinate)))
+        combinations_set.add(tuple(coordinate[index] for index in panel_axis_indices))
+    if len(flattened_ids) != len(bank):
+        return f"{signature} contains duplicate coordinates"
+
+    combinations = sorted(combinations_set) or [()]
+    columns = max(1, math.ceil(math.sqrt(len(combinations))))
+    rows = math.ceil(len(combinations) / columns)
+    horizontal_gap = 0.008
+    vertical_gap = 0.018
+    header = min(0.025, max((y1 - y0) * 0.12, 0.012))
+    panel_width = (x1 - x0 - horizontal_gap * (columns - 1)) / columns
+    panel_height = (y1 - y0 - header - vertical_gap * (rows - 1)) / rows
+    panel_rects: dict[tuple[float, ...], tuple[float, float, float, float]] = {}
+    for index, combination in enumerate(combinations):
+        row, column = divmod(index, columns)
+        panel_x0 = x0 + column * (panel_width + horizontal_gap)
+        panel_y1 = y1 - header - row * (panel_height + vertical_gap)
+        panel_y0 = panel_y1 - panel_height
+        labels = [f"{axes[axis_index]}={_format_axis_value(value)}" for axis_index, value in zip(panel_axis_indices, combination)]
+        label = " · ".join(labels) if labels else "H×W"
+        panels.append(_DensityPanel(panel_x0, panel_y0, panel_x0 + panel_width, panel_y1, label))
+        panel_rects[combination] = (panel_x0, panel_y0, panel_x0 + panel_width, panel_y1)
+
+    h_values, w_values = sorted_values[h_index], sorted_values[w_index]
+    h_min, h_span = h_values[0], max(h_values[-1] - h_values[0], 1.0)
+    w_min, w_span = w_values[0], max(w_values[-1] - w_values[0], 1.0)
+    for node in bank:
+        coordinate = tuple(float(value) for value in node["coordinate"])
+        combination = tuple(coordinate[index] for index in panel_axis_indices)
+        panel_x0, panel_y0, panel_x1, panel_y1 = panel_rects[combination]
+        inset_x = min((panel_x1 - panel_x0) * 0.04, 0.006)
+        inset_y = min((panel_y1 - panel_y0) * 0.04, 0.006)
+        x = panel_x0 + inset_x + (coordinate[w_index] - w_min) / w_span * max(panel_x1 - panel_x0 - 2 * inset_x, 1e-6)
+        # Raw row zero belongs at the visual top, regardless of where H occurs in the signature.
+        y = panel_y1 - inset_y - (coordinate[h_index] - h_min) / h_span * max(panel_y1 - panel_y0 - 2 * inset_y, 1e-6)
+        positions[int(node["id"])] = (x, y)
+    return None
+
+
+def _macro_implied_payload_edges(payload: dict[str, Any]) -> Iterator[tuple[int, int]]:
+    for macro in payload.get("macros", []):
+        inputs = [int(node_id) for node_id in macro.get("inputs", [])]
+        outputs = [int(node_id) for node_id in macro.get("outputs", [])]
+        for source in inputs:
+            for target in outputs:
+                yield source, target
+
+
+def _computed_node_positions(
+    nodes: list[dict[str, Any]],
+    connections: list[dict[str, Any]],
+    macro_edges: Iterable[tuple[int, int]],
+    positions: dict[int, tuple[float, float]],
+) -> tuple[list[int], str | None]:
+    computed = sorted((node for node in nodes if node.get("kind") != NodeKind.INPUT.value), key=lambda node: int(node["id"]))
+    computed_ids = [int(node["id"]) for node in computed]
+    computed_set = set(computed_ids)
+    adjacency: dict[int, list[int]] = {}
+    incoming = {node_id: 0 for node_id in computed_ids}
+
+    def add_candidate(source: int, target: int) -> None:
+        if source in computed_set and target in computed_set:
+            adjacency.setdefault(source, []).append(target)
+            incoming[target] += 1
+
+    for connection in connections:
+        if bool(connection.get("enabled", False)) and not bool(connection.get("recurrent", False)):
+            add_candidate(int(connection["in"]), int(connection["out"]))
+    for source, target in macro_edges:
+        add_candidate(source, target)
+
+    ready = [node_id for node_id, count in incoming.items() if count == 0]
+    heapq.heapify(ready)
+    layer = {node_id: 1 for node_id in ready}
+    visited: list[int] = []
+    while ready:
+        source = heapq.heappop(ready)
+        visited.append(source)
+        for target in sorted(adjacency.get(source, [])):
+            layer[target] = max(layer.get(target, 1), layer.get(source, 1) + 1)
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                heapq.heappush(ready, target)
+    fallback_reason = None
+    if len(visited) != len(computed_ids):
+        fallback_reason = "forward computed-node cycle; cyclic nodes packed in a final column"
+        last_layer = max(layer.values(), default=0) + 1
+        for node_id in computed_ids:
+            layer.setdefault(node_id, last_layer)
+
+    grouped: dict[int, list[int]] = {}
+    for node_id in computed_ids:
+        grouped.setdefault(layer.get(node_id, 1), []).append(node_id)
+    ordered_layers = sorted(grouped)
+    slot_width = 0.22 / max(len(ordered_layers), 1)
+    for column_index, layer_id in enumerate(ordered_layers):
+        group = grouped[layer_id]
+        sub_columns = max(1, math.ceil(len(group) / 64))
+        rows = math.ceil(len(group) / sub_columns)
+        slot_x0 = 0.75 + column_index * slot_width
+        for index, node_id in enumerate(group):
+            sub_column, row = divmod(index, rows)
+            x = slot_x0 + (sub_column + 0.5) * slot_width / sub_columns
+            y = 0.87 - (row + 0.5) * 0.72 / rows
+            positions[node_id] = (x, y)
+    return computed_ids, fallback_reason
+
+
+def _density_layout(entry: LibraryEntry) -> _DensityLayout:
+    raw_nodes_value = entry.payload.get("nodes", [])
+    raw_connections_value = entry.payload.get("connections", [])
+    if not isinstance(raw_nodes_value, list) or not isinstance(raw_connections_value, list):
+        raise ValueError("module payload nodes/connections must be lists")
+    raw_nodes = cast(list[dict[str, Any]], raw_nodes_value)
+    raw_connections = cast(list[dict[str, Any]], raw_connections_value)
+    nodes = sorted(raw_nodes, key=lambda node: int(node["id"]))
+    seen_node_ids: set[int] = set()
+    for node in nodes:
+        node_id = int(node["id"])
+        if node_id in seen_node_ids:
+            raise ValueError("module payload contains duplicate node ids")
+        seen_node_ids.add(node_id)
+    del seen_node_ids
+    input_nodes = [node for node in nodes if node.get("kind") == NodeKind.INPUT.value]
+    positions: dict[int, tuple[float, float]] = {}
+    panels: list[_DensityPanel] = []
+    fallback_reasons: list[str] = []
+
+    descriptors = entry.io.get("inputs", []) if isinstance(entry.io, dict) else []
+    if not isinstance(descriptors, list) or not descriptors:
+        descriptors = [{"signature": "(untyped)", "width": len(input_nodes)}]
+    banks: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    cursor = 0
+    for descriptor in descriptors:
+        try:
+            width = max(0, int(descriptor.get("width", 0)))
+        except (AttributeError, TypeError, ValueError):
+            width = 0
+        bank = input_nodes[cursor : cursor + width]
+        banks.append((descriptor if isinstance(descriptor, dict) else {}, bank))
+        cursor += width
+    if cursor != len(input_nodes):
+        fallback_reasons.append(f"I/O widths describe {cursor:,} of {len(input_nodes):,} inputs")
+        if cursor < len(input_nodes):
+            banks.append(({"signature": "(unmapped)", "width": len(input_nodes) - cursor}, input_nodes[cursor:]))
+
+    spatial_banks = 0
+    packed_banks = 0
+    bank_count = max(len(banks), 1)
+    available_height = 0.74
+    bank_gap = min(0.025, available_height / max(bank_count * 8, 1))
+    bank_height = (available_height - bank_gap * (bank_count - 1)) / bank_count
+    for bank_index, (descriptor, bank) in enumerate(banks):
+        bank_y1 = 0.90 - bank_index * (bank_height + bank_gap)
+        bank_y0 = bank_y1 - bank_height
+        signature = str(descriptor.get("signature", "(unknown)"))
+        axes = _signature_axes(signature)
+        reason = _semantic_bank_positions(bank, axes, signature, positions, panels, x0=0.04, y0=bank_y0, x1=0.69, y1=bank_y1)
+        if reason is None and "H" in axes and "W" in axes:
+            spatial_banks += 1
+        else:
+            packed_banks += 1
+            if reason is not None:
+                fallback_reasons.append(reason)
+            _packed_bank_positions(bank, positions, x0=0.04, y0=bank_y0, x1=0.69, y1=bank_y1 - 0.02)
+            panels.append(_DensityPanel(0.04, bank_y0, 0.69, bank_y1 - 0.02, signature))
+
+    macro_edges = _macro_implied_payload_edges(entry.payload)
+    computed_ids, computed_reason = _computed_node_positions(nodes, raw_connections, macro_edges, positions)
+    if computed_reason:
+        fallback_reasons.append(computed_reason)
+    mode = "semantic-spatial" if spatial_banks and not packed_banks else ("mixed semantic/packed" if spatial_banks else "packed-grid")
+    return _DensityLayout(
+        positions=positions,
+        input_ids=[int(node["id"]) for node in input_nodes],
+        computed_ids=computed_ids,
+        panels=panels,
+        mode=mode,
+        fallback_reason="; ".join(fallback_reasons) or None,
+    )
+
+
+def _accumulate_density_lines(canvas: Any, frame: Any, datashader: Any, numpy: Any, current: Any | None) -> Any:
+    aggregate = canvas.line(frame, x=["x0", "x1"], y=["y0", "y1"], axis=1, agg=datashader.sum("weight"))
+    values = numpy.nan_to_num(numpy.asarray(aggregate.data), nan=0.0).astype("float32", copy=False)
+    if current is None:
+        return aggregate.copy(data=values)
+    current.data += values
+    return current
+
+
+def _rasterized_edge_layers(
+    canvas: Any,
+    positions: dict[int, tuple[float, float]],
+    connections: list[dict[str, Any]],
+    macro_edges: Iterable[tuple[int, int]],
+    datashader: Any,
+    pandas: Any,
+    numpy: Any,
+) -> tuple[dict[str, Any], int, int]:
+    layers: dict[str, Any] = {"positive": None, "negative": None, "recurrent": None, "macro": None}
+    enabled_count = 0
+    rendered_count = 0
+
+    def consume(rows: list[tuple[float, float, float, float, float, str]]) -> None:
+        grouped: dict[str, list[tuple[float, float, float, float, float]]] = {}
+        for x0, y0, x1, y1, weight, category in rows:
+            grouped.setdefault(category, []).append((x0, y0, x1, y1, weight))
+        for category, category_rows in grouped.items():
+            frame = pandas.DataFrame(category_rows, columns=["x0", "y0", "x1", "y1", "weight"])
+            layers[category] = _accumulate_density_lines(canvas, frame, datashader, numpy, layers[category])
+
+    chunk: list[tuple[float, float, float, float, float, str]] = []
+    for connection in connections:
+        if not bool(connection.get("enabled", False)):
+            continue
+        enabled_count += 1
+        source_id, target_id = int(connection["in"]), int(connection["out"])
+        if source_id not in positions or target_id not in positions:
+            raise ValueError(f"enabled edge {source_id}->{target_id} names a missing node")
+        source, target = positions[source_id], positions[target_id]
+        weight = float(connection.get("weight", 0.0))
+        if not math.isfinite(weight):
+            raise ValueError(f"enabled edge {source_id}->{target_id} has a non-finite weight")
+        category = "recurrent" if bool(connection.get("recurrent", False)) else ("positive" if weight >= 0 else "negative")
+        chunk.append((source[0], source[1], target[0], target[1], abs(weight), category))
+        rendered_count += 1
+        if len(chunk) == _DENSITY_EDGE_CHUNK:
+            consume(chunk)
+            chunk = []
+    if chunk:
+        consume(chunk)
+
+    macro_chunk: list[tuple[float, float, float, float, float, str]] = []
+    for source_id, target_id in macro_edges:
+        if source_id not in positions or target_id not in positions:
+            raise ValueError(f"macro-implied edge {source_id}->{target_id} names a missing node")
+        source, target = positions[source_id], positions[target_id]
+        macro_chunk.append((source[0], source[1], target[0], target[1], 1.0, "macro"))
+        if len(macro_chunk) == _DENSITY_EDGE_CHUNK:
+            consume(macro_chunk)
+            macro_chunk = []
+    if macro_chunk:
+        consume(macro_chunk)
+    return layers, enabled_count, rendered_count
+
+
+def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeRenderMetadata:
+    """Render one oversized module directly from its serialized payload, with no Genome or graph construction."""
+    # Deliberately lazy: normal startup, small portraits, galleries, task renders, and overmind cards
+    # never import Datashader (or its pandas/xarray/numba dependency chain).
+    import datashader as ds
+    import matplotlib
+    import numpy as np
+    import pandas as pd
+    from datashader import transfer_functions as tf
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    layout = _density_layout(entry)
+    connections = entry.payload.get("connections", [])
+    if not isinstance(connections, list):
+        raise ValueError("module payload connections must be a list")
+    macro_edges = _macro_implied_payload_edges(entry.payload)
+    canvas = ds.Canvas(plot_width=_DENSITY_WIDTH, plot_height=_DENSITY_HEIGHT, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
+
+    input_id_set = set(layout.input_ids)
+    outgoing_strength: dict[int, float] = {}
+    active_input_ids: set[int] = set()
+    for connection in connections:
+        if not bool(connection.get("enabled", False)):
+            continue
+        source_id = int(connection["in"])
+        if source_id in input_id_set:
+            weight = float(connection.get("weight", 0.0))
+            if not math.isfinite(weight):
+                raise ValueError(f"input edge from {source_id} has a non-finite weight")
+            outgoing_strength[source_id] = outgoing_strength.get(source_id, 0.0) + abs(weight)
+            active_input_ids.add(source_id)
+    isolated_count = len(layout.input_ids) - len(active_input_ids)
+    del active_input_ids, input_id_set
+
+    input_frame = pd.DataFrame(
+        {
+            "x": np.fromiter((layout.positions[node_id][0] for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
+            "y": np.fromiter((layout.positions[node_id][1] for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
+            "strength": np.fromiter((outgoing_strength.get(node_id, 0.0) for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
+        }
+    )
+    del outgoing_strength
+    images: list[Any] = []
+    edge_layers, enabled_count, rendered_count = _rasterized_edge_layers(canvas, layout.positions, connections, macro_edges, ds, pd, np)
+    edge_colors = {
+        "positive": THEME["edge_glue"],
+        "negative": THEME["edge_exit"],
+        "recurrent": THEME["edge_recurrent"],
+        "macro": THEME["edge_macro"],
+    }
+    for category in ("positive", "negative", "recurrent", "macro"):
+        aggregate = edge_layers[category]
+        if aggregate is not None and bool(np.any(aggregate.data > 0)):
+            visible = aggregate.where(aggregate > 0)
+            images.append(tf.shade(visible, cmap=[edge_colors[category], edge_colors[category]], how="log", alpha=185, min_alpha=28))
+    del edge_layers
+
+    if layout.input_ids:
+        base = canvas.points(input_frame, "x", "y", agg=ds.count())
+        active = canvas.points(input_frame, "x", "y", agg=ds.sum("strength"))
+        images.append(tf.spread(tf.shade(base, cmap=[THEME["node_input"], THEME["node_input"]], how="linear", alpha=105, min_alpha=105), px=1))
+        if bool(np.any(np.nan_to_num(active.data, nan=0.0) > 0)):
+            images.append(tf.spread(tf.shade(active.where(active > 0), cmap=["#315f9e", THEME["edge_glue"]], how="log", alpha=245, min_alpha=75), px=1))
+        del active, base, input_frame
+
+    if images:
+        raster = np.asarray(tf.stack(*images, how="over").to_pil(origin="upper"))
+    else:
+        raster = np.zeros((_DENSITY_HEIGHT, _DENSITY_WIDTH, 4), dtype=np.uint8)
+    del images
+
+    figure = plt.figure(figsize=(_DENSITY_WIDTH / 200, _DENSITY_HEIGHT / 200), dpi=200)
+    figure.patch.set_facecolor(THEME["background"])
+    axis = figure.add_axes((0.0, 0.0, 1.0, 1.0))
+    axis.set_facecolor(THEME["background"])
+    axis.imshow(raster, extent=(0.0, 1.0, 0.0, 1.0), origin="lower", interpolation="nearest", zorder=1)
+    axis.set_aspect("auto")
+    for panel in layout.panels:
+        axis.add_patch(
+            Rectangle((panel.x0, panel.y0), panel.x1 - panel.x0, panel.y1 - panel.y0, fill=False, edgecolor=THEME["container_edge"], linewidth=0.55, alpha=0.8, zorder=2)
+        )
+        axis.text((panel.x0 + panel.x1) / 2, panel.y1 + 0.003, panel.label, color=THEME["label"], fontsize=5.5, ha="center", va="bottom", zorder=4)
+
+    raw_nodes = entry.payload.get("nodes", [])
+    computed_set = set(layout.computed_ids)
+    nodes_by_id = {int(node["id"]): node for node in raw_nodes if int(node["id"]) in computed_set}
+    macro_outputs = {int(node_id) for macro in entry.payload.get("macros", []) for node_id in macro.get("outputs", [])}
+    marker_groups: dict[tuple[str, str], list[int]] = {}
+    for node_id in layout.computed_ids:
+        node = nodes_by_id[node_id]
+        kind = str(node.get("kind", "hidden"))
+        if node_id in macro_outputs:
+            marker, color = "h", THEME["node_module"]
+        elif kind == NodeKind.BIAS.value:
+            marker, color = "s", THEME["node_bias"]
+        elif kind == NodeKind.OUTPUT.value:
+            marker, color = "s", THEME["node_output"]
+        else:
+            marker = "D" if node.get("aggregation", "sum") == "product" else "o"
+            color = "#73d055"
+        marker_groups.setdefault((marker, color), []).append(node_id)
+    for (marker, color), node_ids in marker_groups.items():
+        axis.scatter(
+            [layout.positions[node_id][0] for node_id in node_ids],
+            [layout.positions[node_id][1] for node_id in node_ids],
+            s=22 if len(layout.computed_ids) <= 64 else 12,
+            c=color,
+            marker=marker,
+            linewidths=0.35,
+            edgecolors=THEME["background"],
+            zorder=5,
+        )
+    if len(layout.computed_ids) <= 64:
+        for node_id in layout.computed_ids:
+            x, y = layout.positions[node_id]
+            axis.text(x + 0.004, y, str(node_id), color=THEME["label"], fontsize=5, ha="left", va="center", zorder=6)
+
+    kind_counts: dict[str, int] = {}
+    for node in raw_nodes:
+        kind = str(node.get("kind", "?"))
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+    macro_refs = sorted({str(macro.get("ref", "?")) for macro in entry.payload.get("macros", [])})
+    inputs = " + ".join(f"{item.get('signature', '?')}:{item.get('width', '?')}" for item in entry.io.get("inputs", []))
+    output = entry.io.get("output", {})
+    output_label = f"{output.get('signature', '?')}:{output.get('width', '?')}"
+    axis.text(0.025, 0.975, f"{entry.key}  L{entry.level} module", color=THEME["title"], fontsize=15, fontweight="bold", ha="left", va="top", zorder=7)
+    axis.text(0.025, 0.948, f"{inputs}  →  {output_label}", color=THEME["label"], fontsize=8, ha="left", va="top", zorder=7)
+    axis.text(0.735, 0.975, "computed topology", color=THEME["title"], fontsize=10, ha="left", va="top", zorder=7)
+    count_text = " · ".join(f"{kind_counts.get(kind, 0):,} {kind}" for kind in ("input", "bias", "hidden", "output") if kind_counts.get(kind, 0))
+    axis.text(0.735, 0.945, count_text, color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
+    axis.text(0.735, 0.925, f"{enabled_count:,} enabled edges · {isolated_count:,} isolated inputs", color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
+    axis.text(0.735, 0.905, f"renderer: Datashader · {layout.mode} · {_DENSITY_WIDTH}×{_DENSITY_HEIGHT}", color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
+    if macro_refs:
+        refs = ", ".join(ref.removeprefix("library:") for ref in macro_refs)
+        axis.text(0.735, 0.885, f"macro refs (not expanded): {refs}", color=THEME["node_module"], fontsize=6.5, ha="left", va="top", wrap=True, zorder=7)
+    if layout.fallback_reason:
+        axis.text(0.025, 0.115, f"layout note: {layout.fallback_reason}", color=THEME["label"], fontsize=6, ha="left", va="top", zorder=7)
+
+    legend = (
+        (THEME["edge_glue"], "positive forward density"),
+        (THEME["edge_exit"], "negative forward density"),
+        (THEME["edge_recurrent"], "recurrent density"),
+        (THEME["edge_macro"], "macro-implied flow"),
+        (THEME["node_input"], "input location / outgoing |weight|"),
+    )
+    for index, (color, label) in enumerate(legend):
+        x = 0.04 + index * 0.185
+        axis.plot((x, x + 0.022), (0.075, 0.075), color=color, linewidth=2.2, zorder=7)
+        axis.text(x + 0.027, 0.075, label, color=THEME["label"], fontsize=6, ha="left", va="center", zorder=7)
+    axis.text(
+        0.5,
+        0.025,
+        f"Aggregate density portrait · all {rendered_count:,} enabled edges included · intensity accumulates absolute weight",
+        color=THEME["label"],
+        fontsize=7,
+        ha="center",
+        va="center",
+        zorder=7,
+    )
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(0.0, 1.0)
+    axis.axis("off")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(out_path, dpi=200, facecolor=figure.get_facecolor())
+    plt.close(figure)
+    return _LargeRenderMetadata(
+        node_count=len(raw_nodes),
+        enabled_edge_count=enabled_count,
+        isolated_input_count=isolated_count,
+        rendered_edge_count=rendered_count,
+        semantic_layout_mode=layout.mode,
+        fallback_reason=layout.fallback_reason,
+    )
+
+
+def _temporary_sibling(out_path: Path) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{out_path.stem}-", suffix=".tmp.png", dir=out_path.parent)
+    os.close(descriptor)
+    return Path(name)
+
+
+def _render_large_module_png(out_path: Path, entry: LibraryEntry) -> _LargeRenderMetadata:
+    temporary = _temporary_sibling(out_path)
+    try:
+        metadata = _render_large_module_density(temporary, entry)
+        temporary.replace(out_path)
+        return metadata
+    except Exception as error:
+        temporary.unlink(missing_ok=True)
+        from ardevo.utils.logging import Logger
+
+        reason = f"{type(error).__name__}: {error}"
+        Logger.get_logger().warning("large module density render failed for %s: %s", entry.key, reason)
+        fallback = _temporary_sibling(out_path)
+        try:
+            spec = build_entry_spec(entry, node_budget=0)
+            _render_spec_png(fallback, spec, f"{entry.key}  L{entry.level} {entry.entry_type}\nDatashader portrait unavailable: {reason}")
+            fallback.replace(out_path)
+        finally:
+            fallback.unlink(missing_ok=True)
+        connections = entry.payload.get("connections", [])
+        enabled_count = sum(bool(connection.get("enabled", False)) for connection in connections) if isinstance(connections, list) else 0
+        return _LargeRenderMetadata(
+            node_count=len(entry.payload.get("nodes", [])),
+            enabled_edge_count=enabled_count,
+            isolated_input_count=0,
+            rendered_edge_count=0,
+            semantic_layout_mode="opaque-fallback",
+            fallback_reason=reason,
+        )
+
+
 def render_network(
     directory: Path,
     genome: Genome,
@@ -860,6 +1445,9 @@ def render_entry(
     node_budget: int = DEFAULT_NODE_BUDGET,
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> Path:
+    if entry.entry_type == MODULE and len(entry.payload.get("nodes", [])) > node_budget:
+        _render_large_module_png(out_path, entry)
+        return out_path
     resolve = library_resolver(library) if library is not None else None
     spec = build_entry_spec(entry, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
     return _render_spec_png(out_path, spec, f"{entry.key}  L{entry.level} {entry.entry_type}")
