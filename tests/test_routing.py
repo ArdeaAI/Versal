@@ -649,13 +649,21 @@ def test_pathways_prefer_observed_traffic_and_fall_back_to_prior(tmp_path: Path,
     service.sync()
     names = list(service.net._vertex_order)
 
-    # No traffic yet: the edge_bias prior is the fallback (positive entries only, normalized).
+    # No traffic yet: the edge_bias prior is the fallback. Its diagonal is deliberately omitted;
+    # a learned self-prior is not yet evidence of recurrent routing.
+    with torch.no_grad():
+        for parameter in (*service.net.vertex_edge_out.values(), *service.net.vertex_edge_in.values()):
+            parameter.zero_()
+        service.net.vertex_edge_out[names[0]][0] = 2.0
+        service.net.vertex_edge_in[names[0]][0] = 2.0
+        service.net.vertex_edge_in[names[1]][0] = 1.0
     prior = service._pathways(names)
-    assert all(0.0 <= weight <= 1.0 for _s, _t, weight in prior)
+    assert prior == [(0, 1, 1.0)]
 
     service.transition_totals = {names[0]: {names[1]: 4.0, names[0]: 1.0}}
     observed = service._pathways(names)
     assert (0, 1, 1.0) in observed  # the strongest observed edge normalizes to 1.0
+    assert (0, 0, 0.25) in observed  # observed self-transition is real recurrent expert reuse
     assert all(weight <= 1.0 for _s, _t, weight in observed)
 
 

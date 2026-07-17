@@ -1,4 +1,4 @@
-# ArdEVO
+# Versal (Versatile Evolution of Reusable Structure for Adaptive Learning)
 
 **Toward task-general intelligence with persistent, compounding neuroevolution.**
 

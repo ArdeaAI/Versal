@@ -795,6 +795,11 @@ class RouterService:
                     if source not in self.net.vertex_edge_out:
                         continue
                     for target in ordered_names:
+                        # A diagonal prior is not evidence of recurrent routing. It otherwise draws
+                        # a card-local anchor/output line merely because one expert owns both the
+                        # entry and exit traffic. Observed diagonal transitions above remain intact.
+                        if source == target:
+                            continue
                         if target not in self.net.vertex_edge_in:
                             continue
                         bias = float(self.net.vertex_edge_out[source] @ self.net.vertex_edge_in[target])

@@ -153,6 +153,17 @@ def test_budget_falls_back_opaque(tmp_path: Path, solving_genome: Genome) -> Non
     assert len(spec.containers) == 1 and spec.containers[0].opaque
 
 
+def test_root_budget_fallback_is_a_labeled_opaque_summary(solving_genome: Genome) -> None:
+    entry = _entry("wide", genome_to_dict(solving_genome))
+    spec = build_entry_spec(entry, node_budget=1)
+
+    assert spec.node_count == 0
+    assert len(spec.containers) == 1 and spec.containers[0].opaque
+    assert "wide  L1" in spec.containers[0].label
+    assert f"{len(solving_genome.nodes):,} nodes" in spec.containers[0].label
+    assert f"{len(solving_genome.connections):,} edges" in spec.containers[0].label
+
+
 def test_garbage_payload_is_opaque() -> None:
     spec = build_genome_spec(_macro_host("bad"), resolve=lambda key: _entry("bad", {"nodes": "garbage"}))
     assert len(spec.containers) == 1 and spec.containers[0].opaque
@@ -527,6 +538,7 @@ def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_
     spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
     wide_boxes = [box for box in spec.containers if "wide stone" in (box.label or "")]
     assert wide_boxes and all(box.opaque for box in wide_boxes)  # capped: footprint, not a 784-node bar
+    assert "785 nodes · 784 edges" in wide_boxes[0].label
     small_boxes = [box for box in spec.containers if (box.label or "").startswith("small")]
     assert small_boxes and not all(box.opaque for box in small_boxes)  # small experts keep full detail
     assert max(spec.width, spec.height) / max(min(spec.width, spec.height), 1e-6) < 6.0  # sane aspect

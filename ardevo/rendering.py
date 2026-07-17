@@ -296,6 +296,13 @@ def _opaque_built(label: str) -> _Built:
     return _Built(spec=RenderSpec(width=1.6, height=1.2), label=label, opaque=True)
 
 
+def _entry_size_label(entry: LibraryEntry) -> str:
+    nodes = len(entry.payload.get("nodes", []))
+    edge_field = "connections" if entry.entry_type == MODULE else "edges"
+    edges = len(entry.payload.get(edge_field, []))
+    return f"{nodes:,} nodes · {edges:,} edges"
+
+
 def _place_child(spec: RenderSpec, child: _Built, center: tuple[float, float], depth: int) -> None:
     """Translate a child into the parent frame at `center` and merge it, wrapped in its container."""
     cx, cy = center
@@ -374,7 +381,7 @@ def _build_entry(
 ) -> _Built:
     label = f"{entry.key}  L{entry.level}"
     if len(entry.payload["nodes"]) > budget.remaining:
-        return _opaque_built(label)
+        return _opaque_built(f"{label}\n{_entry_size_label(entry)}\ndetail exceeds render budget")
     if entry.entry_type == MODULE:
         built = _build_genome(
             genome_from_dict(entry.payload),
@@ -680,7 +687,7 @@ def build_entry_spec(
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
     try:
-        return _build_entry(
+        built = _build_entry(
             entry,
             resolve=resolve,
             budget=_Budget(node_budget),
@@ -688,7 +695,10 @@ def build_entry_spec(
             reference_depth=0,
             stack=(entry.key,),
             max_inline_depth=max_inline_depth,
-        ).spec
+        )
+        if built.opaque:
+            built.spec.containers.append(SpecContainer(0.0, 0.0, built.spec.width, built.spec.height, label=built.label, depth=0, opaque=True))
+        return built.spec
     except Exception:
         pass
     built = _opaque_built(f"{entry.key}  ?")
@@ -1164,6 +1174,7 @@ def build_overmind_spec(
     budget = _Budget(node_budget)
     children: list[_Built] = []
     for vertex in view.vertices:
+        entry: LibraryEntry | None = None
         if vertex.key:
             allowance = min(cell_node_budget, budget.remaining)
             cell_budget = _Budget(allowance)
@@ -1189,7 +1200,7 @@ def build_overmind_spec(
             budget.remaining -= allowance - cell_budget.remaining
         else:
             child = _opaque_built(vertex.label)
-        child.label = vertex.label
+        child.label = f"{vertex.label}\n{_entry_size_label(entry)}" if child.opaque and entry is not None else vertex.label
         child.opaque = child.opaque or vertex.retired  # retired experts read as opaque footprints
         children.append(child)
     boxes = [(child.spec.width + 2 * _PAD, child.spec.height + 2 * _PAD) for child in children]
@@ -1262,8 +1273,8 @@ def build_overmind_spec(
                     spec.edges.append(SpecEdge(source_x, source_y, x, y, width=exit_width, color=THEME["edge_exit"], alpha=alpha))
 
     # THE ROUTING PATHS: output node -> target input anchor, from observed traffic (or the edge-bias
-    # prior). A self-transition is recurrent expert use and loops back to that card's own anchor.
-    # Retired vertices carry no pathways.
+    # prior). An observed self-transition is recurrent expert use and loops back to that card's own
+    # anchor. Retired vertices carry no pathways.
     for source, target, weight in view.pathways:
         if not (0 <= source < len(children) and 0 <= target < len(children)):
             continue
