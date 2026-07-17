@@ -422,6 +422,7 @@ def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels
     assert first.mode == "semantic-spatial"
     assert first.fallback_reason is None
     assert len(first.panels) == expected_panels
+    assert sorted(node_id for panel in first.panels for node_id in panel.node_ids) == sorted(first.input_ids)
     assert first.positions == second.positions
     assert all(0.0 <= coordinate <= 1.0 for position in first.positions.values() for coordinate in position)
 
@@ -504,13 +505,22 @@ def test_density_edge_chunk_boundary_includes_every_enabled_edge() -> None:
     assert layers["positive"] is not None
 
 
-def test_large_density_png_is_fixed_size_nonblank_and_deterministic(tmp_path: Path) -> None:
+def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch, tmp_path: Path) -> None:
     import matplotlib.image as mpimg
     import numpy as np
+    from matplotlib.axes import Axes
 
     from ardevo.rendering import _render_large_module_density
 
     entry = _spatial_entry("portrait", [("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))])
+    labels: list[str] = []
+    original_text = Axes.text
+
+    def capture_text(self, _x, _y, value, *args, **kwargs):
+        labels.append(str(value))
+        return original_text(self, _x, _y, value, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "text", capture_text)
     first_path = tmp_path / "first.png"
     second_path = tmp_path / "second.png"
     first = _render_large_module_density(first_path, entry)
@@ -525,6 +535,8 @@ def test_large_density_png_is_fixed_size_nonblank_and_deterministic(tmp_path: Pa
     assert first_pixels.shape[:2] == (1600, 2400)
     assert first_pixels.std() > 0.01
     assert np.array_equal(first_pixels, second_pixels)
+    assert "potential influence flow" in labels
+    assert any("weights, not activations" in label for label in labels)
 
 
 def test_large_density_failure_atomically_replaces_with_opaque_summary(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
