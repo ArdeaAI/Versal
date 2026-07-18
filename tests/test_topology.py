@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import ardevo.topology as topology
 from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
 from ardevo.topology import TopologyTabuSession, TopologyTabuStore, same_topology, topology_record
 
@@ -52,6 +53,19 @@ def test_module_topology_is_id_innovation_weight_and_strategy_invariant() -> Non
     baseline = topology_record(MODULE, _module_payload())
     renumbered = topology_record(MODULE, _renumber_module(_module_payload()))
     assert same_topology(baseline, renumbered)
+
+
+def test_normalized_payload_equality_avoids_graph_isomorphism(monkeypatch) -> None:
+    baseline = _module_payload()
+    retrained = copy.deepcopy(baseline)
+    for connection in retrained["connections"]:
+        connection["weight"] += 100.0
+
+    def unexpected_isomorphism(*_args, **_kwargs):
+        raise AssertionError("normalized equal graphs must not enter VF2")
+
+    monkeypatch.setattr(topology.nx, "is_isomorphic", unexpected_isomorphism)
+    assert same_topology(topology_record(MODULE, baseline), topology_record(MODULE, retrained))
 
 
 def test_module_topology_preserves_architectural_attributes_and_weight_ties() -> None:
@@ -150,3 +164,56 @@ def test_tabu_store_skips_persisted_exact_topologies_within_one_context(tmp_path
 
     isolated = TopologyTabuSession(store, "different-config", library)
     assert isolated.reserve(MODULE, baseline)
+
+
+def _large_module_payload(width: int = 4200) -> dict:
+    bias = width
+    output = width + 1
+    return {
+        "nodes": [
+            *({"id": index, "kind": "input", "activation": "identity", "coordinate": None, "aggregation": "sum"} for index in range(width)),
+            {"id": bias, "kind": "bias", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+            {"id": output, "kind": "output", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+        ],
+        "connections": [{"in": index, "out": output, "weight": 0.1, "enabled": True, "innovation": index, "recurrent": False} for index in range(width)],
+        "macros": [],
+        "refine_steps": 1,
+    }
+
+
+def test_large_topology_is_compact_and_conservatively_skips_vf2(monkeypatch) -> None:
+    baseline_payload = _large_module_payload()
+    reordered_payload = copy.deepcopy(baseline_payload)
+    reordered_payload["nodes"].reverse()
+    reordered_payload["connections"].reverse()
+    baseline = topology_record(MODULE, baseline_payload)
+    reordered = topology_record(MODULE, reordered_payload)
+
+    # Ordinary genes are attributed edges, not one extra relation node per connection.
+    assert len(baseline.graph["nodes"]) == len(baseline_payload["nodes"]) + 1
+
+    def unexpected_isomorphism(*_args, **_kwargs):
+        raise AssertionError("oversized graphs must not enter unbounded VF2")
+
+    monkeypatch.setattr(topology.nx, "is_isomorphic", unexpected_isomorphism)
+    assert baseline.bucket == reordered.bucket
+    assert not same_topology(baseline, reordered)
+
+
+def test_tabu_session_stops_before_topology_work_after_deadline(tmp_path: Path, monkeypatch) -> None:
+    library = ModuleLibrary(tmp_path / "library")
+    session = TopologyTabuSession(
+        TopologyTabuStore(library.root / "topology_tabu.sqlite3"),
+        "expired-context",
+        library,
+        deadline_exceeded=lambda: True,
+    )
+
+    def unexpected_record(*_args, **_kwargs):
+        raise AssertionError("expired sessions must not build topology records")
+
+    monkeypatch.setattr(topology, "topology_record", unexpected_record)
+    assert not session.reserve(MODULE, _module_payload())
+    assert session.exhausted
+    assert session.candidates == 0
+    assert session.duplicates == 0

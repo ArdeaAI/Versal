@@ -167,6 +167,7 @@ def render_overmind_from_metadata(
         top_k=int(meta["top_k"]),
         max_steps=int(meta["max_steps"]),
         pathways=_metadata_pathways(ordered_names, meta.get("transition_totals", {})),
+        traffic_observed=bool(meta.get("step_usage_totals") or meta.get("transition_totals")),
     )
     return render_overmind(out_path, view, library=library, **_depth_kwargs(max_inline_depth))
 

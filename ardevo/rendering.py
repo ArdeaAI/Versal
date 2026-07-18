@@ -11,11 +11,12 @@ These renders are an artistic overview: the library JSON stays the ground truth,
 mode (missing ref, cycle, over budget, undeserializable payload) degrades to a labeled opaque box
 instead of raising. A render must never kill a run or a gallery.
 
-The build/draw split keeps layout pure: builders produce a `RenderSpec` (flat primitive lists in one
-shared coordinate frame; children are translated and merged into the parent at placement, never
-scaled), and `draw_spec` paints any spec onto any matplotlib axis, which is what lets the gallery
-reuse the exact same pipeline per cell. matplotlib is imported lazily inside the draw/render
-functions (and forced onto the headless Agg backend) per project convention.
+The build/draw split keeps layout pure: builders produce a semantic `RenderSpec` (flat primitive
+lists in one shared coordinate frame; children are translated and merged into the parent at
+placement, never scaled). `draw_spec` rasterizes every dense edge/node layer with Datashader, then
+uses Matplotlib for crisp cards, markers, labels, direction cues, and legends. The same hybrid path
+drives full portraits, task artifacts, galleries, motifs, and the overmind; both libraries import
+lazily and Matplotlib is forced onto the headless Agg backend.
 """
 
 import heapq
@@ -85,6 +86,9 @@ THEME: dict[str, Any] = {
     "label": "#8b93b5",
     "title": "#c8cede",
     "edge_forward": "#aab3c5",
+    "edge_positive": "#7dcfff",
+    "edge_negative": "#ff6f91",
+    "edge_mixed": "#7d86a3",
     "edge_recurrent": "#e0af68",
     "edge_macro": "#bb9af7",
     "edge_glue": "#7dcfff",
@@ -113,11 +117,14 @@ _PAD = 0.9
 _CALLOUT_GAP = 1.4  # vertical clearance between the host network and the callout band
 _NETWORK_ANCHOR_INSET = 0.3
 _MAX_COLUMN_NODES = 64  # a layer taller than this wraps into a near-square block of sub-columns
-_MAX_STRAIGHT_EDGES = 60_000  # LineCollection cap; beyond it edges stride-subsample with a note
-_MAX_CURVED_EDGES = 2_000  # FancyArrowPatch is one artist per edge, so its cap is much lower
+_MAX_STRAIGHT_EDGES = 60_000  # classic failure-fallback cap; the normal Datashader path includes all
+_MAX_CURVED_EDGES = 2_000  # classic failure-fallback cap; FancyArrowPatch is one artist per edge
 _DENSITY_WIDTH = 2400
 _DENSITY_HEIGHT = 1600
 _DENSITY_EDGE_CHUNK = 250_000
+_EXPLICIT_EDGE_LIMIT = 512
+_HYBRID_MAX_RASTER_DIMENSION = 2400
+_HYBRID_MAX_RASTER_PIXELS = 2400 * 1600
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -130,6 +137,7 @@ class SpecNode:
     size: float = 1.0  # relative multiplier; draw_spec converts to point area from pixel density
     marker: str = "o"
     alpha: float = 1.0
+    role: str = "node"
 
 
 @dataclass(slots=True)
@@ -143,6 +151,9 @@ class SpecEdge:
     style: str = "solid"  # "solid" | "dashed"
     curve: float = 0.0  # arc3 rad; 0 draws via the fast LineCollection path
     alpha: float = 0.4
+    role: str = "forward"
+    magnitude: float = 1.0
+    signed_weight: float | None = None
 
 
 @dataclass(slots=True)
@@ -178,6 +189,7 @@ class RenderSpec:
     texts: list[SpecText] = field(default_factory=list)
     width: float = 1.0
     height: float = 1.0
+    flow_label: str | None = None
 
     @property
     def node_count(self) -> int:
@@ -413,9 +425,9 @@ def _attach_callouts(
             centers[i] = (cx, cy)
             _place_child(spec, child, (cx, cy), depth)
             target_x, target_y = x_cursor + _NETWORK_ANCHOR_INSET, row_base + box_h - _NETWORK_ANCHOR_INSET
-            spec.nodes.append(SpecNode(target_x, target_y, color=THEME["node_anchor"], size=0.65))
+            spec.nodes.append(SpecNode(target_x, target_y, color=THEME["node_anchor"], size=0.65, role="network-input-anchor"))
             for source_x, source_y in source_points:
-                spec.edges.append(SpecEdge(source_x, source_y, target_x, target_y, width=1.0, color=THEME["edge_callout"], alpha=0.55))
+                spec.edges.append(SpecEdge(source_x, source_y, target_x, target_y, width=1.0, color=THEME["edge_callout"], alpha=0.55, role="nested-network"))
             x_cursor += box_w + _H_GAP
         row_base += row_height + _V_GAP
 
@@ -569,17 +581,17 @@ def _build_genome(
         if node.id in stub_ids:
             # A macro's footprint in the host: a green hexagon (distinct from viridis hidden
             # circles), matching the callout line up to its expansion.
-            color, marker, alpha = THEME["node_module"], "h", 1.0
+            color, marker, alpha, role = THEME["node_module"], "h", 1.0, "macro-footprint"
         elif node.kind is NodeKind.INPUT:
-            color, marker, alpha = THEME["node_input"], "s", 1.0
+            color, marker, alpha, role = THEME["node_input"], "s", 1.0, "input"
         elif node.kind is NodeKind.BIAS:
-            color, marker, alpha = THEME["node_bias"], "s", 0.7
+            color, marker, alpha, role = THEME["node_bias"], "s", 0.7, "bias"
         elif node.kind is NodeKind.OUTPUT:
-            color, marker, alpha = THEME["node_output"], "s", 1.0
+            color, marker, alpha, role = THEME["node_output"], "s", 1.0, "output"
         else:
-            color, marker, alpha = _layer_color(layer.get(node.id, 0), drawn_max_layer), ("D" if node.aggregation == "product" else "o"), 1.0
+            color, marker, alpha, role = _layer_color(layer.get(node.id, 0), drawn_max_layer), ("D" if node.aggregation == "product" else "o"), 1.0, "hidden"
         size = 0.5 if isolated else min(1.0 + 0.15 * node_degree, 2.5)
-        drawn = SpecNode(x, y, color, size=size, marker=marker, alpha=0.25 if isolated else alpha)
+        drawn = SpecNode(x, y, color, size=size, marker=marker, alpha=0.25 if isolated else alpha, role="isolated" if isolated else role)
         spec.nodes.append(drawn)
         if node.kind is NodeKind.OUTPUT:
             output_nodes.append(drawn)
@@ -590,15 +602,41 @@ def _build_genome(
             continue
         if conn.recurrent:
             spec.edges.append(
-                SpecEdge(source[0], source[1], target[0], target[1], width=_edge_width(conn.weight), color=THEME["edge_recurrent"], style="dashed", curve=0.25, alpha=0.6)
+                SpecEdge(
+                    source[0],
+                    source[1],
+                    target[0],
+                    target[1],
+                    width=_edge_width(conn.weight),
+                    color=THEME["edge_recurrent"],
+                    style="dashed",
+                    curve=0.25,
+                    alpha=0.6,
+                    role="recurrent",
+                    magnitude=abs(conn.weight),
+                    signed_weight=conn.weight,
+                )
             )
         else:
-            spec.edges.append(SpecEdge(source[0], source[1], target[0], target[1], width=_edge_width(conn.weight), color=THEME["edge_forward"], alpha=0.35))
+            spec.edges.append(
+                SpecEdge(
+                    source[0],
+                    source[1],
+                    target[0],
+                    target[1],
+                    width=_edge_width(conn.weight),
+                    color=THEME["edge_positive"] if conn.weight >= 0.0 else THEME["edge_negative"],
+                    alpha=0.42,
+                    role="forward-positive" if conn.weight >= 0.0 else "forward-negative",
+                    magnitude=abs(conn.weight),
+                    signed_weight=conn.weight,
+                )
+            )
     for source, target in macro_implied_edges(genome):
         source_pos, target_pos = positions.get(source), positions.get(target)
         if source_pos is None or target_pos is None:
             continue
-        spec.edges.append(SpecEdge(source_pos[0], source_pos[1], target_pos[0], target_pos[1], width=1.0, color=THEME["edge_macro"], alpha=0.4))
+        spec.edges.append(SpecEdge(source_pos[0], source_pos[1], target_pos[0], target_pos[1], width=1.0, color=THEME["edge_macro"], alpha=0.5, role="macro-implied"))
 
     callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
     for macro in genome.macros:
@@ -654,15 +692,18 @@ def _build_comp(
             color = THEME["node_module"]
             marker = "h"  # hexagon: the footprint shape, matching the green callout line
             size = 1.0 + math.log2(1 + max(node.in_width, node.out_width)) / 4
+            role = "module-footprint"
         elif node.kind is CompNodeKind.INPUT:
             color = THEME["node_bias"] if node.ref == "__bias__" else THEME["node_input"]
             marker = "s"
             size = 1.0 + math.log2(1 + node.out_width) / 4
+            role = "bias" if node.ref == "__bias__" else "input"
         else:
             color = THEME["node_output"]
             marker = "s"
             size = 1.0 + math.log2(1 + node.in_width) / 4
-        drawn = SpecNode(x, y, color, size=size, marker=marker)
+            role = "output"
+        drawn = SpecNode(x, y, color, size=size, marker=marker, role=role)
         spec.nodes.append(drawn)
         if node.kind is CompNodeKind.OUTPUT:
             output_nodes.append(drawn)
@@ -674,7 +715,21 @@ def _build_comp(
         if source is None or target is None:
             continue
         strength = max((abs(value) for value in edge.glue), default=0.0)
-        spec.edges.append(SpecEdge(source[0], source[1], target[0], target[1], width=_edge_width(strength), color=THEME["edge_glue"], alpha=0.5))
+        signed = sum(edge.glue)
+        spec.edges.append(
+            SpecEdge(
+                source[0],
+                source[1],
+                target[0],
+                target[1],
+                width=_edge_width(strength),
+                color=THEME["edge_positive"] if signed >= 0.0 else THEME["edge_negative"],
+                alpha=0.55,
+                role="composition-glue-positive" if signed >= 0.0 else "composition-glue-negative",
+                magnitude=sum(abs(value) for value in edge.glue),
+                signed_weight=signed,
+            )
+        )
 
     callouts: list[tuple[_Built, list[tuple[float, float]]]] = []
     for node in comp.nodes.values():
@@ -703,7 +758,7 @@ def build_genome_spec(
     node_budget: int = DEFAULT_NODE_BUDGET,
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
-    return _build_genome(
+    spec = _build_genome(
         genome,
         resolve=resolve,
         budget=_Budget(node_budget),
@@ -712,6 +767,8 @@ def build_genome_spec(
         stack=(),
         max_inline_depth=max_inline_depth,
     ).spec
+    spec.flow_label = "potential influence flow · weights/topology, not activations"
+    return spec
 
 
 def build_composition_spec(
@@ -721,7 +778,7 @@ def build_composition_spec(
     node_budget: int = DEFAULT_NODE_BUDGET,
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
-    return _build_comp(
+    spec = _build_comp(
         comp,
         resolve=resolve,
         budget=_Budget(node_budget),
@@ -730,6 +787,8 @@ def build_composition_spec(
         stack=(),
         max_inline_depth=max_inline_depth,
     ).spec
+    spec.flow_label = "potential influence flow · topology/glue, not activations"
+    return spec
 
 
 def build_entry_spec(
@@ -751,25 +810,215 @@ def build_entry_spec(
         )
         if built.opaque:
             built.spec.containers.append(SpecContainer(0.0, 0.0, built.spec.width, built.spec.height, label=built.label, depth=0, opaque=True))
+        built.spec.flow_label = (
+            "potential influence flow · weights/topology, not activations" if entry.entry_type == MODULE else "potential influence flow · topology/glue, not activations"
+        )
         return built.spec
     except Exception:
         pass
     built = _opaque_built(f"{entry.key}  ?")
     built.spec.containers.append(SpecContainer(0.0, 0.0, built.spec.width, built.spec.height, label=built.label, depth=0, opaque=True))
+    built.spec.flow_label = "potential influence flow · topology, not activations"
     return built.spec
 
 
 # --- painting --------------------------------------------------------------------------------------
 
 
-def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_padding: float = _PAD) -> None:
-    """Paint a spec onto a matplotlib axis (single renders and gallery cells share this path)."""
+def _edge_segments(edge: SpecEdge) -> list[tuple[float, float, float, float]]:
+    """Turn an edge into deterministic line segments that Datashader can aggregate.
+
+    Curves are quadratic approximations of Matplotlib's arc cue. Dashed edges omit alternating
+    segments, so recurrent structure remains recognizable even after density aggregation.
+    """
+    if edge.curve == 0.0:
+        return [(edge.x0, edge.y0, edge.x1, edge.y1)]
+    dx, dy = edge.x1 - edge.x0, edge.y1 - edge.y0
+    control_x = (edge.x0 + edge.x1) / 2 - dy * edge.curve
+    control_y = (edge.y0 + edge.y1) / 2 + dx * edge.curve
+    points: list[tuple[float, float]] = []
+    for index in range(13):
+        t = index / 12
+        inverse = 1.0 - t
+        points.append(
+            (
+                inverse * inverse * edge.x0 + 2 * inverse * t * control_x + t * t * edge.x1,
+                inverse * inverse * edge.y0 + 2 * inverse * t * control_y + t * t * edge.y1,
+            )
+        )
+    segments = [(x0, y0, x1, y1) for (x0, y0), (x1, y1) in zip(points, points[1:])]
+    return segments[::2] if edge.style == "dashed" else segments
+
+
+def _rasterized_spec_edges(
+    spec: RenderSpec,
+    *,
+    pixel_width: int,
+    pixel_height: int,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+) -> tuple[Any, int]:
+    """Rasterize every scene edge by semantic color; no sampling or per-edge artists."""
+    import datashader as ds
+    import datashader.transfer_functions as tf
+    import numpy as np
+    import pandas as pd
+
+    canvas = ds.Canvas(plot_width=max(pixel_width, 2), plot_height=max(pixel_height, 2), x_range=x_range, y_range=y_range)
+    layers: dict[str, Any] = {}
+    rows: dict[str, list[tuple[float, float, float, float, float]]] = {}
+    pending_segments = 0
+
+    def flush() -> None:
+        nonlocal pending_segments
+        for color, color_rows in rows.items():
+            if not color_rows:
+                continue
+            frame = pd.DataFrame(color_rows, columns=["x0", "y0", "x1", "y1", "weight"])
+            layers[color] = _accumulate_density_lines(canvas, frame, ds, np, layers.get(color))
+        rows.clear()
+        pending_segments = 0
+
+    for edge in spec.edges:
+        magnitude = edge.magnitude if math.isfinite(edge.magnitude) else 0.0
+        # Zero-weight structural edges must remain visible, but never dominate weighted density.
+        weight = max(abs(magnitude), 0.05)
+        segments = _edge_segments(edge)
+        rows.setdefault(edge.color, []).extend((*segment, weight) for segment in segments)
+        pending_segments += len(segments)
+        if pending_segments >= _DENSITY_EDGE_CHUNK:
+            flush()
+    flush()
+
+    shaded = [tf.shade(layer.where(layer > 0.0), cmap=[color, color], how="log", min_alpha=32, alpha=205) for color, layer in layers.items()]
+    if not shaded:
+        return np.zeros((max(pixel_height, 2), max(pixel_width, 2), 4), dtype=np.uint8), 0
+    return np.asarray(tf.stack(*shaded, how="over").to_pil()), len(spec.edges)
+
+
+def _rasterized_spec_nodes(
+    spec: RenderSpec,
+    *,
+    pixel_width: int,
+    pixel_height: int,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+) -> Any:
+    """Create a subtle Datashader node-density glow beneath the explicit semantic markers."""
+    import datashader as ds
+    import datashader.transfer_functions as tf
+    import numpy as np
+    import pandas as pd
+
+    if len(spec.nodes) <= 256:
+        return None
+    canvas = ds.Canvas(plot_width=max(pixel_width, 2), plot_height=max(pixel_height, 2), x_range=x_range, y_range=y_range)
+    shaded = []
+    by_color: dict[str, list[SpecNode]] = {}
+    for node in spec.nodes:
+        density_color = {
+            "input": THEME["node_input"],
+            "bias": THEME["node_bias"],
+            "output": THEME["node_output"],
+            "macro-footprint": THEME["node_module"],
+            "module-footprint": THEME["node_module"],
+            "network-input-anchor": THEME["node_anchor"],
+            "isolated": THEME["edge_mixed"],
+        }.get(node.role, "#2eb5a7")
+        by_color.setdefault(density_color, []).append(node)
+    for color, nodes in by_color.items():
+        frame = pd.DataFrame({"x": [node.x for node in nodes], "y": [node.y for node in nodes], "weight": [max(node.size, 0.05) for node in nodes]})
+        aggregate = canvas.points(frame, x="x", y="y", agg=ds.sum("weight"))
+        shaded.append(tf.shade(aggregate.where(aggregate > 0.0), cmap=[color, color], how="log", min_alpha=24, alpha=135))
+    return np.asarray(tf.stack(*shaded, how="over").to_pil())
+
+
+def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) -> None:
+    """Crisp semantic overlay for small scenes and a resilient fallback if rasterization fails."""
+    from matplotlib import colors as mcolors
+    from matplotlib.collections import LineCollection
+    from matplotlib.patches import FancyArrowPatch
+
+    if directional:
+        for edge in edges:
+            axis.add_patch(
+                FancyArrowPatch(
+                    (edge.x0, edge.y0),
+                    (edge.x1, edge.y1),
+                    connectionstyle=f"arc3,rad={edge.curve}",
+                    color=mcolors.to_rgba(edge.color, min(edge.alpha + 0.12, 0.9)),
+                    linewidth=edge.width,
+                    linestyle=edge.style,
+                    arrowstyle="-|>",
+                    mutation_scale=5.0,
+                    shrinkA=1.5,
+                    shrinkB=1.5,
+                    zorder=2.2,
+                )
+            )
+        return
+
+    # Failure fallback only: cap Matplotlib work while retaining an honest note in the caller.
+    straight = [edge for edge in edges if edge.curve == 0.0][:_MAX_STRAIGHT_EDGES]
+    curved = [edge for edge in edges if edge.curve != 0.0][:_MAX_CURVED_EDGES]
+    for style in ("solid", "dashed"):
+        group = [edge for edge in straight if edge.style == style]
+        if group:
+            axis.add_collection(
+                LineCollection(
+                    [((edge.x0, edge.y0), (edge.x1, edge.y1)) for edge in group],
+                    colors=[mcolors.to_rgba(edge.color, edge.alpha) for edge in group],
+                    linewidths=[edge.width for edge in group],
+                    linestyle=style,
+                    zorder=2,
+                )
+            )
+    for edge in curved:
+        axis.add_patch(
+            FancyArrowPatch(
+                (edge.x0, edge.y0),
+                (edge.x1, edge.y1),
+                connectionstyle=f"arc3,rad={edge.curve}",
+                color=mcolors.to_rgba(edge.color, edge.alpha),
+                linewidth=edge.width,
+                linestyle=edge.style,
+                arrowstyle="-",
+                zorder=2,
+            )
+        )
+
+
+def _draw_potential_flow_legend(axis: Any, spec: RenderSpec) -> None:
+    if not spec.flow_label or not spec.flow_label.startswith("potential influence flow"):
+        return
+    roles = {edge.role for edge in spec.edges}
+    entries: list[tuple[str, str]] = []
+    if "forward-positive" in roles or "composition-glue-positive" in roles:
+        entries.append((THEME["edge_positive"], "positive influence"))
+    if "forward-negative" in roles or "composition-glue-negative" in roles:
+        entries.append((THEME["edge_negative"], "negative influence"))
+    if "recurrent" in roles:
+        entries.append((THEME["edge_recurrent"], "recurrent"))
+    if "macro-implied" in roles:
+        entries.append((THEME["edge_macro"], "macro-implied"))
+    if "nested-network" in roles:
+        entries.append((THEME["edge_callout"], "nested flow"))
+    if not entries:
+        return
+    step = min(0.19, 0.94 / len(entries))
+    for index, (color, label) in enumerate(entries):
+        x = 0.02 + index * step
+        axis.plot((x, x + 0.025), (0.034, 0.034), transform=axis.transAxes, color=color, linewidth=2.0, zorder=6)
+        axis.text(x + 0.031, 0.034, label, transform=axis.transAxes, color=THEME["label"], fontsize=5.5, ha="left", va="center", zorder=6)
+
+
+def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_padding: float = _PAD, show_footer: bool = True) -> None:
+    """Paint a semantic scene with Datashader density beneath a crisp Matplotlib overlay."""
     import matplotlib
 
     matplotlib.use("Agg")
     from matplotlib import colors as mcolors
-    from matplotlib.collections import LineCollection
-    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+    from matplotlib.patches import FancyBboxPatch
 
     axis.set_facecolor(THEME["background"])
     for box in sorted(spec.containers, key=lambda item: item.depth):
@@ -796,45 +1045,40 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
     for text in spec.texts:
         axis.text(text.x, text.y, text.text, fontsize=text.size, color=text.color, ha=text.ha, va=text.va, zorder=4)
 
-    # Cap what actually reaches matplotlib: a dense wide-I/O net can carry millions of edges, which
-    # stalls the LineCollection (and one FancyArrowPatch PER curved edge is far worse). A stride
-    # subsample keeps the drawing deterministic and the density picture honest via the note.
-    straight = [edge for edge in spec.edges if edge.curve == 0.0]
-    curved = [edge for edge in spec.edges if edge.curve != 0.0]
-    dropped_notes = []
-    if len(straight) > _MAX_STRAIGHT_EDGES:
-        stride = math.ceil(len(straight) / _MAX_STRAIGHT_EDGES)
-        dropped_notes.append(f"showing {len(straight[::stride]):,} of {len(straight):,} edges")
-        straight = straight[::stride]
-    if len(curved) > _MAX_CURVED_EDGES:
-        stride = math.ceil(len(curved) / _MAX_CURVED_EDGES)
-        dropped_notes.append(f"showing {len(curved[::stride]):,} of {len(curved):,} recurrent edges")
-        curved = curved[::stride]
-    if dropped_notes:
-        axis.text(0.005, 0.005, "  |  ".join(dropped_notes), transform=axis.transAxes, fontsize=7, color=THEME["label"], ha="left", va="bottom", zorder=4)
-
-    for style in ("solid", "dashed"):
-        group = [edge for edge in straight if edge.style == style]
-        if group:
-            segments = [((edge.x0, edge.y0), (edge.x1, edge.y1)) for edge in group]
-            rgba = [mcolors.to_rgba(edge.color, edge.alpha) for edge in group]
-            axis.add_collection(LineCollection(segments, colors=rgba, linewidths=[edge.width for edge in group], linestyle=style, zorder=2))
-    for edge in curved:
-        if edge.curve != 0.0:
-            arc = FancyArrowPatch(
-                (edge.x0, edge.y0),
-                (edge.x1, edge.y1),
-                connectionstyle=f"arc3,rad={edge.curve}",
-                color=mcolors.to_rgba(edge.color, edge.alpha),
-                linewidth=edge.width,
-                linestyle=edge.style,
-                arrowstyle="-",
-                zorder=2,
-            )
-            axis.add_patch(arc)
-
     figure = axis.figure
     fig_w, fig_h = figure.get_size_inches()
+    x_range = (-x_padding, spec.width + x_padding)
+    y_range = (-_PAD, spec.height + _PAD)
+    raw_pixel_width = max(64, int(fig_w * figure.dpi))
+    raw_pixel_height = max(64, int(fig_h * figure.dpi))
+    max_raster_dimension = 1200 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_DIMENSION
+    max_raster_pixels = 1200 * 800 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_PIXELS
+    raster_scale = min(
+        1.0,
+        max_raster_dimension / raw_pixel_width,
+        max_raster_dimension / raw_pixel_height,
+        math.sqrt(max_raster_pixels / (raw_pixel_width * raw_pixel_height)),
+    )
+    pixel_width = max(64, int(raw_pixel_width * raster_scale))
+    pixel_height = max(64, int(raw_pixel_height * raster_scale))
+    try:
+        edge_image, rendered_edges = _rasterized_spec_edges(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
+        axis.imshow(edge_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2)
+        node_image = _rasterized_spec_nodes(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
+        if node_image is not None:
+            axis.imshow(node_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2.6)
+        if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT:
+            _draw_classic_edges(axis, spec.edges, directional=True)
+        edge_note = f"all {rendered_edges:,} scene edges included"
+    except Exception as error:
+        from ardevo.utils.logging import Logger
+
+        Logger.get_logger().warning("hybrid Datashader edge layer failed: %s: %s", type(error).__name__, error)
+        rendered_edges = min(len(spec.edges), _MAX_STRAIGHT_EDGES + _MAX_CURVED_EDGES)
+        _draw_classic_edges(axis, spec.edges, directional=len(spec.edges) <= _EXPLICIT_EDGE_LIMIT)
+        edge_note = f"classic fallback showing {rendered_edges:,} of {len(spec.edges):,} scene edges"
+        axis.text(0.005, 0.005, "Datashader unavailable; classic fallback", transform=axis.transAxes, fontsize=6, color=THEME["label"], ha="left", va="bottom", zorder=5)
+
     pixels_per_unit = min(fig_w * 72 / max(spec.width, 1e-6), fig_h * 72 / max(spec.height, 1e-6))
     base_area = min(max((0.5 * pixels_per_unit) ** 2, 16.0), 700.0)
     for marker in sorted({node.marker for node in spec.nodes}):
@@ -850,8 +1094,22 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
             zorder=3,
         )
 
-    axis.set_xlim(-x_padding, spec.width + x_padding)
-    axis.set_ylim(-_PAD, spec.height + _PAD)
+    if show_footer and spec.flow_label:
+        _draw_potential_flow_legend(axis, spec)
+        axis.text(
+            0.5,
+            0.006,
+            f"{spec.flow_label} · hybrid Datashader · {edge_note}",
+            transform=axis.transAxes,
+            fontsize=6.5,
+            color=THEME["label"],
+            ha="center",
+            va="bottom",
+            zorder=5,
+        )
+
+    axis.set_xlim(*x_range)
+    axis.set_ylim(*y_range)
     axis.set_aspect("equal")
     axis.axis("off")
     if title is not None:
@@ -869,13 +1127,17 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int =
     scale = min(1.0, 30.0 / (0.6 * max(spec.width, spec.height, 1e-6)))
     fig_w = max(spec.width * 0.6 * scale, 4.0)
     fig_h = max(spec.height * 0.6 * scale, 4.0)
-    figure, axis = plt.subplots(figsize=(fig_w, fig_h))
-    figure.patch.set_facecolor(THEME["background"])
-    draw_spec(axis, spec, title=title, x_padding=x_padding)
-    figure.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(out_path, dpi=dpi, facecolor=figure.get_facecolor())
-    plt.close(figure)
+    temporary = _temporary_sibling(out_path)
+    figure, axis = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    try:
+        figure.patch.set_facecolor(THEME["background"])
+        draw_spec(axis, spec, title=title, x_padding=x_padding)
+        figure.tight_layout()
+        figure.savefig(temporary, dpi=dpi, facecolor=figure.get_facecolor())
+        temporary.replace(out_path)
+    finally:
+        plt.close(figure)
+        temporary.unlink(missing_ok=True)
     return out_path
 
 
@@ -1977,8 +2239,15 @@ def render_library_gallery(
         flat_axes = [axis for row_axes in axes for axis in row_axes]
         for axis, summary in zip(flat_axes, rows):
             try:
-                spec = build_entry_spec(library.load(summary["key"]), resolve=resolve, node_budget=GALLERY_NODE_BUDGET, max_inline_depth=max_inline_depth)
-                draw_spec(axis, spec)
+                # A contact sheet is an index, not the full recursive portrait: one reference level
+                # preserves each entry's architecture without reducing deep compositions to slivers.
+                spec = build_entry_spec(
+                    library.load(summary["key"]),
+                    resolve=resolve,
+                    node_budget=GALLERY_NODE_BUDGET,
+                    max_inline_depth=min(max_inline_depth, 1),
+                )
+                draw_spec(axis, spec, show_footer=False)
             except Exception:
                 axis.set_facecolor(THEME["background"])
                 axis.text(0.5, 0.5, f"{summary['key']}\nrender failed", ha="center", va="center", color=THEME["label"], fontsize=7)
@@ -1988,10 +2257,14 @@ def render_library_gallery(
             axis.set_facecolor(THEME["background"])
             axis.axis("off")
 
-    figure.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(out_path, dpi=150, facecolor=figure.get_facecolor())
-    plt.close(figure)
+    temporary = _temporary_sibling(out_path)
+    try:
+        figure.tight_layout()
+        figure.savefig(temporary, dpi=150, facecolor=figure.get_facecolor())
+        temporary.replace(out_path)
+    finally:
+        plt.close(figure)
+        temporary.unlink(missing_ok=True)
     return out_path
 
 
@@ -2028,31 +2301,44 @@ def build_motif_spec(node_labels: tuple[NodeLabel, ...], edges: tuple[tuple[int,
     for index, (kind, second, aggregation, stub) in enumerate(node_labels):
         x, y = positions[index]
         if stub or kind == "module":
-            color, marker = THEME["node_module"], "h"
+            color, marker, role = THEME["node_module"], "h", "module-footprint"
         elif kind == "input":
-            color, marker = (THEME["node_bias"] if second == "bias" else THEME["node_input"]), "s"
+            color, marker, role = (THEME["node_bias"] if second == "bias" else THEME["node_input"]), "s", "bias" if second == "bias" else "input"
         elif kind == "bias":
-            color, marker = THEME["node_bias"], "s"
+            color, marker, role = THEME["node_bias"], "s", "bias"
         elif kind == "output":
-            color, marker = THEME["node_output"], "s"
+            color, marker, role = THEME["node_output"], "s", "output"
         else:
-            color, marker = _ACTIVATION_TINTS.get(second, THEME["edge_forward"]), ("D" if aggregation == "product" else "o")
-        spec.nodes.append(SpecNode(x, y, color, size=1.3, marker=marker))
+            color, marker, role = _ACTIVATION_TINTS.get(second, THEME["edge_forward"]), ("D" if aggregation == "product" else "o"), "hidden"
+        spec.nodes.append(SpecNode(x, y, color, size=1.3, marker=marker, role=role))
 
     for source, target, mask in edges:
         if source == target:
             # A recurrent self-loop (the TRM refinement motif) draws as a small arc riding the node:
             # arc3 renders nothing when both endpoints coincide.
             x, y = positions[source]
-            spec.edges.append(SpecEdge(x - 0.2, y + 0.18, x + 0.2, y + 0.18, width=1.2, color=THEME["edge_recurrent"], style="dashed", curve=1.6, alpha=0.8))
+            spec.edges.append(
+                SpecEdge(
+                    x - 0.2,
+                    y + 0.18,
+                    x + 0.2,
+                    y + 0.18,
+                    width=1.2,
+                    color=THEME["edge_recurrent"],
+                    style="dashed",
+                    curve=1.6,
+                    alpha=0.8,
+                    role="recurrent",
+                )
+            )
             continue
         (x0, y0), (x1, y1) = positions[source], positions[target]
         if mask & FORWARD_EDGE:
-            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.4, color=THEME["edge_forward"], alpha=0.7))
+            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.4, color=THEME["edge_positive"], alpha=0.7, role="forward-positive"))
         if mask & MACRO_EDGE:
-            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.2, color=THEME["edge_macro"], alpha=0.6))
+            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.2, color=THEME["edge_macro"], alpha=0.6, role="macro-implied"))
         if mask & RECURRENT_EDGE:
-            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.2, color=THEME["edge_recurrent"], style="dashed", curve=0.25, alpha=0.7))
+            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=1.2, color=THEME["edge_recurrent"], style="dashed", curve=0.25, alpha=0.7, role="recurrent"))
     return spec
 
 
@@ -2083,7 +2369,7 @@ def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: in
         flat_axes = [axis for row_axes in axes for axis in row_axes]
         for axis, record in zip(flat_axes, motifs):
             try:
-                draw_spec(axis, build_motif_spec(record.graph.node_labels, record.graph.edges))
+                draw_spec(axis, build_motif_spec(record.graph.node_labels, record.graph.edges), show_footer=False)
             except Exception:
                 axis.set_facecolor(THEME["background"])
                 axis.text(0.5, 0.5, f"{record.fingerprint}\nrender failed", ha="center", va="center", color=THEME["label"], fontsize=7)
@@ -2093,10 +2379,14 @@ def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: in
             axis.set_facecolor(THEME["background"])
             axis.axis("off")
 
-    figure.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(out_path, dpi=150, facecolor=figure.get_facecolor())
-    plt.close(figure)
+    temporary = _temporary_sibling(out_path)
+    try:
+        figure.tight_layout()
+        figure.savefig(temporary, dpi=150, facecolor=figure.get_facecolor())
+        temporary.replace(out_path)
+    finally:
+        plt.close(figure)
+        temporary.unlink(missing_ok=True)
     return out_path
 
 
@@ -2134,6 +2424,7 @@ class OvermindView:
     # from observed step-to-step traffic (or the edge_bias prior as a fallback). Drawn as curved
     # weighted edges from concrete source outputs to target network-input anchors.
     pathways: list[tuple[int, int, float]] = field(default_factory=list)
+    traffic_observed: bool = True
 
 
 def prune_overmind_view(view: OvermindView) -> OvermindView:
@@ -2155,20 +2446,22 @@ def prune_overmind_view(view: OvermindView) -> OvermindView:
         top_k=view.top_k,
         max_steps=view.max_steps,
         pathways=pathways,
+        traffic_observed=view.traffic_observed,
     )
 
 
 _ROW_GAP = 2.4  # vertical gap between grid rows; leaves room for the container label above a box
 _BAND_GAP = 4  # clearance between the input/output bands and the grid
 _BAND_H = 1.6  # band strip: node row plus its signature label
-_LEGEND_ROW_STEP = 1.8
-_LEGEND_WIDTH = 24.0
+_LEGEND_COLUMNS = 2
+_LEGEND_ROW_STEP = 1.45
+_LEGEND_WIDTH = 22.0
 _OVERMIND_COLUMNS = 8
 _OVERMIND_DPI = 300
 _OVERMIND_X_PADDING = 2 * _PAD
 
 
-def _overmind_legend_entries() -> list[tuple[str, dict[str, Any], str]]:
+def _overmind_legend_entries(*, traffic_observed: bool = True) -> list[tuple[str, dict[str, Any], str]]:
     """Every marker/edge class the overmind canvas can show, as (swatch kind, params, label) rows."""
     early, deep = _layer_color(0, 3), _layer_color(3, 3)
     return [
@@ -2187,26 +2480,47 @@ def _overmind_legend_entries() -> list[tuple[str, dict[str, Any], str]]:
         ("edge", {"color": THEME["edge_macro"]}, "macro implied wiring"),
         ("edge", {"color": THEME["edge_glue"]}, "composition glue"),
         ("edge", {"color": THEME["edge_callout"]}, "nested-network flow"),
-        ("edge", {"color": THEME["edge_pathway"], "curve": 0.25}, "routing traffic (observed)"),
+        (
+            "edge",
+            {"color": THEME["edge_pathway"], "curve": 0.25},
+            "routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)",
+        ),
         ("edge", {"color": THEME["edge_entry"]}, "input feed (step-0 gate mass)"),
         ("edge", {"color": THEME["edge_exit"]}, "output feed (final-step gate mass)"),
     ]
 
 
 def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tuple[str, dict[str, Any], str]]) -> float:
-    """Append the key panel at the right margin; returns the panel width."""
+    """Append a compact two-column key panel at the right margin; returns its width."""
     spec.texts.append(SpecText(x0 + 0.6, y_top - 0.6, "key", size=8.0, color=THEME["title"]))
-    y = y_top - 0.6
-    for kind, params, label in entries:
-        y -= _LEGEND_ROW_STEP
+    item_width = _LEGEND_WIDTH / _LEGEND_COLUMNS
+    for index, (kind, params, label) in enumerate(entries):
+        column, row = divmod(index, math.ceil(len(entries) / _LEGEND_COLUMNS))
+        item_x = x0 + column * item_width
+        y = y_top - 1.4 - row * _LEGEND_ROW_STEP
         if kind == "node":
-            spec.nodes.append(SpecNode(x0 + 1.0, y, color=params["color"], size=params.get("size", 1.2), marker=params.get("marker", "o"), alpha=params.get("alpha", 1.0)))
+            spec.nodes.append(SpecNode(item_x + 1.0, y, color=params["color"], size=params.get("size", 1.2), marker=params.get("marker", "o"), alpha=params.get("alpha", 1.0)))
         elif kind == "edge":
-            spec.edges.append(SpecEdge(x0 + 0.4, y, x0 + 1.8, y, width=1.6, color=params["color"], style=params.get("style", "solid"), curve=params.get("curve", 0.0), alpha=0.9))
+            spec.edges.append(
+                SpecEdge(
+                    item_x + 0.4,
+                    y,
+                    item_x + 1.8,
+                    y,
+                    width=1.6,
+                    color=params["color"],
+                    style=params.get("style", "solid"),
+                    curve=params.get("curve", 0.0),
+                    alpha=0.9,
+                    role="legend",
+                )
+            )
         else:
-            spec.containers.append(SpecContainer(x0 + 0.3, y - 0.35, x0 + 1.9, y + 0.35, label="", depth=1, opaque=True))
-        spec.texts.append(SpecText(x0 + 2.4, y, label, size=6.5))
-    spec.containers.append(SpecContainer(x0, y - 0.8, x0 + _LEGEND_WIDTH, y_top, label="", depth=0))
+            spec.containers.append(SpecContainer(item_x + 0.3, y - 0.35, item_x + 1.9, y + 0.35, label="", depth=1, opaque=True))
+        spec.texts.append(SpecText(item_x + 2.4, y, label, size=5.7))
+    rows = math.ceil(len(entries) / _LEGEND_COLUMNS)
+    bottom = y_top - 1.4 - max(rows - 1, 0) * _LEGEND_ROW_STEP - 0.8
+    spec.containers.append(SpecContainer(x0, bottom, x0 + _LEGEND_WIDTH, y_top, label="", depth=0))
     return _LEGEND_WIDTH
 
 
@@ -2284,8 +2598,8 @@ def build_overmind_spec(
     grid_width = max([*row_widths, 8.0])
     grid_height = sum(row_heights) + _ROW_GAP * max(len(rows) - 1, 0)
 
-    legend_entries = _overmind_legend_entries() if legend else []
-    legend_height = 1.4 + _LEGEND_ROW_STEP * len(legend_entries) + 1.0
+    legend_entries = _overmind_legend_entries(traffic_observed=view.traffic_observed) if legend else []
+    legend_height = 2.2 + _LEGEND_ROW_STEP * math.ceil(len(legend_entries) / _LEGEND_COLUMNS)
     total_height = max(2 * (_BAND_H + _BAND_GAP) + grid_height, legend_height)
 
     bottoms: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
@@ -2299,7 +2613,7 @@ def build_overmind_spec(
             _place_child(spec, children[i], (cx, cy), depth=1)
             bottoms[i] = (cx, y_cursor - box_h)
             anchors[i] = (cx - box_w / 2 + _NETWORK_ANCHOR_INSET, y_cursor - _NETWORK_ANCHOR_INSET)
-            spec.nodes.append(SpecNode(*anchors[i], color=THEME["node_anchor"], size=0.65))
+            spec.nodes.append(SpecNode(*anchors[i], color=THEME["node_anchor"], size=0.65, role="network-input-anchor"))
             if not children[i].opaque and box_w < 2.5:
                 # draw_spec skips container labels on narrow boxes; every cell still deserves a name
                 spec.texts.append(SpecText(cx - box_w / 2 + 0.15, y_cursor + 0.08, children[i].label, size=5.0, va="bottom"))
@@ -2310,7 +2624,7 @@ def build_overmind_spec(
         placed: list[tuple[float, float]] = []
         for index, signature in enumerate(signatures):
             x = grid_width * (index + 1) / (len(signatures) + 1)
-            spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="s"))
+            spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="s", role="input-adapter" if color == THEME["node_input"] else "output-head"))
             spec.texts.append(SpecText(x, y - 0.45, signature, size=6.0, ha="center", va="top"))
             placed.append((x, y))
         return placed
@@ -2334,11 +2648,35 @@ def build_overmind_spec(
         alpha = 0.2 if uniform else 0.35
         if entry_width > 0.0:
             for x, y in input_positions:
-                spec.edges.append(SpecEdge(x, y, anchors[index][0], anchors[index][1], width=entry_width, color=THEME["edge_entry"], alpha=alpha))
+                spec.edges.append(
+                    SpecEdge(
+                        x,
+                        y,
+                        anchors[index][0],
+                        anchors[index][1],
+                        width=entry_width,
+                        color=THEME["edge_entry"],
+                        alpha=alpha,
+                        role="routing-entry",
+                        magnitude=max(vertex.entry_share, 0.05),
+                    )
+                )
         if exit_width > 0.0:
             for source_x, source_y in _outputs(index):
                 for x, y in output_positions:
-                    spec.edges.append(SpecEdge(source_x, source_y, x, y, width=exit_width, color=THEME["edge_exit"], alpha=alpha))
+                    spec.edges.append(
+                        SpecEdge(
+                            source_x,
+                            source_y,
+                            x,
+                            y,
+                            width=exit_width,
+                            color=THEME["edge_exit"],
+                            alpha=alpha,
+                            role="routing-exit",
+                            magnitude=max(vertex.exit_share, 0.05),
+                        )
+                    )
 
     # THE ROUTING PATHS: output node -> target input anchor, from observed traffic (or the edge-bias
     # prior). An observed self-transition is recurrent expert use and loops back to that card's own
@@ -2350,12 +2688,30 @@ def build_overmind_spec(
             continue
         x1, y1 = anchors[target]
         for x0, y0 in _outputs(source):
-            spec.edges.append(SpecEdge(x0, y0, x1, y1, width=_edge_width(weight * 3), color=THEME["edge_pathway"], curve=0.25, alpha=0.25 + 0.6 * min(weight, 1.0)))
+            spec.edges.append(
+                SpecEdge(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    width=_edge_width(weight * 3),
+                    color=THEME["edge_pathway"],
+                    curve=0.25,
+                    alpha=0.25 + 0.6 * min(weight, 1.0),
+                    role="routing-observed" if view.traffic_observed else "routing-potential",
+                    magnitude=weight,
+                )
+            )
 
     spec.width = grid_width
     if legend:
         spec.width = grid_width + 2 * _H_GAP + _overmind_legend(spec, grid_width + 2 * _H_GAP, total_height - 0.5, legend_entries)
     spec.height = total_height
+    spec.flow_label = (
+        "observed routing flow · gate-mass traffic, not activation analysis"
+        if view.traffic_observed
+        else "routing potential · cold structural view, not observed traffic or activations"
+    )
     return spec
 
 

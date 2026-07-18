@@ -8,6 +8,7 @@ TOP_LEVEL_CONFIGS = {
     "configs/brute.toml",
     "configs/canary-lattice.toml",
     "configs/canary.toml",
+    "configs/full.toml",
     "configs/full_cluster.toml",
     "configs/full_cluster-lattice.toml",
     "configs/preflight.toml",

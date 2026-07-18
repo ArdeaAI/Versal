@@ -912,6 +912,7 @@ class RouterService:
                 top_k=self.net.top_k,
                 max_steps=self.net.max_steps,
                 pathways=self._pathways(ordered_names),
+                traffic_observed=bool(self.step_usage_totals or self.transition_totals),
             )
             # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
             submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library, max_inline_depth=self.max_inline_depth)

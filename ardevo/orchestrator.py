@@ -1054,6 +1054,7 @@ class Orchestrator:
             context,
             self.library,
             retry_limit=self.refine_topology_retry_limit,
+            deadline_exceeded=self._deadline_exceeded,
         )
         current = entry
         visited: set[str] = set()

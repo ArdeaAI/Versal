@@ -102,6 +102,32 @@ def test_genome_spec_basic(solving_genome: Genome) -> None:
     assert spec.containers == []
     assert len(spec.edges) == len(solving_genome.enabled_connections())
     assert spec.width > 0 and spec.height > 0
+    assert spec.flow_label == "potential influence flow · weights/topology, not activations"
+
+
+def test_genome_spec_preserves_signed_and_recurrent_influence_semantics() -> None:
+    genome = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.HIDDEN, "tanh"),
+            2: NodeGene(2, NodeKind.OUTPUT, "identity"),
+        },
+        connections=[
+            ConnectionGene(0, 1, 0.75, True, 0),
+            ConnectionGene(0, 2, -0.5, True, 1),
+            ConnectionGene(2, 1, 0.25, True, 2, recurrent=True),
+        ],
+    )
+
+    spec = build_genome_spec(genome)
+    by_role = {edge.role: edge for edge in spec.edges}
+
+    assert by_role["forward-positive"].color == THEME["edge_positive"]
+    assert by_role["forward-positive"].signed_weight == 0.75
+    assert by_role["forward-negative"].color == THEME["edge_negative"]
+    assert by_role["forward-negative"].signed_weight == -0.5
+    assert by_role["recurrent"].color == THEME["edge_recurrent"]
+    assert by_role["recurrent"].style == "dashed"
 
 
 def test_genome_spec_expands_macro_as_callout(tmp_path: Path, solving_genome: Genome) -> None:
@@ -296,7 +322,7 @@ def test_wide_layer_wraps_into_block() -> None:
     assert len(output_columns) == 45  # ceil(sqrt(2000)) rows -> 45 sub-columns
 
 
-def test_draw_spec_caps_edge_count() -> None:
+def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling() -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -308,11 +334,35 @@ def test_draw_spec_caps_edge_count() -> None:
     count = _MAX_STRAIGHT_EDGES + 10_000
     edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
     figure, axis = plt.subplots()
-    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0))
+    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0, flow_label="potential influence flow · test"))
     drawn = sum(len(artist.get_segments()) for artist in axis.collections if isinstance(artist, LineCollection))
-    assert drawn <= _MAX_STRAIGHT_EDGES
-    assert any(f"{count:,}" in text.get_text() for text in axis.texts)  # the honesty note names the true total
+    assert drawn == 0  # dense edges live in one raster image, not per-edge Matplotlib artists
+    assert any(f"all {count:,} scene edges included" in text.get_text() for text in axis.texts)
+    assert axis.images
     plt.close(figure)
+
+
+def test_shared_datashader_edge_chunks_include_every_scene_edge(monkeypatch) -> None:
+    import numpy as np
+
+    import ardevo.rendering as rendering
+
+    monkeypatch.setattr(rendering, "_DENSITY_EDGE_CHUNK", 2)
+    spec = rendering.RenderSpec(
+        edges=[
+            rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"], magnitude=1.0),
+            rendering.SpecEdge(0.0, 1.0, 1.0, 0.0, 1.0, THEME["edge_negative"], magnitude=2.0),
+            rendering.SpecEdge(0.5, 0.0, 0.5, 1.0, 1.0, THEME["edge_recurrent"], curve=0.25, magnitude=0.5),
+        ],
+        width=1.0,
+        height=1.0,
+    )
+
+    image, rendered = rendering._rasterized_spec_edges(spec, pixel_width=64, pixel_height=48, x_range=(-0.1, 1.1), y_range=(-0.1, 1.1))
+
+    assert rendered == 3
+    assert image.shape == (48, 64, 4)
+    assert np.count_nonzero(image[:, :, 3]) > 0
 
 
 # --- png renders -----------------------------------------------------------------------------------
@@ -577,6 +627,23 @@ def test_render_library_gallery_smoke(tmp_path: Path) -> None:
     assert out_path.exists() and out_path.stat().st_size > 0
 
 
+def test_gallery_limits_nested_detail_to_one_reference_level(monkeypatch, tmp_path: Path) -> None:
+    import ardevo.rendering as rendering
+
+    library = ModuleLibrary(_FIXTURE_LIBRARY)
+    observed_depths: list[int] = []
+    original = rendering.build_entry_spec
+
+    def capture(*args, **kwargs):
+        observed_depths.append(kwargs["max_inline_depth"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rendering, "build_entry_spec", capture)
+    rendering.render_library_gallery(library, tmp_path / "gallery.png", columns=2, max_inline_depth=5)
+
+    assert observed_depths and set(observed_depths) == {1}
+
+
 def test_gallery_empty_library_still_writes(tmp_path: Path) -> None:
     library = ModuleLibrary(tmp_path / "empty")
     out_path = render_library_gallery(library, tmp_path / "gallery.png")
@@ -753,6 +820,19 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     assert "built from (structural ref)" not in labels
 
 
+def test_cold_overmind_labels_routing_potential_not_observed_traffic() -> None:
+    from ardevo.rendering import build_overmind_spec
+
+    view = _grid_view(2)
+    view.traffic_observed = False
+    spec = build_overmind_spec(view, legend=True)
+    labels = [text.text for text in spec.texts]
+
+    assert spec.flow_label == "routing potential · cold structural view, not observed traffic or activations"
+    assert "routing potential (cold structural view)" in labels
+    assert "routing traffic (observed)" not in labels
+
+
 def test_spec_text_draws() -> None:
     import matplotlib
 
@@ -776,6 +856,52 @@ def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
     tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
     image = mpimg.imread(tall)
     assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square
+
+
+def test_render_spec_png_preserves_destination_when_save_fails(monkeypatch, tmp_path: Path) -> None:
+    from matplotlib.figure import Figure
+
+    from ardevo.rendering import RenderSpec, _render_spec_png
+
+    target = tmp_path / "portrait.png"
+    target.write_bytes(b"old portrait")
+
+    def fail_savefig(self, path, *args, **kwargs):
+        Path(path).write_bytes(b"partial portrait")
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr(Figure, "savefig", fail_savefig)
+    with pytest.raises(RuntimeError, match="save failed"):
+        _render_spec_png(target, RenderSpec(width=2.0, height=1.0), "test")
+
+    assert target.read_bytes() == b"old portrait"
+    assert not list(tmp_path.glob(".*.tmp.png"))
+
+
+def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    import ardevo.rendering as rendering
+
+    def fail(*_args, **_kwargs):
+        raise ImportError("Datashader unavailable")
+
+    monkeypatch.setattr(rendering, "_rasterized_spec_edges", fail)
+    spec = rendering.RenderSpec(
+        edges=[rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"])],
+        width=1.0,
+        height=1.0,
+        flow_label="potential influence flow · test",
+    )
+    figure, axis = plt.subplots()
+    rendering.draw_spec(axis, spec)
+
+    assert any("classic fallback" in text.get_text() for text in axis.texts)
+    assert axis.patches  # explicit directional edge remains visible
+    plt.close(figure)
 
 
 def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_genome: Genome) -> None:
