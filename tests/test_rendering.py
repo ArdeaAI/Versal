@@ -1,13 +1,14 @@
 """Recursive render specs: nested networks expand inline, every failure degrades to an opaque box."""
 
 import random
+from itertools import product
 from pathlib import Path
 
 import pytest
 
 from ardevo.evolution.composition import minimal_composition
 from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, genome_to_dict
-from ardevo.library import MODULE, LibraryEntry, ModuleLibrary
+from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
 from ardevo.rendering import (
     RENDER_MAX_DEPTH,
     THEME,
@@ -42,6 +43,43 @@ def _entry(key: str, payload: dict) -> LibraryEntry:
     return LibraryEntry(key=key, entry_type=MODULE, level=1, io=_IO, payload=payload, weights_frozen=True, provenance={})
 
 
+def _spatial_entry(key: str, descriptors: list[tuple[str, tuple[int, ...]]]) -> LibraryEntry:
+    nodes: list[dict] = []
+    io_inputs: list[dict] = []
+    node_id = 0
+    for signature, shape in descriptors:
+        width = 1
+        for size in shape:
+            width *= size
+        io_inputs.append({"signature": signature, "width": width})
+        for coordinate in product(*(range(size) for size in shape)):
+            nodes.append({"id": node_id, "kind": "input", "activation": "identity", "coordinate": list(coordinate), "aggregation": "sum"})
+            node_id += 1
+    nodes.extend(
+        [
+            {"id": node_id, "kind": "bias", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+            {"id": node_id + 1, "kind": "hidden", "activation": "tanh", "coordinate": None, "aggregation": "product"},
+            {"id": node_id + 2, "kind": "output", "activation": "identity", "coordinate": None, "aggregation": "sum"},
+        ]
+    )
+    connections = [
+        {"in": 0, "out": node_id + 1, "weight": 1.0, "enabled": True, "innovation": 0, "recurrent": False},
+        {"in": 1, "out": node_id + 1, "weight": -0.5, "enabled": True, "innovation": 1, "recurrent": False},
+        {"in": node_id, "out": node_id + 1, "weight": 0.25, "enabled": True, "innovation": 2, "recurrent": False},
+        {"in": node_id + 1, "out": node_id + 2, "weight": 0.75, "enabled": True, "innovation": 3, "recurrent": False},
+        {"in": node_id + 2, "out": node_id + 1, "weight": 0.2, "enabled": True, "innovation": 4, "recurrent": True},
+    ]
+    return LibraryEntry(
+        key=key,
+        entry_type=MODULE,
+        level=1,
+        io={"inputs": io_inputs, "output": {"signature": "CONTINUOUS|C", "width": 1}},
+        payload={"nodes": nodes, "connections": connections, "macros": []},
+        weights_frozen=True,
+        provenance={},
+    )
+
+
 def _render_chain() -> dict[str, LibraryEntry]:
     leaf = Genome(
         nodes={0: NodeGene(0, NodeKind.INPUT, "identity"), 1: NodeGene(1, NodeKind.OUTPUT, "identity")},
@@ -64,6 +102,32 @@ def test_genome_spec_basic(solving_genome: Genome) -> None:
     assert spec.containers == []
     assert len(spec.edges) == len(solving_genome.enabled_connections())
     assert spec.width > 0 and spec.height > 0
+    assert spec.flow_label == "potential influence flow · weights/topology, not activations"
+
+
+def test_genome_spec_preserves_signed_and_recurrent_influence_semantics() -> None:
+    genome = Genome(
+        nodes={
+            0: NodeGene(0, NodeKind.INPUT, "identity"),
+            1: NodeGene(1, NodeKind.HIDDEN, "tanh"),
+            2: NodeGene(2, NodeKind.OUTPUT, "identity"),
+        },
+        connections=[
+            ConnectionGene(0, 1, 0.75, True, 0),
+            ConnectionGene(0, 2, -0.5, True, 1),
+            ConnectionGene(2, 1, 0.25, True, 2, recurrent=True),
+        ],
+    )
+
+    spec = build_genome_spec(genome)
+    by_role = {edge.role: edge for edge in spec.edges}
+
+    assert by_role["forward-positive"].color == THEME["edge_positive"]
+    assert by_role["forward-positive"].signed_weight == 0.75
+    assert by_role["forward-negative"].color == THEME["edge_negative"]
+    assert by_role["forward-negative"].signed_weight == -0.5
+    assert by_role["recurrent"].color == THEME["edge_recurrent"]
+    assert by_role["recurrent"].style == "dashed"
 
 
 def test_genome_spec_expands_macro_as_callout(tmp_path: Path, solving_genome: Genome) -> None:
@@ -151,6 +215,17 @@ def test_budget_falls_back_opaque(tmp_path: Path, solving_genome: Genome) -> Non
     key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={})
     spec = build_genome_spec(_macro_host(key), resolve=library_resolver(library), node_budget=5)
     assert len(spec.containers) == 1 and spec.containers[0].opaque
+
+
+def test_root_budget_fallback_is_a_labeled_opaque_summary(solving_genome: Genome) -> None:
+    entry = _entry("wide", genome_to_dict(solving_genome))
+    spec = build_entry_spec(entry, node_budget=1)
+
+    assert spec.node_count == 0
+    assert len(spec.containers) == 1 and spec.containers[0].opaque
+    assert "wide  L1" in spec.containers[0].label
+    assert f"{len(solving_genome.nodes):,} nodes" in spec.containers[0].label
+    assert f"{len(solving_genome.connections):,} edges" in spec.containers[0].label
 
 
 def test_garbage_payload_is_opaque() -> None:
@@ -247,7 +322,7 @@ def test_wide_layer_wraps_into_block() -> None:
     assert len(output_columns) == 45  # ceil(sqrt(2000)) rows -> 45 sub-columns
 
 
-def test_draw_spec_caps_edge_count() -> None:
+def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling() -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -259,11 +334,35 @@ def test_draw_spec_caps_edge_count() -> None:
     count = _MAX_STRAIGHT_EDGES + 10_000
     edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
     figure, axis = plt.subplots()
-    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0))
+    draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0, flow_label="potential influence flow · test"))
     drawn = sum(len(artist.get_segments()) for artist in axis.collections if isinstance(artist, LineCollection))
-    assert drawn <= _MAX_STRAIGHT_EDGES
-    assert any(f"{count:,}" in text.get_text() for text in axis.texts)  # the honesty note names the true total
+    assert drawn == 0  # dense edges live in one raster image, not per-edge Matplotlib artists
+    assert any(f"all {count:,} scene edges included" in text.get_text() for text in axis.texts)
+    assert axis.images
     plt.close(figure)
+
+
+def test_shared_datashader_edge_chunks_include_every_scene_edge(monkeypatch) -> None:
+    import numpy as np
+
+    import ardevo.rendering as rendering
+
+    monkeypatch.setattr(rendering, "_DENSITY_EDGE_CHUNK", 2)
+    spec = rendering.RenderSpec(
+        edges=[
+            rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"], magnitude=1.0),
+            rendering.SpecEdge(0.0, 1.0, 1.0, 0.0, 1.0, THEME["edge_negative"], magnitude=2.0),
+            rendering.SpecEdge(0.5, 0.0, 0.5, 1.0, 1.0, THEME["edge_recurrent"], curve=0.25, magnitude=0.5),
+        ],
+        width=1.0,
+        height=1.0,
+    )
+
+    image, rendered = rendering._rasterized_spec_edges(spec, pixel_width=64, pixel_height=48, x_range=(-0.1, 1.1), y_range=(-0.1, 1.1))
+
+    assert rendered == 3
+    assert image.shape == (48, 64, 4)
+    assert np.count_nonzero(image[:, :, 3]) > 0
 
 
 # --- png renders -----------------------------------------------------------------------------------
@@ -288,6 +387,233 @@ def test_render_composition_network_writes_png(tmp_path: Path) -> None:
     assert image_path.exists() and image_path.stat().st_size > 0
 
 
+def test_render_entry_density_dispatch_threshold_and_compositions(monkeypatch, tmp_path: Path) -> None:
+    import ardevo.rendering as rendering
+
+    density_calls: list[str] = []
+    detail_calls: list[str] = []
+
+    def density(path, entry):
+        density_calls.append(entry.key)
+        return rendering._LargeRenderMetadata(len(entry.payload["nodes"]), 0, 0, 0, "test")
+
+    def detail(entry, **_kwargs):
+        detail_calls.append(entry.key)
+        return rendering.RenderSpec()
+
+    monkeypatch.setattr(rendering, "_render_large_module_png", density)
+    monkeypatch.setattr(rendering, "build_entry_spec", detail)
+    monkeypatch.setattr(rendering, "_render_spec_png", lambda path, *_args, **_kwargs: path)
+
+    def bare(key: str, count: int, entry_type: str = MODULE) -> LibraryEntry:
+        return LibraryEntry(key, entry_type, 1, _IO, {"nodes": [{}] * count}, True, {})
+
+    rendering.render_entry(tmp_path / "at.png", bare("at", 1500))
+    rendering.render_entry(tmp_path / "over.png", bare("over", 1501))
+    rendering.render_entry(tmp_path / "custom-at.png", bare("custom-at", 7), node_budget=7)
+    rendering.render_entry(tmp_path / "custom-over.png", bare("custom-over", 8), node_budget=7)
+    rendering.render_entry(tmp_path / "composition.png", bare("composition", 2000, COMPOSITION))
+
+    assert density_calls == ["over", "custom-over"]
+    assert detail_calls == ["at", "custom-at", "composition"]
+
+
+def test_density_renderer_is_not_used_by_task_gallery_nested_or_overmind_paths(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
+    import ardevo.rendering as rendering
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("individual-entry density renderer was invoked")
+
+    monkeypatch.setattr(rendering, "_render_large_module_png", forbidden)
+    monkeypatch.setattr(rendering, "_render_spec_png", lambda path, *_args, **_kwargs: path)
+    rendering.render_network(tmp_path, solving_genome, title="task artifact")
+
+    composition = minimal_composition([("BINARY|K", 2)], "head", 1, InnovationTracker(_next_node_id=0), random.Random(0))
+    rendering.render_composition_network(tmp_path, composition, title="composition artifact")
+
+    wide_nodes = {node_id: NodeGene(node_id, NodeKind.INPUT, "identity") for node_id in range(1501)}
+    wide = Genome(nodes=wide_nodes, connections=[])
+    library = ModuleLibrary(tmp_path / "library")
+    wide_key = library.add(entry_type=MODULE, payload=genome_to_dict(wide), io={"inputs": [{"signature": "ANY", "width": 1501}], "output": _IO["output"]}, provenance={})
+    gallery = rendering.render_library_gallery(library, tmp_path / "gallery.png")
+    assert gallery.exists()
+
+    nested = rendering.build_genome_spec(_macro_host(wide_key), resolve=library_resolver(library))
+    assert any(box.opaque and wide_key in box.label for box in nested.containers)
+
+    view = rendering.OvermindView(
+        vertices=[rendering.OvermindVertex(key=wide_key, label="wide")],
+        input_signatures=["ANY:1501"],
+        output_signatures=["BINARY|K:1"],
+        d_model=8,
+        top_k=1,
+        max_steps=1,
+    )
+    overmind = rendering.build_overmind_spec(view, resolve=library_resolver(library), legend=False)
+    assert any(box.opaque and "wide" in box.label for box in overmind.containers)
+
+
+@pytest.mark.parametrize(
+    ("descriptors", "expected_panels"),
+    [
+        ([("CONTINUOUS|C,H,W", (2, 3, 4))], 2),
+        ([("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))], 4),
+        ([("CONTINUOUS|W,C,H", (4, 2, 3))], 2),
+        ([("CONTINUOUS|C,H,W", (1, 2, 3)), ("CONTINUOUS|E,H,W", (2, 2, 2))], 3),
+    ],
+)
+def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels) -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("spatial", descriptors)
+    first = _density_layout(entry)
+    second = _density_layout(entry)
+
+    assert first.mode == "semantic-spatial"
+    assert first.fallback_reason is None
+    assert len(first.panels) == expected_panels
+    assert sorted(node_id for panel in first.panels for node_id in panel.node_ids) == sorted(first.input_ids)
+    assert first.positions == second.positions
+    assert all(0.0 <= coordinate <= 1.0 for position in first.positions.values() for coordinate in position)
+
+
+@pytest.mark.parametrize(
+    ("signature", "coordinate", "reason"),
+    [
+        ("CONTINUOUS|C", [0.0], "no unique H/W"),
+        ("CONTINUOUS|C,H,W", None, "do not match"),
+        ("CONTINUOUS|C,H,W", [0.0, "bad", 0.0], "not numeric"),
+    ],
+)
+def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coordinate, reason) -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("fallback", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    entry.io["inputs"][0]["signature"] = signature
+    for node in entry.payload["nodes"]:
+        if node["kind"] == "input":
+            node["coordinate"] = coordinate
+    layout = _density_layout(entry)
+
+    assert layout.mode == "packed-grid"
+    assert reason in (layout.fallback_reason or "")
+    assert len({layout.positions[node_id] for node_id in layout.input_ids}) == len(layout.input_ids)
+
+
+def test_density_duplicate_coordinates_use_packed_grid() -> None:
+    from ardevo.rendering import _density_layout
+
+    entry = _spatial_entry("duplicate", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    entry.payload["nodes"][1]["coordinate"] = entry.payload["nodes"][0]["coordinate"]
+    layout = _density_layout(entry)
+
+    assert layout.mode == "packed-grid"
+    assert "duplicate coordinates" in (layout.fallback_reason or "")
+
+
+def test_density_rasterizes_every_edge_category_and_counts_all_enabled() -> None:
+    import datashader as ds
+    import numpy as np
+    import pandas as pd
+
+    from ardevo.rendering import _density_layout, _macro_implied_payload_edges, _rasterized_edge_layers
+
+    entry = _spatial_entry("layers", [("CONTINUOUS|C,H,W", (1, 2, 2))])
+    hidden_id = next(node["id"] for node in entry.payload["nodes"] if node["kind"] == "hidden")
+    entry.payload["macros"] = [{"ref": "library:m1_inner", "inputs": [2], "outputs": [hidden_id], "innovation": 9}]
+    layout = _density_layout(entry)
+    canvas = ds.Canvas(plot_width=64, plot_height=48, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
+    layers, enabled, rendered = _rasterized_edge_layers(
+        canvas,
+        layout.positions,
+        entry.payload["connections"],
+        _macro_implied_payload_edges(entry.payload),
+        ds,
+        pd,
+        np,
+    )
+
+    assert enabled == rendered == 5
+    assert all(layers[name] is not None for name in ("positive", "negative", "recurrent", "macro"))
+    assert all(float(np.asarray(layers[name].data).sum()) > 0 for name in layers)
+
+
+def test_density_edge_chunk_boundary_includes_every_enabled_edge() -> None:
+    import datashader as ds
+    import numpy as np
+    import pandas as pd
+
+    import ardevo.rendering as rendering
+
+    positions = {0: (0.1, 0.1), 1: (0.9, 0.9)}
+    connection = {"in": 0, "out": 1, "weight": 1.0, "enabled": True, "recurrent": False}
+    connections = [connection] * (rendering._DENSITY_EDGE_CHUNK + 1)
+    canvas = ds.Canvas(plot_width=16, plot_height=16, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
+    layers, enabled, rendered = rendering._rasterized_edge_layers(canvas, positions, connections, [], ds, pd, np)
+
+    assert enabled == rendered == rendering._DENSITY_EDGE_CHUNK + 1
+    assert layers["positive"] is not None
+
+
+def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.image as mpimg
+    import numpy as np
+    from matplotlib.axes import Axes
+
+    from ardevo.rendering import _render_large_module_density
+
+    entry = _spatial_entry("portrait", [("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))])
+    labels: list[str] = []
+    original_text = Axes.text
+
+    def capture_text(self, _x, _y, value, *args, **kwargs):
+        labels.append(str(value))
+        return original_text(self, _x, _y, value, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "text", capture_text)
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    first = _render_large_module_density(first_path, entry)
+    _render_large_module_density(second_path, entry)
+    first_pixels = mpimg.imread(first_path)
+    second_pixels = mpimg.imread(second_path)
+
+    assert first.canvas_width == 2400 and first.canvas_height == 1600
+    assert first.enabled_edge_count == first.rendered_edge_count == 5
+    assert first.isolated_input_count == 46
+    assert first.semantic_layout_mode == "semantic-spatial"
+    assert first_pixels.shape[:2] == (1600, 2400)
+    assert first_pixels.std() > 0.01
+    assert np.array_equal(first_pixels, second_pixels)
+    assert "potential influence flow" in labels
+    assert any("weights, not activations" in label for label in labels)
+
+
+def test_large_density_failure_atomically_replaces_with_opaque_summary(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
+    import ardevo.rendering as rendering
+
+    target = tmp_path / "portrait.png"
+    target.write_bytes(b"old portrait")
+    entry = _entry("wide", genome_to_dict(solving_genome))
+
+    def fail(path: Path, _entry: LibraryEntry):
+        path.write_bytes(b"partial density image")
+        raise ImportError("datashader unavailable")
+
+    def summary(path: Path, *_args, **_kwargs):
+        path.write_bytes(b"opaque summary")
+        return path
+
+    monkeypatch.setattr(rendering, "_render_large_module_density", fail)
+    monkeypatch.setattr(rendering, "_render_spec_png", summary)
+    metadata = rendering._render_large_module_png(target, entry)
+
+    assert target.read_bytes() == b"opaque summary"
+    assert metadata.semantic_layout_mode == "opaque-fallback"
+    assert "ImportError: datashader unavailable" == metadata.fallback_reason
+    assert not list(tmp_path.glob(".*.tmp.png"))
+
+
 def test_render_entry_writes_png_for_all_fixture_entries(tmp_path: Path) -> None:
     library = ModuleLibrary(_FIXTURE_LIBRARY)
     for key in library.keys():
@@ -299,6 +625,23 @@ def test_render_library_gallery_smoke(tmp_path: Path) -> None:
     library = ModuleLibrary(_FIXTURE_LIBRARY)
     out_path = render_library_gallery(library, tmp_path / "gallery.png", columns=2)
     assert out_path.exists() and out_path.stat().st_size > 0
+
+
+def test_gallery_limits_nested_detail_to_one_reference_level(monkeypatch, tmp_path: Path) -> None:
+    import ardevo.rendering as rendering
+
+    library = ModuleLibrary(_FIXTURE_LIBRARY)
+    observed_depths: list[int] = []
+    original = rendering.build_entry_spec
+
+    def capture(*args, **kwargs):
+        observed_depths.append(kwargs["max_inline_depth"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rendering, "build_entry_spec", capture)
+    rendering.render_library_gallery(library, tmp_path / "gallery.png", columns=2, max_inline_depth=5)
+
+    assert observed_depths and set(observed_depths) == {1}
 
 
 def test_gallery_empty_library_still_writes(tmp_path: Path) -> None:
@@ -477,6 +820,19 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     assert "built from (structural ref)" not in labels
 
 
+def test_cold_overmind_labels_routing_potential_not_observed_traffic() -> None:
+    from ardevo.rendering import build_overmind_spec
+
+    view = _grid_view(2)
+    view.traffic_observed = False
+    spec = build_overmind_spec(view, legend=True)
+    labels = [text.text for text in spec.texts]
+
+    assert spec.flow_label == "routing potential · cold structural view, not observed traffic or activations"
+    assert "routing potential (cold structural view)" in labels
+    assert "routing traffic (observed)" not in labels
+
+
 def test_spec_text_draws() -> None:
     import matplotlib
 
@@ -500,6 +856,52 @@ def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
     tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
     image = mpimg.imread(tall)
     assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square
+
+
+def test_render_spec_png_preserves_destination_when_save_fails(monkeypatch, tmp_path: Path) -> None:
+    from matplotlib.figure import Figure
+
+    from ardevo.rendering import RenderSpec, _render_spec_png
+
+    target = tmp_path / "portrait.png"
+    target.write_bytes(b"old portrait")
+
+    def fail_savefig(self, path, *args, **kwargs):
+        Path(path).write_bytes(b"partial portrait")
+        raise RuntimeError("save failed")
+
+    monkeypatch.setattr(Figure, "savefig", fail_savefig)
+    with pytest.raises(RuntimeError, match="save failed"):
+        _render_spec_png(target, RenderSpec(width=2.0, height=1.0), "test")
+
+    assert target.read_bytes() == b"old portrait"
+    assert not list(tmp_path.glob(".*.tmp.png"))
+
+
+def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    import ardevo.rendering as rendering
+
+    def fail(*_args, **_kwargs):
+        raise ImportError("Datashader unavailable")
+
+    monkeypatch.setattr(rendering, "_rasterized_spec_edges", fail)
+    spec = rendering.RenderSpec(
+        edges=[rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"])],
+        width=1.0,
+        height=1.0,
+        flow_label="potential influence flow · test",
+    )
+    figure, axis = plt.subplots()
+    rendering.draw_spec(axis, spec)
+
+    assert any("classic fallback" in text.get_text() for text in axis.texts)
+    assert axis.patches  # explicit directional edge remains visible
+    plt.close(figure)
 
 
 def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_genome: Genome) -> None:
@@ -527,6 +929,7 @@ def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_
     spec = build_overmind_spec(view, resolve=library_resolver(library), legend=False)
     wide_boxes = [box for box in spec.containers if "wide stone" in (box.label or "")]
     assert wide_boxes and all(box.opaque for box in wide_boxes)  # capped: footprint, not a 784-node bar
+    assert "785 nodes · 784 edges" in wide_boxes[0].label
     small_boxes = [box for box in spec.containers if (box.label or "").startswith("small")]
     assert small_boxes and not all(box.opaque for box in small_boxes)  # small experts keep full detail
     assert max(spec.width, spec.height) / max(min(spec.width, spec.height), 1e-6) < 6.0  # sane aspect

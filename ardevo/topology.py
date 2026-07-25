@@ -8,7 +8,7 @@ import sqlite3
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import networkx as nx
 import torch
@@ -18,8 +18,17 @@ if TYPE_CHECKING:
     from ardevo.dataset.icarus import Task
     from ardevo.library import ModuleLibrary
 
-TOPOLOGY_SCHEMA_VERSION = 1
+TOPOLOGY_SCHEMA_VERSION = 2
 _NODE_MATCH = categorical_node_match("label", "")
+_EDGE_MATCH = nx.algorithms.isomorphism.categorical_edge_match("label", "")
+
+# Exact graph isomorphism is only the fallback for small, reordered payloads.  Large neural
+# topologies contain thousands of semantically identical connection positions; VF2 can spend hours
+# proving that even a graph compared with itself is isomorphic.  Above this boundary the ledger is
+# deliberately conservative: normalized payload equality can prove a duplicate, otherwise the
+# candidate is retained as unseen.  A false negative costs an assessment; a false positive would
+# incorrectly discard a potentially useful architecture.
+_MAX_EXACT_ISOMORPHISM_NODES = 4096
 
 
 @dataclass(frozen=True)
@@ -35,8 +44,8 @@ def _label(category: str, **attributes: Any) -> str:
 def _add_relation(graph: nx.DiGraph, source: int, target: int, kind: str, **attributes: Any) -> None:
     relation = max(graph.nodes, default=-1) + 1
     graph.add_node(relation, label=_label(f"relation:{kind}", **attributes))
-    graph.add_edge(source, relation)
-    graph.add_edge(relation, target)
+    graph.add_edge(source, relation, label="")
+    graph.add_edge(relation, target, label="")
 
 
 def _nested_reference_label(reference: str, library: ModuleLibrary | None, visiting: frozenset[str]) -> str:
@@ -82,29 +91,40 @@ def _module_graph(payload: dict[str, Any], library: ModuleLibrary | None, visiti
             ),
         )
 
+    connections = list(payload.get("connections", []))
+    pair_counts: dict[tuple[int, int], int] = {}
+    for connection in connections:
+        pair = (int(connection["in"]), int(connection["out"]))
+        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
     tie_nodes: dict[int, int] = {}
-    for connection in payload.get("connections", []):
+    for connection in connections:
         source = node_map.get(int(connection["in"]))
         target = node_map.get(int(connection["out"]))
         if source is None or target is None:
             continue
-        relation = max(graph.nodes, default=-1) + 1
-        graph.add_node(
-            relation,
-            label=_label("module_connection", enabled=bool(connection.get("enabled", True)), recurrent=bool(connection.get("recurrent", False))),
-        )
-        graph.add_edge(source, relation)
-        graph.add_edge(relation, target)
         # Genome payloads serialize this as ``tie``; accept ``tie_group`` as well for
         # hand-authored/future schemas. The numeric marker itself is an innovation-like id, while
         # the partition it induces across connections is architectural and must be preserved.
         tie_group = connection.get("tie", connection.get("tie_group"))
+        connection_label = _label("module_connection", enabled=bool(connection.get("enabled", True)), recurrent=bool(connection.get("recurrent", False)))
+        # The ordinary case is one untied gene per endpoint pair.  Store its semantics directly on
+        # the edge rather than expanding one indistinguishable relation node per gene.  Parallel
+        # forward/recurrent genes and tied genes retain relation nodes so multiplicity and tie
+        # partitions remain exact in a plain DiGraph.
+        if tie_group is None and pair_counts[(int(connection["in"]), int(connection["out"]))] == 1:
+            graph.add_edge(source, target, label=connection_label)
+            continue
+        relation = max(graph.nodes, default=-1) + 1
+        graph.add_node(relation, label=connection_label)
+        graph.add_edge(source, relation, label="")
+        graph.add_edge(relation, target, label="")
         if tie_group is not None:
             tie_id = int(tie_group)
             if tie_id not in tie_nodes:
                 tie_nodes[tie_id] = max(graph.nodes, default=-1) + 1
                 graph.add_node(tie_nodes[tie_id], label=_label("weight_tie_group"))
-            graph.add_edge(tie_nodes[tie_id], relation)
+            graph.add_edge(tie_nodes[tie_id], relation, label="")
 
     for macro in payload.get("macros", []):
         macro_node = max(graph.nodes, default=-1) + 1
@@ -178,7 +198,7 @@ def _composition_graph(payload: dict[str, Any], library: ModuleLibrary | None, v
 def _graph_payload(graph: nx.DiGraph) -> dict[str, Any]:
     return {
         "nodes": [{"id": int(node), "label": str(attributes["label"])} for node, attributes in graph.nodes(data=True)],
-        "edges": [[int(source), int(target)] for source, target in graph.edges()],
+        "edges": [{"source": int(source), "target": int(target), "label": str(attributes.get("label", ""))} for source, target, attributes in graph.edges(data=True)],
     }
 
 
@@ -186,7 +206,12 @@ def _payload_graph(payload: dict[str, Any]) -> nx.DiGraph:
     graph = nx.DiGraph()
     for node in payload["nodes"]:
         graph.add_node(int(node["id"]), label=str(node["label"]))
-    graph.add_edges_from((int(source), int(target)) for source, target in payload["edges"])
+    for edge in payload["edges"]:
+        if isinstance(edge, dict):
+            graph.add_edge(int(edge["source"]), int(edge["target"]), label=str(edge.get("label", "")))
+        else:  # Schema-v1 rows remain readable while versioned contexts prevent cross-schema use.
+            source, target = edge
+            graph.add_edge(int(source), int(target), label="")
     return graph
 
 
@@ -203,14 +228,18 @@ def topology_record(
     # notice is not actionable at run time.
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="The hashes produced for directed graphs changed in version v3.5.*", category=UserWarning)
-        bucket = nx.weisfeiler_lehman_graph_hash(graph, node_attr="label", iterations=4, digest_size=32)
+        bucket = nx.weisfeiler_lehman_graph_hash(graph, node_attr="label", edge_attr="label", iterations=4, digest_size=32)
     return TopologyRecord(bucket=bucket, graph=_graph_payload(graph))
 
 
 def same_topology(left: TopologyRecord, right: TopologyRecord) -> bool:
     if left.bucket != right.bucket:
         return False
-    return nx.is_isomorphic(_payload_graph(left.graph), _payload_graph(right.graph), node_match=_NODE_MATCH)
+    if left.graph == right.graph:
+        return True
+    if max(len(left.graph["nodes"]), len(right.graph["nodes"])) > _MAX_EXACT_ISOMORPHISM_NODES:
+        return False
+    return nx.is_isomorphic(_payload_graph(left.graph), _payload_graph(right.graph), node_match=_NODE_MATCH, edge_match=_EDGE_MATCH)
 
 
 def task_content_fingerprint(task: Task) -> str:
@@ -277,6 +306,7 @@ class TopologyTabuSession:
     context: str
     library: ModuleLibrary
     retry_limit: int = 8
+    deadline_exceeded: Callable[[], bool] | None = None
     pending: list[TopologyRecord] = field(default_factory=list)
     _buckets: dict[str, list[TopologyRecord]] = field(default_factory=dict)
     candidates: int = 0
@@ -285,11 +315,24 @@ class TopologyTabuSession:
     retry_exhaustions: int = 0
     exhausted: bool = False
 
-    def _insert_if_new(self, entry_type: str, payload: dict[str, Any]) -> bool:
-        record = topology_record(entry_type, payload, library=self.library)
-        known = self._buckets.setdefault(record.bucket, self.store.load_bucket(self.context, record.bucket))
-        if any(same_topology(record, previous) for previous in known):
+    def _past_deadline(self) -> bool:
+        if self.deadline_exceeded is None or not self.deadline_exceeded():
             return False
+        self.exhausted = True
+        return True
+
+    def _insert_if_new(self, entry_type: str, payload: dict[str, Any]) -> bool:
+        if self._past_deadline():
+            return False
+        record = topology_record(entry_type, payload, library=self.library)
+        if self._past_deadline():
+            return False
+        known = self._buckets.setdefault(record.bucket, self.store.load_bucket(self.context, record.bucket))
+        for previous in known:
+            if self._past_deadline():
+                return False
+            if same_topology(record, previous):
+                return False
         known.append(record)
         self.pending.append(record)
         return True
@@ -306,9 +349,12 @@ class TopologyTabuSession:
             self.unique += 1
 
     def reserve(self, entry_type: str, payload: dict[str, Any]) -> bool:
+        if self._past_deadline():
+            return False
         self.candidates += 1
         if not self._insert_if_new(entry_type, payload):
-            self.duplicates += 1
+            if not self.exhausted:
+                self.duplicates += 1
             return False
         self.unique += 1
         return True

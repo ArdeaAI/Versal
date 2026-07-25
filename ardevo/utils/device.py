@@ -5,9 +5,9 @@ tiny and dispatch-bound, and the workers are pinned to one intra-op thread each.
 only for population-batched tensor programs (the `gradient_batched` family), so this resolver is
 consumed at those sites, threaded in by `build_evolver`, plus `Proctor`'s informational device.
 Resolution order: an explicit per-op knob (`device = ...` on the train table) wins, then the
-`[run] compute` override, then the `[run] machine` mapping (MonadMetal -> mps, LatticeCUDA ->
-cuda, ClusterCUDA -> cuda). Every rung of the ladder falls back to CPU with a warning rather than crashing a queue job
-on an agent whose GPU is missing or unconfigured.
+`[run] compute` override, then the `[run] machine` mapping (MonadMetal -> mps, either Lattice
+CUDA mode -> cuda, ClusterCUDA -> cuda). Every rung of the ladder falls back to CPU with a warning
+rather than crashing a run whose accelerator is missing or unconfigured.
 
 Calibration is deliberately separate from device resolution. A caller supplies named execution
 mode runners and, optionally, an explicit path under gitignored run state. Merely importing this
@@ -32,7 +32,14 @@ from ardevo.utils.logging import Logger
 
 logger = Logger.get_logger()
 
-_MACHINE_DEVICE = {"MonadMetal": "mps", "LatticeCUDA": "cuda", "ClusterCUDA": "cuda"}
+_MACHINE_DEVICE = {
+    "MonadMetal": "mps",
+    "LatticeCUDA": "cuda",
+    "LocalLatticeCUDA": "cuda",
+    "LatticeCPU": "cpu",
+    "LocalLatticeCPU": "cpu",
+    "ClusterCUDA": "cuda",
+}
 
 SERIAL_MODE = "serial"
 POPULATION_CPU_MODE = "population_cpu"
@@ -398,8 +405,13 @@ def resolve_execution_mode(
 
 
 def resolve_worker_count(value: int | str) -> int:
-    """The `assess_workers` knob: `"auto"` sizes to the machine (cpu_count - 4 leaves headroom for
-    the main process, the OS, and a GPU feeder); anything else is an explicit integer count."""
+    """Resolve ``assess_workers``, keeping CPU and memory headroom for the parent process.
+
+    Auto sizing respects allocation/affinity, leaves four logical CPUs for the parent and OS, and
+    caps at physical cores minus two. CPU-bound Torch workers do not benefit enough from sibling
+    hyperthreads to justify duplicating a large task payload into all of them. Explicit integers
+    remain exact overrides.
+    """
     if value == "auto":
         import os
 
@@ -416,7 +428,11 @@ def resolve_worker_count(value: int | str) -> int:
                 allocated = 0
             if allocated > 0:
                 counts.append(allocated)
-        return max(1, min(counts) - 4)
+        limits = [min(counts) - 4]
+        physical = psutil.cpu_count(logical=False)
+        if physical is not None and physical > 0:
+            limits.append(physical - 2)
+        return max(1, min(limits))
     return int(value)
 
 

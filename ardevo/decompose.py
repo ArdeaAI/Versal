@@ -277,9 +277,20 @@ def spatial_patches(task: Task, *, rng: random.Random, n_patches: int = 2) -> li
     length (e.g. a grid->label classification task, where the output carries no spatial axis).
     """
     first_input, first_output = task.support[0]
-    spatial = next((axis for axis in (Axis.HEIGHT, Axis.WIDTH) if axis in first_input.axes and axis in first_output.axes), None)
-    if spatial is None:
+    shared = [axis for axis in (Axis.HEIGHT, Axis.WIDTH) if axis in first_input.axes and axis in first_output.axes]
+    if not shared:
         return []
+    # Re-planning a child naturally alternates H/W: always split the largest remaining shared
+    # support-only canvas axis (stable H tie-break).
+    lengths = {axis: max(int(inp.data.shape[inp.axes.index(axis)]) for inp, _out in task.support) for axis in shared}
+    largest = max(lengths.values())
+    tied = [axis for axis in shared if lengths[axis] == largest]
+    previous = task.meta.name.rsplit(".", 1)[-1][:1]
+    if len(tied) > 1 and previous in {"h", "w"}:
+        alternate = Axis.WIDTH if previous == "h" else Axis.HEIGHT
+        spatial = alternate if alternate in tied else tied[0]
+    else:
+        spatial = tied[0]
     input_position = first_input.axes.index(spatial)
     output_position = first_output.axes.index(spatial)
     length = first_input.data.shape[input_position]
@@ -312,4 +323,8 @@ def build_decomposers(table: dict[str, Any]) -> list[tuple[str, Callable[..., li
     lego block: the orchestrator receives named, ready-to-call partials and never reads raw
     config. Unknown names fail loudly via `Registry.get` (KeyError).
     """
-    return [(name, functools.partial(DECOMPOSE.get(name), **_bind_prefixed(table, name))) for name in table.get("decompose", [])]
+    names = [str(name) for name in table.get("decompose", [])]
+    priority = {"spatial_patches": 0, "time_windows": 1, "output_slices": 2, "input_subsets": 3}
+    configured_order = {name: index for index, name in enumerate(names)}
+    names.sort(key=lambda name: (priority.get(name, 2), configured_order[name]))
+    return [(name, functools.partial(DECOMPOSE.get(name), **_bind_prefixed(table, name))) for name in names]

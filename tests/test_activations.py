@@ -50,9 +50,7 @@ def test_new_activation_semantics() -> None:
 
 @pytest.mark.parametrize("activation", ["tanh", "relu", "sigmoid", "identity", "sin", "gaussian"])
 def test_decoded_net_with_any_activation_pickles(activation: str, xor_adapter) -> None:
-    """The composition assess pool pickles whole trained nets back from workers, so every palette
-    callable stored on a decoded net must pickle by reference (the diag_g0 gaussian-lambda crash).
-    Safe pickle use: round-tripping an object built in this process, exactly what pool.map does."""
+    """Decoded modules remain checkpoint-safe for every configured activation callable."""
     import pickle
 
     module = xor_adapter.decode(_hidden_activation_genome(activation))

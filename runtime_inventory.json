@@ -3,12 +3,15 @@
     "configs/brute.toml",
     "configs/canary-lattice.toml",
     "configs/canary.toml",
+    "configs/full.toml",
+    "configs/full_cluster-lattice.toml",
     "configs/full_cluster.toml",
+    "configs/preflight-lattice.toml",
     "configs/preflight.toml",
     "configs/smoke.toml"
   ],
   "canonical_config": "configs/smoke.toml",
-  "canonical_config_sha256": "c3c2bb90892a587fddcf863f8880e1bd19e8e044a187398f54eba8a0959b03c8",
+  "canonical_config_sha256": "5987dface97c1e31d77c2e2b778c5a6e02f66102190d9ed7783b3eccd683967b",
   "config_keys": [
     "dataset.min_fixed_query_samples",
     "dataset.n_samples",
@@ -135,7 +138,9 @@
     "orchestrator.budgets.depth8",
     "orchestrator.decompose",
     "orchestrator.decompose_first_above",
+    "orchestrator.decompose_leaf_cap",
     "orchestrator.decompose_probe_generations",
+    "orchestrator.decompose_probe_seconds",
     "orchestrator.decompose_solvability_floor",
     "orchestrator.direct.assess_workers",
     "orchestrator.direct.elitism",
@@ -152,8 +157,22 @@
     "orchestrator.evolve",
     "orchestrator.evolve_budget.composition",
     "orchestrator.evolve_budget.direct",
+    "orchestrator.evolve_budget.field",
     "orchestrator.evolve_budget.grammar",
     "orchestrator.evolve_budget.routed",
+    "orchestrator.field.assess_workers",
+    "orchestrator.field.audit_sites",
+    "orchestrator.field.elitism",
+    "orchestrator.field.evaluate.kind",
+    "orchestrator.field.pop_size",
+    "orchestrator.field.train.kind",
+    "orchestrator.field.train.lr",
+    "orchestrator.field.train.steps",
+    "orchestrator.field.train.weight_decay",
+    "orchestrator.field.train.writeback",
+    "orchestrator.field.train_sites",
+    "orchestrator.field.verify_chunk_size",
+    "orchestrator.field.verify_top_k",
     "orchestrator.floor",
     "orchestrator.grammar.candidates_per_production",
     "orchestrator.grammar.composition_sizes",
@@ -221,6 +240,7 @@
     "orchestrator.wall.min_metric",
     "orchestrator.wall.seed_top_k",
     "run.clearml",
+    "run.clearml_capture_streams",
     "run.duration.generations",
     "run.experiment",
     "run.live_status",
@@ -264,6 +284,9 @@
     "orchestrator.direct",
     "orchestrator.direct.train",
     "orchestrator.evolve_budget",
+    "orchestrator.field",
+    "orchestrator.field.evaluate",
+    "orchestrator.field.train",
     "orchestrator.grammar",
     "orchestrator.refine",
     "orchestrator.routed",
@@ -320,6 +343,7 @@
     "evolve_strategy": [
       "composition",
       "direct",
+      "field",
       "grammar",
       "routed"
     ],
@@ -343,6 +367,12 @@
       "weight_robustness"
     ],
     "init": [
+      "cppn",
+      "factored",
+      "minimal",
+      "sparse"
+    ],
+    "init_estimator": [
       "cppn",
       "factored",
       "minimal",
@@ -421,8 +451,8 @@
     },
     {
       "access": "read-write",
-      "condition": "Icarus dataset acquisition and reuse; outside the repository",
-      "path": "<Hugging Face datasets cache>"
+      "condition": "selected Icarus Parquet shards; content-addressed and outside the repository",
+      "path": "<Hugging Face Hub cache>"
     },
     {
       "access": "read-write",
@@ -511,6 +541,11 @@
     },
     {
       "access": "read-write",
+      "condition": "pinned streamed task references written after discovery and reused on resume",
+      "path": "<run_dir>/task_pool.json"
+    },
+    {
+      "access": "read-write",
       "condition": "loaded on resume and overwritten with rolling resumable state",
       "path": "<run_dir>/checkpoint.json"
     },
@@ -538,6 +573,7 @@
   "runtime_config_keys": [
     "archive",
     "campaign",
+    "clearml_capture_streams",
     "clearml_run",
     "compute",
     "config_effective_sha256",

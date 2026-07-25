@@ -29,6 +29,7 @@ from ardevo.evaluation import support_loss, support_loss_deep
 from ardevo.evolution.genome import Genome
 from ardevo.evolution.registry import Registry
 from ardevo.substrate import SubstrateModule
+from ardevo.utils.deadline import expired
 
 if TYPE_CHECKING:
     from ardevo.substrate import GraphNet
@@ -64,6 +65,7 @@ def gradient(
     writeback: bool = True,
     weight_decay: float = 0.0,
     score_candidates: bool = False,
+    deadline: float | None = None,
 ) -> tuple[Genome, SubstrateModule]:
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
@@ -72,13 +74,17 @@ def gradient(
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
     for _ in range(steps):
+        if expired(deadline):
+            break
         optimizer.zero_grad()
         loss = support_loss(module, encoded)
         # Stop on no-grad (frozen params) OR a non-finite loss: Adam does not filter NaN/Inf grads,
         # so stepping on them would silently corrupt every weight in the candidate.
-        if not loss.requires_grad or not torch.isfinite(loss):
+        if expired(deadline) or not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
+        if expired(deadline):
+            break
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
@@ -117,6 +123,7 @@ def gradient_scheduled(
     writeback: bool = True,
     weight_decay: float = 0.0,
     score_candidates: bool = False,
+    deadline: float | None = None,
 ) -> tuple[Genome, SubstrateModule]:
     # Warmup + cosine decay: fixed-lr Adam stalls in oscillatory loss regions that a decaying rate
     # anneals through. Measured on the CPPN-generator landscape (ai/trial/probe_6): the same
@@ -127,13 +134,17 @@ def gradient_scheduled(
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
     for step_lr in _scheduled_learning_rates(steps, lr, warmup_fraction=warmup_fraction, final_lr_fraction=final_lr_fraction):
+        if expired(deadline):
+            break
         for group in optimizer.param_groups:
             group["lr"] = step_lr
         optimizer.zero_grad()
         loss = support_loss(module, encoded)
-        if not loss.requires_grad or not torch.isfinite(loss):
+        if expired(deadline) or not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
+        if expired(deadline):
+            break
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
@@ -157,6 +168,7 @@ def gradient_refine(
     weight_decay: float = 0.0,
     score_candidates: bool = False,
     contractivity_weight: float = 0.0,
+    deadline: float | None = None,
 ) -> tuple[Genome, SubstrateModule]:
     """Deep-supervised gradient training for the refine substrate (TRM): backprop a loss summed over
     every refinement pass, through the full recursion. Falls back to plain `gradient` for modules
@@ -167,12 +179,16 @@ def gradient_refine(
     map contractive: the DT-L finding that makes deep unrolls train stably and gives fixed-point
     convergence a meaning. 0.0 (the default) is off, byte-identical."""
     if not hasattr(module, "refine_trace"):
-        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates)
+        return gradient(
+            genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates, deadline=deadline
+        )
     parameters = _trainable_parameters(module)
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
     for _ in range(steps):
+        if expired(deadline):
+            break
         optimizer.zero_grad()
         loss = support_loss_deep(module, encoded)
         if contractivity_weight > 0.0 and hasattr(module, "recurrent_weights"):
@@ -183,9 +199,11 @@ def gradient_refine(
             recurrent_net = cast(RecurrentGraphNet, module)
             recurrent_masked = recurrent_net.recurrent_weights * recurrent_net.recurrent_mask
             loss = loss + contractivity_weight * torch.relu(recurrent_masked.norm() - 1.0)
-        if not loss.requires_grad or not torch.isfinite(loss):
+        if expired(deadline) or not loss.requires_grad or not torch.isfinite(loss):
             break
         loss.backward()
+        if expired(deadline):
+            break
         optimizer.step()
     if writeback:
         genome = _writeback(genome, module)
@@ -247,6 +265,7 @@ def gradient_batched(
     score_candidates: bool = False,
     microbatch_size: int = 0,
     adaptive_microbatch: bool = True,
+    deadline: float | None = None,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Train every BATCHABLE candidate in one tensor program and the rest sequentially (identical
     params, identical numerics), stitched back in input order. Non-batchable candidates (recurrent/
@@ -270,6 +289,7 @@ def gradient_batched(
         microbatch_size=microbatch_size,
         adaptive_microbatch=adaptive_microbatch,
         serial_op=gradient,
+        deadline=deadline,
     )
 
 
@@ -294,6 +314,7 @@ def gradient_scheduled_population(
     score_candidates: bool = False,
     microbatch_size: int = 0,
     adaptive_microbatch: bool = True,
+    deadline: float | None = None,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Population form of `gradient_scheduled`, with the identical warmup/cosine rates.
 
@@ -322,6 +343,7 @@ def gradient_scheduled_population(
         step_learning_rates=rates,
         serial_op=gradient_scheduled,
         serial_params={"warmup_fraction": warmup_fraction, "final_lr_fraction": final_lr_fraction},
+        deadline=deadline,
     )
 
 
@@ -344,6 +366,7 @@ def gradient_refine_population(
     score_candidates: bool = False,
     microbatch_size: int = 0,
     adaptive_microbatch: bool = True,
+    deadline: float | None = None,
 ) -> list[tuple[Genome, SubstrateModule]]:
     """Population form of `gradient_refine`. Correct by exclusion: `core()` keeps every refine/
     recurrent/product/macro module OUT of the batch (they train through sequential
@@ -369,6 +392,7 @@ def gradient_refine_population(
         microbatch_size=microbatch_size,
         adaptive_microbatch=adaptive_microbatch,
         serial_op=gradient_refine,
+        deadline=deadline,
     )
 
 
@@ -393,6 +417,7 @@ def _gradient_batched_impl(
     adaptive_microbatch: bool = True,
     step_learning_rates: list[float] | None = None,
     serial_params: dict[str, object] | None = None,
+    deadline: float | None = None,
 ) -> list[tuple[Genome, SubstrateModule]]:
     from ardevo.substrate_batched import BatchedGraphNet
 
@@ -419,6 +444,7 @@ def _gradient_batched_impl(
             writeback=writeback,
             weight_decay=weight_decay,
             score_candidates=score_candidates,
+            deadline=deadline,
             **serial_extras,
         )
 
@@ -470,6 +496,8 @@ def _gradient_batched_impl(
                 target_repeated = target_device.repeat(population, *([1] * (target_device.dim() - 1)))
                 mask_repeated = mask_device.repeat(population, *([1] * (mask_device.dim() - 1))) if mask_device is not None else None
                 for step in range(steps):
+                    if expired(deadline):
+                        break
                     if step_learning_rates is not None:
                         for group in optimizer.param_groups:
                             group["lr"] = step_learning_rates[step]
@@ -482,9 +510,11 @@ def _gradient_batched_impl(
                     # The P multiplier turns the folded MEAN into the SUM of per-candidate losses:
                     # each candidate's gradient and Adam update match its sequential computation.
                     loss = population * loss_fn(raw, target_repeated, descriptor, mask_repeated)
-                    if not loss.requires_grad or not torch.isfinite(loss):
+                    if expired(deadline) or not loss.requires_grad or not torch.isfinite(loss):
                         break
                     loss.backward()
+                    if expired(deadline):
+                        break
                     optimizer.step()
                 batched.unstack_into(nets)
             return float(batched.n_max), batched.pad_efficiency()

@@ -13,7 +13,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from functools import partial
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from multiprocessing.pool import Pool
@@ -32,6 +32,9 @@ from ardevo.evolution.selection import pareto_ranks_and_crowding, pareto_sort_ke
 from ardevo.evolution.speciation import SpeciesPlan
 from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.substrate import GraphNet, SubstrateModule, decode_module
+from ardevo.utils.memory import release_unused_host_memory
+
+_TaskPayload = TypeVar("_TaskPayload")
 
 
 class Adapter(Protocol):
@@ -174,6 +177,12 @@ class Evolver:
     halving_keep: float = 0.5
     # Set only around post-solve refinement. Ordinary unsolved evolution leaves this None.
     topology_tabu: "TopologyTabuSession | None" = None
+    # Resource preflight provenance.  Keeping the registry name/arguments avoids constructing a
+    # giant seed merely to discover how large it would have been.
+    init_kind: str = "minimal"
+    init_params: dict[str, Any] = field(default_factory=dict)
+    deadline_exceeded: Callable[[], bool] | None = None
+    deadline: float | None = None
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(
@@ -190,7 +199,9 @@ class Evolver:
             module = self._decode(genome, adapter)
         except (ValueError, KeyError):
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
-        genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng)
+        genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng, deadline=self.deadline)
+        if self.deadline_exceeded is not None and self.deadline_exceeded():
+            return Assessed(genome, _floored_metrics() | {"deadline_stage_candidate_training": 1.0}, _FLOOR_FITNESS, None)
         metrics = self.evaluate_op(genome, module, adapter)
         return Assessed(genome, metrics, self._score(genome, metrics), module)
 
@@ -216,7 +227,12 @@ class Evolver:
                 return self._assess_staged(genomes, adapter, state)
             if self.assess_workers > 1 and len(genomes) > 1:
                 return self._assess_pooled(genomes, adapter)
-            return [self.assess(genome, adapter, state) for genome in genomes]
+            assessed: list[Assessed] = []
+            for genome in genomes:
+                if assessed and self.deadline_exceeded is not None and self.deadline_exceeded():
+                    break
+                assessed.append(self.assess(genome, adapter, state))
+            return assessed
         decoded: list[SubstrateModule | None] = []
         for genome in genomes:
             try:
@@ -226,7 +242,7 @@ class Evolver:
         if self.assess_workers > 1 and sum(module is not None for module in decoded) > 1:
             return self._assess_hybrid(genomes, decoded, adapter, state)
         viable = [(genome, module) for genome, module in zip(genomes, decoded) if module is not None]
-        pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng) if viable else []
+        pairs = self.train_population_op([g for g, _m in viable], [m for _g, m in viable], adapter.encoded, rng=state.rng, deadline=self.deadline) if viable else []
         from ardevo.evolution import train as train_stage
 
         self.assess_stats = dict(train_stage.last_batch_stats)
@@ -270,7 +286,7 @@ class Evolver:
         pooled_adapter = self._pooled_adapter(adapter)
         serial_async = None
         if serial_indices:
-            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness, deadline=self.deadline)
             chunksize = max(1, len(serial_indices) // (self.assess_workers * 4))
             serial_async = pool.map_async(worker, [genomes[index] for index in serial_indices], chunksize=chunksize)
 
@@ -281,7 +297,9 @@ class Evolver:
 
         trained_pairs: list[tuple[Genome, SubstrateModule]] = []
         if batch_indices:
-            trained_pairs = self.train_population_op([genomes[index] for index in batch_indices], [decoded[index] for index in batch_indices], adapter.encoded, rng=state.rng)
+            trained_pairs = self.train_population_op(
+                [genomes[index] for index in batch_indices], [decoded[index] for index in batch_indices], adapter.encoded, rng=state.rng, deadline=self.deadline
+            )
         self.assess_stats = dict(train_stage.last_batch_stats)
         if viable_indices:
             self.assess_stats["fallback"] = len(serial_indices) / len(viable_indices)
@@ -330,7 +348,7 @@ class Evolver:
         current = list(genomes)
         for stage_index, delta in enumerate(deltas):
             staged_op = partial(self.train_op, steps=delta)  # call-time kwargs override partial keywords
-            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+            worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness, deadline=self.deadline)
             if pool is not None:
                 chunksize = max(1, len(alive) // (self.assess_workers * 4))
                 triples = pool.map(worker, [current[index] for index in alive], chunksize=chunksize)
@@ -358,43 +376,62 @@ class Evolver:
         return (trained genome, metrics, fitness); the module is re-decoded here from the written-back
         genome (faithful and cheap, no retrain), so the returned Assessed matches the sequential path."""
         pool = self._ensure_pool()
-        worker = partial(_assess_in_worker, adapter=self._pooled_adapter(adapter), train_op=self.train_op, evaluate_op=self.evaluate_op, fitness=self.fitness)
+        worker = partial(
+            _assess_in_worker,
+            adapter=self._pooled_adapter(adapter),
+            train_op=self.train_op,
+            evaluate_op=self.evaluate_op,
+            fitness=self.fitness,
+            deadline=self.deadline,
+        )
         chunksize = max(1, len(genomes) // (self.assess_workers * 4))
         results = pool.map(worker, genomes, chunksize=chunksize)
         return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
 
-    def _pooled_adapter(self, adapter: Adapter) -> "Adapter | AdapterRef":
-        """Spill the adapter to disk ONCE per task so pool.map pickles a tiny path per chunk
-        instead of the encoded tensors every time (~4MB x chunks x generations for CIFAR).
+    def _pooled_adapter(self, adapter: _TaskPayload) -> "_TaskPayload | AdapterRef":
+        """Spill an encoded task payload ONCE so pool.map pickles a tiny path per chunk.
+
+        This serves both flat task adapters and composition task specs; workers resolve either
+        through the same one-slot cache instead of transporting their torch tensors through Linux
+        shared-memory descriptors every generation.
+
         Content-addressed under `<library_dir>/encoded_cache/`, so a stale file is impossible;
         the previous task's spill is unlinked on replacement (its map calls have completed: assess
-        is synchronous per generation). Any failure falls back to pickling the adapter directly."""
-        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
+        is synchronous per generation). Any failure returns the original payload; callers that
+        require fd-free transport can then fall back to main-process assessment."""
+        slot: tuple[Any, str] | None = getattr(self, "_adapter_spill", None)
         if slot is not None and slot[0] is adapter:
             return AdapterRef(slot[1])
+        staging = None
         try:
             import hashlib
-            import io
             import os
+            import tempfile
             from pathlib import Path
 
             import torch
 
-            buffer = io.BytesIO()
-            torch.save(adapter, buffer)
-            payload = buffer.getvalue()
             directory = Path(self.library_dir) / "encoded_cache"
             directory.mkdir(parents=True, exist_ok=True)
-            path = directory / f"{hashlib.sha256(payload).hexdigest()[:16]}.pt"
-            if not path.exists():
-                staging = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-                staging.write_bytes(payload)
+            # Serialize directly to disk. BytesIO doubled the resident size of large encoded tasks
+            # (PSICOV is nearly 1 GiB on disk) before any worker even started evaluating it.
+            with tempfile.NamedTemporaryFile(prefix=f".payload.{os.getpid()}.", suffix=".pt", dir=directory, delete=False) as handle:
+                staging = Path(handle.name)
+            torch.save(adapter, staging)
+            with staging.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            path = directory / f"{digest[:16]}.pt"
+            if path.exists():
+                staging.unlink()
+            else:
                 staging.replace(path)
             if slot is not None and slot[1] != str(path):
                 Path(slot[1]).unlink(missing_ok=True)
             self._adapter_spill = (adapter, str(path))
             return AdapterRef(str(path))
         except Exception:  # pragma: no cover - spill is an optimization, never a failure mode
+            if staging is not None:
+                staging.unlink(missing_ok=True)
             return adapter
 
     def _ensure_pool(self) -> "Pool":
@@ -411,17 +448,35 @@ class Evolver:
 
     def close_pool(self) -> None:
         """Close only this evolver's OWN lazy pool; the shared pool is owned by create_assess_pool."""
-        slot: tuple[Adapter, str] | None = getattr(self, "_adapter_spill", None)
-        if slot is not None:
-            from pathlib import Path
-
-            self._adapter_spill = None
-            Path(slot[1]).unlink(missing_ok=True)
+        self.release_task_adapter()
         pool = getattr(self, "_pool", None)
         if pool is not None:
             self._pool = None
             pool.terminate()
             pool.join()
+
+    def release_task_adapter(self) -> None:
+        """Release the main process's encoded payload when the scheduler switches tasks.
+
+        Shared assessment workers replace their own one-slot adapter on the first evaluation of
+        the next task; they are intentionally not restarted because ClearML patches process spawn.
+        """
+        # A main-process training failure can leave map_async work queued.  Let an owned pool drain
+        # through the acknowledged release barrier before unlinking the path those jobs may still
+        # need.  The trial performs the equivalent shared-pool barrier before calling this method.
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            _release_pool_task_adapters(pool)
+        slot: tuple[Any, str] | None = getattr(self, "_adapter_spill", None)
+        if slot is not None:
+            from pathlib import Path
+
+            self._adapter_spill = None
+            Path(slot[1]).unlink(missing_ok=True)
+        import gc
+
+        gc.collect()
+        release_unused_host_memory()
 
     @staticmethod
     def _decode(genome: Genome, adapter: Adapter) -> SubstrateModule:
@@ -437,7 +492,11 @@ class Evolver:
         `seeded_front` (a callback because grafting needs the run's tracker, which is born here)
         replaces the FRONT of the init population with warm-start genomes; they flow through the
         same assess_many as every other member. None is byte-identical to the unseeded path."""
-        genomes = [self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng) for _ in range(self.pop_size)]
+        genomes: list[Genome] = []
+        for _ in range(self.pop_size):
+            if genomes and self.deadline_exceeded is not None and self.deadline_exceeded():
+                break
+            genomes.append(self.init_op(adapter.n_inputs, adapter.n_outputs, rng=rng))
         state = EvolverState(population=[], innovations=InnovationTracker.from_genomes(genomes), rng=rng)
         if seeded_front is not None:
             for index, genome in enumerate(seeded_front(state.innovations)[: self.pop_size]):
@@ -613,6 +672,38 @@ def get_shared_pool() -> "Pool | None":
     return _SHARED_POOL
 
 
+def release_shared_task_adapters() -> None:
+    """Make every shared worker drop its decoded task before the next task is loaded.
+
+    Assessment is synchronous, so the pool is idle at the root-task boundary.  A short worker
+    fan-out is preferable to restarting the pool: these workers are deliberately spawned before
+    ClearML patches multiprocessing and must stay alive for the run.
+    """
+    pool = _SHARED_POOL
+    if pool is None:
+        return
+    _release_pool_task_adapters(pool)
+
+
+def _release_pool_task_adapters(pool: "Pool") -> None:
+    """Collect worker acknowledgements for either the shared or an evolver-owned pool."""
+    seen: set[int] = set()
+    expected: set[int] = set()
+    for _round in range(8):
+        workers = tuple(getattr(pool, "_pool", ()))
+        expected = {int(worker.pid) for worker in workers if worker.pid is not None and worker.is_alive()}
+        if expected <= seen:
+            return
+        # Each task pauses briefly after clearing its slot.  That keeps one fast worker from
+        # consuming the whole queue and makes the returned PID set an explicit acknowledgement
+        # from every live worker, rather than a best-effort broadcast.
+        acknowledgements = pool.map(_release_worker_task_adapter, range(max(1, len(expected) * 2)), chunksize=1)
+        seen.update(int(pid) for pid in acknowledgements)
+    missing = sorted(expected - seen)
+    if missing:
+        raise RuntimeError(f"assessment workers did not release the previous task payload: {missing}")
+
+
 def get_worker_library() -> "ModuleLibrary | None":
     """The worker-process ModuleLibrary set by _init_worker, for library: refs during composition
     assembly. On-disk entries resolve by key, so a library grown mid-run needs no reload."""
@@ -656,21 +747,44 @@ def _init_worker(library_dir: str) -> None:
 
 # One-slot adapter cache per worker: tasks are processed sequentially, so a worker only ever needs
 # the CURRENT task's tensors; a growing cache would hold every visited task's encodings in memory.
-_WORKER_ADAPTER: tuple[str, Adapter] | None = None
+_WORKER_ADAPTER: tuple[str, Any] | None = None
 
 
-def _resolve_adapter(adapter: "Adapter | AdapterRef") -> Adapter:
+def _release_worker_task_adapter(_token: int) -> int:
+    global _WORKER_ADAPTER
+    _WORKER_ADAPTER = None
+    import gc
+    import os
+    import time
+
+    gc.collect()
+    release_unused_host_memory()
+    time.sleep(0.01)
+    return os.getpid()
+
+
+def _resolve_adapter(adapter: "_TaskPayload | AdapterRef") -> _TaskPayload:
     if not isinstance(adapter, AdapterRef):
         return adapter
     global _WORKER_ADAPTER
     if _WORKER_ADAPTER is None or _WORKER_ADAPTER[0] != adapter.path:
+        # Drop the previous task before deserializing the next one.  Tuple assignment would keep
+        # both tensor payloads resident while torch.load evaluates its right-hand side.
+        _WORKER_ADAPTER = None
+        import gc
+
+        gc.collect()
+        release_unused_host_memory()
         import torch
 
         # weights_only=False is required (the spill holds adapter dataclasses, not bare tensors)
         # and safe: the path is only ever produced by this run's own `_pooled_adapter` spill into
         # its library dir, never taken from external input.
-        _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False))
-    return _WORKER_ADAPTER[1]
+        # mmap keeps immutable encoded tensor storages backed by the one spill file. Spawned workers
+        # get private Python wrappers but share the physical file-cache pages instead of allocating
+        # one anonymous copy per worker (16 PSICOV copies exhausted a 64 GiB Lattice host).
+        _WORKER_ADAPTER = (adapter.path, torch.load(adapter.path, map_location="cpu", weights_only=False, mmap=True))
+    return cast(_TaskPayload, _WORKER_ADAPTER[1])
 
 
 def _assess_in_worker(
@@ -680,17 +794,26 @@ def _assess_in_worker(
     train_op: Callable[..., tuple[Genome, SubstrateModule]],
     evaluate_op: Callable[..., dict[str, float]],
     fitness: FitnessAggregator,
+    deadline: float | None = None,
 ) -> tuple[Genome, dict[str, float], float]:
     """Decode, train, and evaluate one genome in a worker process. Returns the plain-data triple
     (trained genome, metrics, fitness); the main process re-decodes the module from the genome.
     An undecodable genome floors here instead of raising: a worker exception would kill the WHOLE
     pool.map and with it the run (the two_spirals macro-nesting crash of 2026-07-04)."""
+    from ardevo.utils.deadline import expired
+
+    if expired(deadline):
+        metrics = _floored_metrics() | {"deadline_skipped": 1.0}
+        return genome, metrics, _FLOOR_FITNESS
     adapter = _resolve_adapter(adapter)
     try:
         module = Evolver._decode(genome, adapter)
     except (ValueError, KeyError):
         return genome, _floored_metrics(), _FLOOR_FITNESS
-    genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG)
+    genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG, deadline=deadline)
+    if expired(deadline):
+        metrics = _floored_metrics() | {"deadline_skipped": 1.0}
+        return genome, metrics, _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
     stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)

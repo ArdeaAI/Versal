@@ -14,7 +14,8 @@ regularity prior (weight patterns tend to be spatially coherent), never an archi
 
 import math
 import random
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import torch
 
@@ -23,8 +24,53 @@ from ardevo.evolution.registry import Registry
 from ardevo.substrate import _ACTIVATIONS
 
 InitOp = Callable[..., Genome]
+InitEstimator = Callable[..., "InitEstimate"]
 
 INIT: Registry[InitOp] = Registry("init")
+INIT_ESTIMATOR: Registry[InitEstimator] = Registry("init_estimator")
+
+
+@dataclass(frozen=True)
+class InitEstimate:
+    nodes: int
+    edges: int
+
+
+def estimate_initialization(kind: str, n_inputs: int, n_outputs: int, **params: Any) -> InitEstimate:
+    """Registry-provided allocation counts; unknown adaptive operators fail closed."""
+
+    return INIT_ESTIMATOR.get(kind)(n_inputs, n_outputs, **params)
+
+
+@INIT_ESTIMATOR.register("minimal")
+def _estimate_minimal(n_inputs: int, n_outputs: int, **_params: Any) -> InitEstimate:
+    return InitEstimate(n_inputs + 1 + n_outputs, (n_inputs + 1) * n_outputs)
+
+
+@INIT_ESTIMATOR.register("factored")
+def _estimate_factored(n_inputs: int, n_outputs: int, **params: Any) -> InitEstimate:
+    dense = (n_inputs + 1) * n_outputs
+    if dense <= int(params.get("threshold", 4096)):
+        return _estimate_minimal(n_inputs, n_outputs)
+    rank = max(1, int(params.get("rank", 8)))
+    return InitEstimate(n_inputs + 1 + n_outputs + rank, (n_inputs + 1) * rank + rank * n_outputs + n_outputs)
+
+
+@INIT_ESTIMATOR.register("sparse")
+def _estimate_sparse(n_inputs: int, n_outputs: int, **params: Any) -> InitEstimate:
+    dense = (n_inputs + 1) * n_outputs
+    if dense <= int(params.get("threshold", 4096)):
+        return _estimate_minimal(n_inputs, n_outputs)
+    density = float(params.get("density", 0.01))
+    return InitEstimate(n_inputs + 1 + n_outputs, min(n_inputs * n_outputs, max(n_outputs, round(n_inputs * n_outputs * density))) + n_outputs)
+
+
+@INIT_ESTIMATOR.register("cppn")
+def _estimate_cppn(n_inputs: int, n_outputs: int, **params: Any) -> InitEstimate:
+    hidden = max(1, int(params.get("hidden", 16)))
+    density = float(params.get("density", 0.3))
+    edges = max(1, round(n_inputs * hidden * density)) + max(1, round(hidden * n_outputs * density)) + hidden + n_outputs
+    return InitEstimate(n_inputs + 1 + n_outputs + hidden, edges)
 
 
 @INIT.register("minimal")

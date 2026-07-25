@@ -8,8 +8,11 @@ TOP_LEVEL_CONFIGS = {
     "configs/brute.toml",
     "configs/canary-lattice.toml",
     "configs/canary.toml",
+    "configs/full.toml",
     "configs/full_cluster.toml",
+    "configs/full_cluster-lattice.toml",
     "configs/preflight.toml",
+    "configs/preflight-lattice.toml",
     "configs/smoke.toml",
 }
 
@@ -45,6 +48,7 @@ def test_preflight_only_scales_the_canary_task_count() -> None:
 def test_profiles_have_the_declared_scale_and_hardware() -> None:
     canary = Config(Config.PROJECT_ROOT / "configs" / "canary.toml").current
     assert canary["machine_env"] == "MonadMetal"
+    assert canary["clearml_capture_streams"] is False
     assert canary["schedule"]["rungs"] == "all"
     assert canary["orchestrator"]["max_depth"] == 8
     assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
@@ -59,6 +63,9 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert smoke["orchestrator"]["refine"]["mode"] == "decay"
     assert smoke["orchestrator"]["refine"]["budget_k"] == 4
     assert smoke["orchestrator"]["direct"]["pop_size"] == 16
+    assert smoke["orchestrator"]["field"]["train_sites"] == 1024
+    assert smoke["orchestrator"]["field"]["audit_sites"] == 4096
+    assert smoke["orchestrator"]["field"]["verify_top_k"] == 2
     assert smoke["evolution"]["composition"]["pop_size"] == 24
     assert smoke["evolution"]["composition"]["max_initial_glue_values"] == 5_000_000
 
@@ -70,7 +77,7 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert brute["orchestrator"]["max_total_task_seconds"] == 7200
 
     lattice = Config(Config.PROJECT_ROOT / "configs" / "canary-lattice.toml").current
-    assert lattice["machine_env"] == "LatticeCUDA"
+    assert lattice["machine_env"] == "LocalLatticeCUDA"
     assert lattice["orchestrator"]["direct"]["train"]["batched"] is True
     assert lattice["resources"]["device_fraction"] == 0.65
     assert lattice["tf32"] is False
@@ -80,6 +87,9 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert full["schedule"]["tasks_per_rung"] == 20
     assert full["orchestrator"]["tasks"] == 360
     assert full["campaign"] == {"seeds": [0, 1, 2], "cold_library": True}
+    assert full["orchestrator"]["field"]["train_sites"] == 16384
+    assert full["orchestrator"]["field"]["audit_sites"] == 65536
+    assert full["orchestrator"]["field"]["verify_top_k"] == 8
 
 
 def test_runtime_inventory_covers_live_surfaces() -> None:

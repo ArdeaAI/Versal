@@ -40,9 +40,11 @@ def test_spatial_patches_empty_for_classification(xor_task: Task) -> None:
     assert spatial_patches(xor_task, rng=random.Random(0)) == []
 
 
-def test_spatial_patches_empty_when_axis_shorter_than_patches() -> None:
+def test_spatial_patches_uses_other_reducible_axis_when_height_is_short() -> None:
     task = _grid_to_grid_task(height=1, width=3)
-    assert spatial_patches(task, rng=random.Random(0), n_patches=2) == []
+    subtasks = spatial_patches(task, rng=random.Random(0), n_patches=2)
+    assert len(subtasks) == 2
+    assert [child.task.support[0][0].data.shape for child in subtasks] == [(1, 2), (1, 1)]
 
 
 def test_orchestrated_config_wires_geometry_refine_and_spatial() -> None:

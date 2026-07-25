@@ -43,6 +43,12 @@ def test_machine_env_mapping(monkeypatch) -> None:
     assert resolve_compute_device({}).type == "cpu"
 
 
+def test_local_lattice_machine_env_mapping(monkeypatch) -> None:
+    _force(monkeypatch, cuda=True, mps=True)
+    assert resolve_compute_device({"machine_env": "LocalLatticeCPU"}).type == "cpu"
+    assert resolve_compute_device({"machine_env": "LocalLatticeCUDA"}).type == "cuda"
+
+
 def test_unavailable_backends_fall_back_to_cpu(monkeypatch) -> None:
     _force(monkeypatch, cuda=False, mps=False)
     assert resolve_compute_device({"machine_env": "MonadMetal"}).type == "cpu"
@@ -200,7 +206,9 @@ def test_explicit_scheduled_batching_overrides_missing_profile(monkeypatch) -> N
 def test_resolve_worker_count(monkeypatch) -> None:
     import os
 
-    from ardevo.utils.device import resolve_worker_count
+    from ardevo.utils import device as device_module
+
+    resolve_worker_count = device_module.resolve_worker_count
 
     assert resolve_worker_count(12) == 12
     assert resolve_worker_count(0) == 0
@@ -208,8 +216,9 @@ def test_resolve_worker_count(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     if hasattr(os, "sched_getaffinity"):
         monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(64)))
+    monkeypatch.setattr(device_module.psutil, "cpu_count", lambda *, logical: 16 if logical else 8)
     monkeypatch.setattr(os, "cpu_count", lambda: 16)
-    assert resolve_worker_count("auto") == 12  # cpu_count - 4
+    assert resolve_worker_count("auto") == 6  # physical cores - 2 is tighter than logical - 4
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "10")
     assert resolve_worker_count("auto") == 6
     monkeypatch.delenv("SLURM_CPUS_PER_TASK")
@@ -240,7 +249,55 @@ def test_cluster_cuda_uses_local_launcher_with_clearml_telemetry(monkeypatch) ->
     assert pipe.clearml_run is True
 
 
-def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
+@pytest.mark.parametrize("machine_env", ["LocalLatticeCPU", "LocalLatticeCUDA"])
+def test_local_lattice_runs_inline_once_with_clearml_telemetry(monkeypatch, machine_env: str) -> None:
+    from ardevo.utils import pipelines
+
+    calls = {"task_init": 0, "trial_run": 0, "execute_remotely": 0, "close": 0}
+
+    class FakeRun:
+        def connect(self, _values) -> None:
+            pass
+
+        def set_repo(self, **_values) -> None:
+            pass
+
+        def execute_remotely(self, **_values) -> None:
+            calls["execute_remotely"] += 1
+
+        def close(self) -> None:
+            calls["close"] += 1
+
+    class FakeTask:
+        TaskTypes = SimpleNamespace(custom="custom")
+
+        @staticmethod
+        def init(**_values):
+            calls["task_init"] += 1
+            return FakeRun()
+
+    class FakeTrial:
+        def __init__(self, *, config, task) -> None:
+            assert config["machine_env"] == machine_env
+            assert isinstance(task, FakeRun)
+
+        def run(self) -> dict[str, str]:
+            calls["trial_run"] += 1
+            return {"machine_env": machine_env}
+
+    monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
+    monkeypatch.setitem(sys.modules, "clearml", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(pipelines, "get_current_branch", lambda: "")
+
+    pipeline = pipelines.Pipeline({"machine_env": machine_env, "clearml_run": True})
+    pipeline.add_trial(FakeTrial)
+
+    assert pipeline.queue == "local"
+    assert pipeline.run_task() == [{"machine_env": machine_env}]
+    assert calls == {"task_init": 1, "trial_run": 1, "execute_remotely": 0, "close": 1}
+
+
+def test_clearml_disables_stream_and_pytorch_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
     from ardevo.utils import pipelines
 
     captured: dict[str, Any] = {}
@@ -275,4 +332,34 @@ def test_clearml_disables_pytorch_model_interception_but_keeps_explicit_telemetr
 
     assert pipeline.task is not None
     assert captured["init"]["auto_connect_frameworks"] == {"pytorch": False}
+    assert captured["init"]["auto_connect_streams"] == {"stdout": False, "stderr": False, "logging": True}
     assert captured["connected"] == {"seed": 1}
+
+
+def test_clearml_full_stream_capture_remains_an_opt_in(monkeypatch) -> None:
+    from ardevo.utils import pipelines
+
+    captured: dict[str, Any] = {}
+
+    class FakeRun:
+        def connect(self, _values) -> None:
+            pass
+
+        def set_repo(self, **_values) -> None:
+            pass
+
+    class FakeTask:
+        TaskTypes = SimpleNamespace(custom="custom")
+
+        @staticmethod
+        def init(**values):
+            captured.update(values)
+            return FakeRun()
+
+    monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
+    monkeypatch.setitem(sys.modules, "clearml", SimpleNamespace(Task=FakeTask))
+    monkeypatch.setattr(pipelines, "get_current_branch", lambda: None)
+
+    pipelines.Pipeline({"machine_env": "local", "clearml_run": True, "clearml_capture_streams": True})
+
+    assert captured["auto_connect_streams"] is True

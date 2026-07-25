@@ -22,10 +22,23 @@ if TYPE_CHECKING:
 # value (the import happens lazily inside _create_task, where the task is actually built).
 HAS_CLEARML = importlib.util.find_spec("clearml") is not None
 
-VALID_MACHINE_ENVS = {"local", "LatticeCPU", "LatticeCUDA", "MonadCPU", "MonadMetal", "ClusterCUDA"}
+VALID_MACHINE_ENVS = {
+    "local",
+    "LatticeCPU",
+    "LatticeCUDA",
+    "LocalLatticeCPU",
+    "LocalLatticeCUDA",
+    "MonadCPU",
+    "MonadMetal",
+    "ClusterCUDA",
+}
 QUEUE_BY_MACHINE = {
     "LatticeCPU": "lattice_cpu",
     "LatticeCUDA": "lattice_cuda",
+    # These labels select Lattice hardware without delegating to its ClearML agents. ClearML
+    # still owns the task and telemetry; only execution remains in the invoking process.
+    "LocalLatticeCPU": "local",
+    "LocalLatticeCUDA": "local",
     "MonadCPU": "local",
     "MonadMetal": "local",
     # Generic rented clusters run the current process locally under their own launcher (Slurm,
@@ -83,6 +96,14 @@ class Pipeline:
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         task_name = f"{self.experiment_name}_{self.machine_env}_{timestamp}"
+        # Rich Live redraws the same terminal region several times per second. Let ClearML
+        # observe Python logging records, explicit scalars, and artifacts without wrapping the
+        # process streams, otherwise every transient redraw becomes a remote console event.
+        # Full stream capture remains an opt-in escape hatch for non-interactive jobs.
+        capture_streams = bool(self.config.get("clearml_capture_streams", False))
+        auto_connect_streams: bool | dict[str, bool] = (
+            True if capture_streams else {"stdout": False, "stderr": False, "logging": True}
+        )
         self.task = Task.init(
             project_name=self.project_name,
             task_name=task_name,
@@ -93,6 +114,7 @@ class Pipeline:
             # ClearML's PyTorch patch otherwise registers every lazy torch.load() and repeatedly
             # connects identically named shards, making remote input-model selection ambiguous.
             auto_connect_frameworks={"pytorch": False},
+            auto_connect_streams=auto_connect_streams,
         )
         self.task.connect(self.config.get("hyperparameters", {}))
         branch = get_current_branch()

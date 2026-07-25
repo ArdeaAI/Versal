@@ -16,6 +16,7 @@ is what finally makes recurrent genes execute in the orchestrated path. Its cham
 as task-shaped MODULE entries the composition strategy can immediately reference.
 """
 
+import math
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
@@ -27,18 +28,27 @@ from ardevo.dataset.icarus import Level0Encoder, Task, encode_task, model_output
 from ardevo.evaluation import fit_query_target, input_width, output_features, without_query
 from ardevo.evolution.composition import CompositionGenome, edge_storage_value_count, glue_value_count
 from ardevo.evolution.evolver import Assessed, Evolver, TaskAdapter, get_shared_pool
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from ardevo.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict
 from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from ardevo.evolution.registry import Registry, build_evolver
 from ardevo.library import MODULE, LibraryEntry, ModuleLibrary, graft, structural_fingerprint
 from ardevo.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 from ardevo.temporal import TemporalTaskAdapter, has_time_axis, temporal_adapter
 from ardevo.utils.logging import Logger
-from ardevo.utils.resources import format_bytes
+from ardevo.utils.resources import StageDecision, StageFootprint, format_bytes
 
 logger = Logger.get_logger()
 
 EVOLVE_STRATEGY: Registry = Registry("evolve_strategy")
+
+
+@dataclass(frozen=True)
+class StrategyPreflight:
+    eligible: bool
+    representation: str
+    footprint: StageFootprint | None = None
+    decision: StageDecision | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -56,6 +66,7 @@ class StrategyRuntime:
     deadline_exceeded: Callable[[], bool] | None = None
     shutdown_requested: Callable[[], bool] | None = None
     topology_tabu: "TopologyTabuSession | None" = None
+    deadline: float | None = None
 
     def accepted(self, item: Any) -> bool:
         return self.accepts(item) if self.accepts is not None else self.metric_of(item) >= self.accept_threshold
@@ -93,6 +104,9 @@ class StrategyResult:
     resource_metrics: dict[str, float] = field(default_factory=dict)
     # Cross-strategy diagnostics (especially routed distillation and executable handoff).
     strategy_metrics: dict[str, float] = field(default_factory=dict)
+    # Present only for resolution-independent site programs. The genome remains ordinary.
+    field_template: dict[str, Any] | None = None
+    representation: str | None = None
 
     @property
     def has_admissible_champion(self) -> bool:
@@ -204,8 +218,23 @@ class CompositionStrategy:
             concurrent_trainers=min(loop.comp_pop_size, max(1, concurrent_trainers)),
             device="cpu",
         )
-        if not estimate.accepted:
-            logger.warning(
+        support_rows = int(spec.encoded.support_input[0].shape[0])
+        footprint = StageFootprint(
+            stage="composition_population",
+            representation="composition_mixed_glue",
+            candidate_bytes=initial_glue_values * 4 + (len(spec.input_specs) + 2) * 128,
+            population_size=loop.comp_pop_size,
+            optimizer_bytes=initial_glue_values * 12 * min(loop.comp_pop_size, max(1, concurrent_trainers)),
+            activation_bytes=support_rows * (spec.n_inputs + spec.output_width) * 4 * min(loop.comp_pop_size, max(1, concurrent_trainers)),
+            transfer_bytes=initial_glue_values * 4 * min(loop.comp_pop_size, max(1, concurrent_trainers)) if concurrent_trainers > 1 else 0,
+            work_operations=support_rows * initial_glue_values,
+            detail="dense, rank-factored, and fixed-port-map edges priced by stored values",
+        )
+        stage_decision = loop.resource_policy.assess_stage(footprint, device="cpu")
+        declined = not estimate.accepted if estimate.mode == "fixed" else not stage_decision.accepted
+        combined_resource_metrics = {**estimate.metrics("composition_resource"), **stage_decision.metrics("composition_stage")}
+        if declined:
+            logger.debug(
                 "composition declined before allocation: initial candidate needs %s glue values (%s host, %s device at stage multiplicity; limit %s)",
                 f"{initial_glue_values:,}",
                 format_bytes(estimate.host_required_bytes),
@@ -218,11 +247,13 @@ class CompositionStrategy:
                 generations_used=0,
                 champion_metrics={
                     "declined_composition_glue_values": float(initial_glue_values),
-                    **estimate.metrics("composition_resource"),
+                    **combined_resource_metrics,
                 },
-                resource_metrics=estimate.metrics("composition_resource"),
+                resource_metrics=combined_resource_metrics,
             )
         progress = {"generations": 0}
+        loop.evolver.deadline = runtime.deadline
+        loop.evolver.deadline_exceeded = runtime.deadline_exceeded
 
         def hook(generation: int, best: AssessedComposition, mean_fitness: float) -> None:
             progress["generations"] = generation + 1
@@ -238,7 +269,8 @@ class CompositionStrategy:
             champion_comp=verified,
             champion_metrics=dict(verified.metrics),
             size_metrics=comp_size_metrics(verified.comp),
-            resource_metrics=estimate.metrics("composition_resource"),
+            resource_metrics=combined_resource_metrics,
+            representation="composition",
         )
 
     def _verify(self, best: AssessedComposition, spec: CompTaskSpec, runtime: StrategyRuntime) -> AssessedComposition:
@@ -247,7 +279,7 @@ class CompositionStrategy:
         fresh one does not, allow ONE bounded re-fit (a single trained candidate) and keep the
         better FRESH assessment. The verified assessment is what the threshold check and admission
         consume, so stale weights or stale metrics can never be persisted."""
-        if best.net is None:
+        if best.net is None or runtime.should_stop():
             return best  # floored (or white-box-stubbed): nothing fresher exists to assemble
         fresh = runtime.loop.assess_composition(best.comp, spec, runtime.state, train=False)
         if runtime.accepted(fresh):
@@ -257,6 +289,191 @@ class CompositionStrategy:
             refit = runtime.loop.assess_composition(best.comp, spec, runtime.state, train=True)
             return refit if runtime.metric_of(refit) >= runtime.metric_of(fresh) else fresh
         return fresh
+
+
+@EVOLVE_STRATEGY.register("field")
+def _build_field(config: dict[str, Any]) -> "FieldStrategy":
+    overlay = dict(config)
+    table = config.get("orchestrator", {}).get("field", {}) or {}
+    evolution = {key: value for key, value in config.get("evolution", {}).items() if key != "loop"}
+    for key in ("pop_size", "elitism", "assess_workers", "mutation", "train", "evaluate", "novelty", "halving_stages", "halving_keep"):
+        if key in table:
+            evolution[key] = table[key]
+    overlay["evolution"] = evolution
+    overlay["library_dir"] = config.get("orchestrator", {}).get("library_dir", "library")
+    return FieldStrategy(
+        evolver=build_evolver(overlay),
+        train_sites=max(1, int(table.get("train_sites", 4096))),
+        audit_sites=max(1, int(table.get("audit_sites", 16384))),
+        verify_top_k=max(1, int(table.get("verify_top_k", 5))),
+        verify_chunk_size=max(1, int(table.get("verify_chunk_size", 32768))),
+        blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)),
+    )
+
+
+@dataclass
+class FieldStrategy:
+    """Evolve one compact ordinary graph applied at every valid aligned spatial site."""
+
+    evolver: Evolver
+    train_sites: int = 4096
+    audit_sites: int = 16384
+    verify_top_k: int = 5
+    verify_chunk_size: int = 32768
+    blind_query: bool = False
+    name: str = "field"
+
+    def preflight(self, task: Task, runtime: StrategyRuntime) -> StrategyPreflight:
+        from ardevo.evolution.init import estimate_initialization
+        from ardevo.field import field_contract, field_feature_width
+
+        contract = field_contract(task)
+        if contract is None:
+            return StrategyPreflight(False, "field_template", reason="support is not an aligned spatial mapping")
+        n_inputs = field_feature_width(contract.input_channels)
+        output_classes = contract.output_n_classes if contract.output_value_type in {"CATEGORICAL", "ORDINAL"} else 1
+        n_outputs = contract.output_channels * int(output_classes or 1)
+        try:
+            init = estimate_initialization(self.evolver.init_kind, n_inputs, n_outputs, **self.evolver.init_params)
+        except KeyError as error:
+            if runtime.loop.resource_policy.mode == "adaptive":
+                return StrategyPreflight(False, "field_template", reason=str(error))
+            return StrategyPreflight(True, "field_template", reason=str(error))
+        computed = max(0, init.nodes - n_inputs - 1)
+        cells = init.nodes * computed
+        audit_bytes = self.audit_sites * (n_inputs + n_outputs) * 4
+        population = max(1, self.evolver.pop_size)
+        footprint = StageFootprint(
+            stage="field_population",
+            representation=f"field_template/{self.evolver.init_kind}",
+            candidate_bytes=init.nodes * 32 + init.edges * 64 + cells * 5,
+            population_size=population,
+            optimizer_bytes=cells * 12 * max(1, self.evolver.assess_workers),
+            activation_bytes=audit_bytes,
+            work_operations=self.audit_sites * max(1, init.edges),
+            detail=f"{contract.identity}: {init.nodes} nodes, {init.edges} edges; H/W symbolic",
+        )
+        decision = runtime.loop.resource_policy.assess_stage(footprint)
+        return StrategyPreflight(decision.accepted, footprint.representation, footprint, decision, decision.reason)
+
+    def __call__(
+        self,
+        task: Task,
+        spec: CompTaskSpec,
+        runtime: StrategyRuntime,
+        *,
+        budget: int,
+        seed_comps: list | None = None,
+        seed_entries: list[LibraryEntry] | None = None,
+    ) -> StrategyResult:
+        from ardevo.field import FieldAdapter, deterministic_sites, encode_sites, evaluate_field_module, field_contract, valid_sites
+
+        contract = field_contract(task)
+        if contract is None:
+            return StrategyResult(self.name, 0.0, 0, strategy_metrics={"field_ineligible": 1.0})
+        preflight = self.preflight(task, runtime)
+        if not preflight.eligible:
+            metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
+            return StrategyResult(self.name, 0.0, 0, resource_metrics=metrics, strategy_metrics={"field_preflight_ineligible": 1.0})
+        all_sites = valid_sites(task.support)
+        train_sites = deterministic_sites(all_sites, self.train_sites, salt=f"train:{contract.identity}")
+        audit_sites = deterministic_sites(all_sites, self.audit_sites, salt=f"audit:{contract.identity}")
+        try:
+            training = encode_sites(task, train_sites, contract, chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
+            audit = encode_sites(task, audit_sites, contract, chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
+        except TimeoutError:
+            return StrategyResult(self.name, 0.0, 0, strategy_metrics={"field_deadline_stage_feature_preparation": 1.0})
+        adapter = FieldAdapter(training, audit, contract, max_inline_depth=self.evolver.max_inline_depth, library=runtime.library)
+        self.evolver.library = runtime.library
+        self.evolver.deadline_exceeded = runtime.deadline_exceeded
+        self.evolver.deadline = runtime.deadline
+        self.evolver.topology_tabu = runtime.topology_tabu
+
+        def seeded_front(tracker: InnovationTracker) -> list[Genome]:
+            candidates: list[Genome] = []
+            for entry in seed_entries or []:
+                try:
+                    from ardevo.field import payload_field_contract
+
+                    if payload_field_contract(entry.payload) == contract:
+                        candidates.append(_restamp_genome(genome_from_dict(entry.payload), tracker))
+                except ValueError:
+                    continue
+            return candidates
+
+        state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
+        best_full: Assessed | None = None
+        generations = 0
+        stop = runtime.stall_factory(budget)
+
+        def verify_front() -> bool:
+            nonlocal best_full
+            ranked = sorted(state.population, key=lambda item: item.fitness, reverse=True)[: self.verify_top_k]
+            for member in ranked:
+                if runtime.should_stop() and best_full is not None:
+                    return False
+                module = member.module if member.module is not None else adapter.decode(member.genome)
+                try:
+                    full = evaluate_field_module(
+                        module,
+                        task,
+                        contract,
+                        split="support",
+                        chunk_size=self.verify_chunk_size,
+                        deadline=runtime.deadline,
+                    )
+                except TimeoutError:
+                    return False
+                metrics = dict(member.metrics)
+                metrics.update(full)
+                metrics["full_support_accuracy"] = full["support_accuracy"]
+                metrics["verification_gap"] = metrics.get("sampled_support_accuracy", full["support_accuracy"]) - full["support_accuracy"]
+                assessed = Assessed(member.genome, metrics, member.fitness, module)
+                if best_full is None or runtime.metric_of(assessed) > runtime.metric_of(best_full):
+                    best_full = assessed
+            return best_full is not None and runtime.accepted(best_full)
+
+        for generation in range(budget):
+            generations = generation + 1
+            generation_best = max(state.population, key=lambda item: item.fitness)
+            if runtime.on_generation is not None:
+                runtime.on_generation(self.name, generation, generation_best, sum(item.fitness for item in state.population) / len(state.population))
+            runtime.state.generation += 1
+            if verify_front() or stop(generation, generation_best) or runtime.should_stop():
+                break
+            self.evolver.advance(state, adapter)
+            if state.topology_exhausted:
+                break
+        if best_full is None:
+            verify_front()
+        if best_full is None:
+            metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
+            return StrategyResult(self.name, 0.0, generations, resource_metrics=metrics, strategy_metrics={"field_deadline_before_full_verification": 1.0})
+        report: dict[str, float] = {}
+        if self.blind_query and task.query and not runtime.should_stop():
+            assert best_full.module is not None
+            try:
+                report = evaluate_field_module(best_full.module, task, contract, split="query", chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
+            except TimeoutError:
+                report = {}
+        resource_metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
+        return StrategyResult(
+            strategy=self.name,
+            metric=runtime.metric_of(best_full),
+            generations_used=generations,
+            champion_genome=best_full.genome,
+            champion_metrics=dict(best_full.metrics),
+            report_metrics=report,
+            size_metrics=_module_size_metrics(best_full.genome, state.population),
+            resource_metrics=resource_metrics,
+            strategy_metrics={
+                "field_application_sites": float(len(all_sites)),
+                "field_sampled_sites": float(len(audit_sites)),
+                "field_verification_gap": float(best_full.metrics.get("verification_gap", 0.0)),
+            },
+            field_template=contract.to_dict(),
+            representation=f"field/{contract.version}",
+        )
 
 
 @EVOLVE_STRATEGY.register("direct")
@@ -315,6 +532,45 @@ class DirectStrategy:
     # In blind mode every candidate sees a query-less EncodedTask. The selected payload is evaluated
     # once on the full task below, after evolution has ended.
     blind_query: bool = False
+
+    def preflight(self, task: Task, runtime: StrategyRuntime) -> StrategyPreflight:
+        """Price the configured initializer and its decoded compact GraphNet exactly enough to
+        reject certain OOMs.  This intentionally does not instantiate a Genome."""
+
+        from ardevo.evolution.init import estimate_initialization
+
+        support_input, support_output = support_loader(task)
+        n_inputs = math.prod(int(dim) for dim in support_input.data.shape[1:])
+        positions = math.prod(int(dim) for dim in support_output.data.shape[1:])
+        n_outputs = model_output_features(support_output.descriptor, positions)
+        try:
+            init = estimate_initialization(self.evolver.init_kind, n_inputs, n_outputs, **self.evolver.init_params)
+        except KeyError as error:
+            if runtime.loop.resource_policy.mode == "adaptive":
+                return StrategyPreflight(False, "explicit_flat", reason=str(error))
+            return StrategyPreflight(True, "explicit_flat", reason=str(error))
+        computed = max(0, init.nodes - n_inputs - 1)
+        decoded_cells = init.nodes * computed
+        # Python genes are a conservative lower-bound proxy (not a claim about exact CPython
+        # layout); decoded weights+mask are exact cell counts. Adam/grad state is 12 bytes/cell.
+        candidate_bytes = init.nodes * 32 + init.edges * 64 + decoded_cells * 5
+        population = max(1, self.evolver.pop_size)
+        trainers = population if self.evolver.execution_mode.startswith("population_") else max(1, self.evolver.assess_workers)
+        optimizer_bytes = decoded_cells * 12 * trainers
+        examples = int(support_input.data.shape[0])
+        footprint = StageFootprint(
+            stage="direct_population",
+            representation=f"explicit_flat/{self.evolver.init_kind}",
+            candidate_bytes=candidate_bytes,
+            population_size=population,
+            optimizer_bytes=optimizer_bytes,
+            activation_bytes=examples * init.nodes * 4 * trainers,
+            transfer_bytes=(init.nodes * 32 + init.edges * 64) * trainers if self.evolver.assess_workers > 1 else 0,
+            work_operations=examples * max(1, init.edges),
+            detail=f"{init.nodes} initial nodes, {init.edges} initial edges, {decoded_cells} decoded GraphNet cells",
+        )
+        decision = runtime.loop.resource_policy.assess_stage(footprint)
+        return StrategyPreflight(decision.accepted, footprint.representation, footprint, decision, decision.reason)
 
     def _adapter(self, task: Task, *, include_query: bool = True) -> TaskAdapter | TemporalTaskAdapter:
         max_inline_depth = int(getattr(self.evolver, "max_inline_depth", DEFAULT_MAX_INLINE_DEPTH))
@@ -377,35 +633,24 @@ class DirectStrategy:
             flat_inputs = 1
             for dim in support_input.data.shape[1:]:
                 flat_inputs *= int(dim)
-            init_genes = (flat_inputs + 1) * flat_outputs
+            from ardevo.evolution.init import estimate_initialization
+
+            init_genes = estimate_initialization(self.evolver.init_kind, flat_inputs, flat_outputs, **self.evolver.init_params).edges
             if self.max_init_genes != "adaptive" and 0 < int(self.max_init_genes) < init_genes:
                 return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
-            if self.max_init_genes == "adaptive" or self.max_flat_outputs == "adaptive":
-                population_execution = str(getattr(self.evolver, "execution_mode", "serial")).startswith("population_")
-                estimate = runtime.loop.assess_glue_resources(
-                    init_genes,
-                    stage="direct_population",
-                    storage="tuple",
-                    population_multiplicity=self.evolver.pop_size,
-                    concurrent_trainers=self.evolver.pop_size if population_execution else max(1, self.evolver.assess_workers),
-                    fixed_limit=0,
-                )
-                if not estimate.accepted:
-                    logger.warning(
-                        "direct evolution declined before allocation: dense init needs %s genes (%s host, %s device; adaptive limit %s)",
-                        f"{init_genes:,}",
-                        format_bytes(estimate.host_required_bytes),
-                        format_bytes(estimate.device_required_bytes),
-                        f"{estimate.limit_values:,}",
-                    )
-                    return StrategyResult(
-                        strategy=self.name,
-                        metric=0.0,
-                        generations_used=0,
-                        champion_metrics={"declined_init_genes": float(init_genes), **estimate.metrics("direct_resource")},
-                        resource_metrics=estimate.metrics("direct_resource"),
-                    )
-                resource_metrics = estimate.metrics("direct_resource")
+        preflight = self.preflight(task, runtime)
+        if not preflight.eligible:
+            metrics = preflight.decision.metrics("direct_resource") if preflight.decision is not None else {}
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"declined_preflight": 1.0, **metrics},
+                resource_metrics=metrics,
+                strategy_metrics={"preflight_ineligible": 1.0},
+            )
+        if preflight.decision is not None:
+            resource_metrics.update(preflight.decision.metrics("direct_resource"))
         adapter = self._adapter(task, include_query=not self.blind_query)
         # The direct population's library-reading mutators must sample from the SAME library the
         # decode-time macro resolver resolves (the orchestrator's attached one), or add_macro_node
@@ -415,6 +660,8 @@ class DirectStrategy:
         # mutators (add_local_node and friends) can grow local receptive fields.
         grid = self._grid_shape(task) if not isinstance(adapter, TemporalTaskAdapter) else None
         original_init = self.evolver.init_op
+        self.evolver.deadline_exceeded = runtime.deadline_exceeded
+        self.evolver.deadline = runtime.deadline
         if grid is not None:
             from ardevo.evolution.init import stamp_input_coordinates
 
@@ -473,8 +720,17 @@ class DirectStrategy:
 
         # Verification: the genome PAYLOAD (not the live module object) must reproduce the metric,
         # because the payload is what admission persists and lookups re-decode.
-        verified = self.evolver.evaluate_only(best.genome, adapter)
-        reported = self.evolver.evaluate_only(verified.genome, self._adapter(task, include_query=True)) if self.blind_query else None
+        if best.module is None and runtime.should_stop():
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=generations,
+                champion_metrics=dict(best.metrics),
+                resource_metrics=resource_metrics,
+                strategy_metrics={"deadline_before_fully_evaluated_candidate": 1.0},
+            )
+        verified = best if runtime.should_stop() else self.evolver.evaluate_only(best.genome, adapter)
+        reported = self.evolver.evaluate_only(verified.genome, self._adapter(task, include_query=True)) if self.blind_query and not runtime.should_stop() else None
         search_metric = runtime.metric_of(verified)
         return StrategyResult(
             strategy=self.name,
@@ -488,6 +744,7 @@ class DirectStrategy:
             seed_metric=seed_metric,
             size_metrics=_module_size_metrics(verified.genome, state.population),
             resource_metrics=resource_metrics,
+            representation=preflight.representation,
         )
 
 

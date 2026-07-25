@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render paper/preprint.md through pinned Pandoc and the official NeurIPS style."""
+"""Render the conference paper or technical report with pinned Pandoc and NeurIPS style."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from typing import Protocol, cast
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PAPER_DIR = REPO_ROOT / "paper"
 SOURCE_PATH = PAPER_DIR / "preprint.md"
+TECHNICAL_APPENDIX_PATH = PAPER_DIR / "technical_appendix.md"
 TOOLS_DIR = PAPER_DIR / "tools"
 OUTPUT_DIR = PAPER_DIR / "latex" / "neurips_2026"
 TEMPLATE_PATH = OUTPUT_DIR / "pandoc-template.tex"
@@ -28,6 +29,7 @@ CHECKLIST_PATH = OUTPUT_DIR / "checklist.tex"
 PYPANDOC_VERSION = "1.15"
 PANDOC_VERSION = "3.6.1"
 SOURCE_DATE_EPOCH = "946684800"
+REFERENCE_BOUNDARY = "\n---\n\n## References"
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,7 @@ def parse_manuscript(source: str) -> Manuscript:
 
     abstract = "\n".join(lines[abstract_header + 1 : abstract_end]).strip()
     body = "\n".join(lines[abstract_end + 1 :]).lstrip()
-    if not abstract or not body.startswith("## 1 Introduction"):
+    if not abstract or re.match(r"## 1(?:[ .:]|$)", body) is None:
         raise BuildError("paper/preprint.md must contain a non-empty abstract followed by Section 1")
     return Manuscript(
         title=title,
@@ -90,6 +92,37 @@ def parse_manuscript(source: str) -> Manuscript:
         body=body,
         source_sha256=_sha256(source.encode("utf-8")),
     )
+
+
+def assemble_technical_report(core_source: str, appendix_source: str) -> str:
+    """Insert the body-only technical supplement before the shared references."""
+    appendix = appendix_source.strip()
+    if not appendix:
+        raise BuildError("paper/technical_appendix.md must not be empty")
+    if not appendix.startswith("## ") or any(line.startswith("# ") for line in appendix.splitlines()):
+        raise BuildError("paper/technical_appendix.md must be body-only Markdown beginning with an H2 heading")
+    if core_source.count(REFERENCE_BOUNDARY) != 1:
+        raise BuildError("paper/preprint.md must contain one horizontal-rule References boundary")
+    before_references, references = core_source.split(REFERENCE_BOUNDARY, maxsplit=1)
+    return f"{before_references.rstrip()}\n\n---\n\n{appendix}\n\n---\n\n## References{references}"
+
+
+def source_for_edition(edition: str) -> str:
+    core_source = SOURCE_PATH.read_text(encoding="utf-8")
+    if edition == "conference":
+        return core_source
+    if edition == "technical-report":
+        appendix_source = TECHNICAL_APPENDIX_PATH.read_text(encoding="utf-8")
+        return assemble_technical_report(core_source, appendix_source)
+    raise BuildError(f"unknown paper edition: {edition}")
+
+
+def tex_path_for(edition: str, mode: str) -> Path:
+    if edition == "technical-report":
+        return OUTPUT_DIR / "ardevo-technical-report.tex"
+    if edition == "conference":
+        return OUTPUT_DIR / f"ardevo-{mode}.tex"
+    raise BuildError(f"unknown paper edition: {edition}")
 
 
 def _without_acknowledgments(body: str) -> str:
@@ -230,6 +263,7 @@ def _compile_pdf(tex_path: Path) -> Path:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--edition", choices=("conference", "technical-report"), default="conference")
     parser.add_argument("--mode", choices=("preprint", "submission", "final"), default="preprint")
     parser.add_argument("--tex-only", action="store_true", help="render deterministic LaTeX without invoking latexmk")
     parser.add_argument("--skip-evidence", action="store_true", help="allow a preprint typesetting build without the ignored evidence archive")
@@ -238,17 +272,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.edition == "technical-report" and args.mode != "preprint":
+        print("the technical-report edition is available only in preprint mode", file=sys.stderr)
+        return 2
     if args.skip_evidence and args.mode != "preprint":
         print("--skip-evidence is allowed only for non-submission preprint typesetting", file=sys.stderr)
         return 2
     try:
-        source = SOURCE_PATH.read_text(encoding="utf-8")
+        source = source_for_edition(args.edition)
         manuscript = parse_manuscript(source)
         _check_template()
         if not args.skip_evidence:
             _check_evidence()
         _check_checklist(args.mode)
-        tex_path = OUTPUT_DIR / f"ardevo-{args.mode}.tex"
+        tex_path = tex_path_for(args.edition, args.mode)
         changed = _render_tex(manuscript, args.mode, tex_path)
         if args.tex_only:
             print(f"{'rendered' if changed else 'verified'} {tex_path.relative_to(REPO_ROOT)}")

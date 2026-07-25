@@ -1,11 +1,11 @@
 extends = "canary.toml"
 
-# CUDA parity canary for the RTX 3080 10 GiB workstation. Search semantics match the M4 canary;
-# adaptive batching limits resident tensors and falls back without dropping candidates.
+# CUDA parity canary that runs in the invoking Lattice terminal while ClearML records it.
+# Adaptive batching keeps the RTX 3080's 10 GiB device envelope from dropping candidates.
 
 [run]
 experiment = "orchestrated_overmind_canary_lattice"
-machine = "LatticeCUDA"
+machine = "LocalLatticeCUDA"
 
 [orchestrator.direct]
 max_flat_outputs = "adaptive"

@@ -25,10 +25,11 @@ import psutil
 import torch
 
 from ardevo import checkpoint, rendering, results
+from ardevo.dataset.icarus import Task
 from ardevo.evolution.composition import comp_from_dict
 from ardevo.evolution.genome import genome_from_dict
 from ardevo.evolution.loop import HierarchicalLoop, HierarchicalState, state_from_dict, state_to_dict
-from ardevo.evolution.multitask import TaskEntry, build_pool_report
+from ardevo.evolution.multitask import PoolReport, TaskEntry, build_pool_report
 from ardevo.evolution.registry import build_loop
 from ardevo.evolution.schedule import build_schedule
 from ardevo.external_archive import ArchiveManager, ExperimentLock
@@ -72,37 +73,15 @@ class OrchestratedTrial(Proctor):
         self.interruptions: list[dict[str, Any]] = []
         self.display = RuntimeDisplay(console)
         self.shutdown = EscapeShutdown(lambda: BOARD.event("Escape pressed · stopping at the next safe boundary and writing final reports"))
-
-        report = build_pool_report(
-            source=config["dataset"],
-            rungs=self.rungs,
-            n_samples=int(config["n_samples"]),
-            support_fraction=float(config.get("support_fraction", 0.8)),
-            min_fixed_query_samples=int(config.get("min_fixed_query_samples", 0)),
-            tasks_per_rung=int(schedule_cfg.get("tasks_per_rung", 100)),
-            shuffle=bool(schedule_cfg.get("shuffle", True)),
-            seed=int(config.get("seed", 0)),
-        )
-        self.pool: list[TaskEntry] = report.entries
-        include = schedule_cfg.get("task_include", [])
-        exclude = schedule_cfg.get("task_exclude", [])
-        include_patterns = [str(pattern) for pattern in ([include] if isinstance(include, str) else include)]
-        exclude_patterns = [str(pattern) for pattern in ([exclude] if isinstance(exclude, str) else exclude)]
-        if include_patterns:
-            self.pool = [entry for entry in self.pool if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in include_patterns)]
-        if exclude_patterns:
-            self.pool = [entry for entry in self.pool if not any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in exclude_patterns)]
-        self.skipped_rungs = report.skipped
-        for skipped in self.skipped_rungs:
-            console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
-        if self.skipped_rungs and bool(schedule_cfg.get("require_all_rungs", False)):
-            # NO SKIPPING: the ladder is climbed whole or the run refuses to start. Silent rung
-            # tolerance is how a wall stops being attempted without anyone deciding that.
-            reasons = "; ".join(f"rung {s.rung}: {s.error_type}: {s.message}" for s in self.skipped_rungs)
-            raise RuntimeError(f"require_all_rungs: {len(self.skipped_rungs)} rung(s) failed to load ({reasons}); probe with `uv run rung_doctor`")
-        if not self.pool:
-            reasons = "; ".join(f"rung {s.rung}: {s.error_type}" for s in self.skipped_rungs) or "no rungs configured"
-            raise RuntimeError(f"no tasks found for rungs {self.rungs} in {config['dataset']!r} ({reasons})")
+        # Pool discovery is intentionally deferred until ``run``.  A Hub/network/Parquet failure
+        # must happen only after the run directory and its first durable summary exist, and the
+        # constructor must never materialize hundreds of gigabytes before ClearML starts the run.
+        self.pool: list[TaskEntry] = []
+        self.pool_report: PoolReport | None = None
+        self.skipped_rungs = []
+        self.task_pool_load_seconds = 0.0
+        self.task_pool_ready = False
+        self.dataset_provenance: dict[str, Any] = {"source": str(config["dataset"]), "revision": None}
 
         loop = build_loop(config)
         if not isinstance(loop, HierarchicalLoop):
@@ -151,11 +130,14 @@ class OrchestratedTrial(Proctor):
         orchestrator: Orchestrator | None = None
         active_entry: TaskEntry | None = None
         active_task_started: float | None = None
+        task_value: Task | None = None
         try:
             if bool(self.config.get("render_async", False)):
                 rendering.enable_async_rendering()
             self.display.enable(bool(self.config.get("live_status", True)))
             self.shutdown.start()
+            self._write_run_summary(None, state, task_cursor, status="loading_tasks")
+            self._load_task_pool()
             orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
             orchestrator.attempts = attempts
             if counters:
@@ -172,9 +154,10 @@ class OrchestratedTrial(Proctor):
                 library_keys_before = set(self.library.keys())
                 task_started = time.perf_counter()
                 active_task_started = task_started
-                isolated = self._solve_isolated(entry, task_cursor, orchestrator) if self.fresh_per_task else None
+                task_value, task_load_seconds = self._materialize_task(entry, orchestrator)
+                isolated = self._solve_isolated(task_value, task_cursor, orchestrator) if self.fresh_per_task else None
                 if isolated is None:
-                    solution = orchestrator.solve(entry.task)
+                    solution = orchestrator.solve(task_value)
                     attempt = orchestrator.attempts[-1] if orchestrator.attempts else None
                     module_pool_sizes = self._module_pool_sizes(state)
                 else:
@@ -191,7 +174,10 @@ class OrchestratedTrial(Proctor):
                 self._log_task(orchestrator, state, task_cursor, task_seconds, module_pool_sizes)
                 # Durable record EVERY task, regardless of admission: a run is now measurable and
                 # resumable even when nothing new is shelved (the empty-run-dir bug is gone).
-                self._record_task(entry, attempt, new_library_keys, len(self.library), module_pool_sizes)
+                self._record_task(entry, attempt, new_library_keys, len(self.library), module_pool_sizes, task_load_seconds=task_load_seconds)
+                # The one-task materializer may retain this task for an immediate repeat.  The run
+                # loop must not retain a second reference while the next payload is being decoded.
+                task_value = None
                 self.display.task_finished(
                     task_cursor,
                     self.tasks_to_run,
@@ -228,6 +214,13 @@ class OrchestratedTrial(Proctor):
                     )
                 self.shutdown.stop()  # restore terminal input before releasing Rich or printing a traceback
                 self.display.close()
+                task_value = None
+                if orchestrator is not None:
+                    try:
+                        self._release_evolution_task_adapters(orchestrator)
+                    except Exception:
+                        logger.exception("best-effort task payload release failed during crash cleanup")
+                self._release_task_pool()
                 self.library.flush_stats()  # a crash still leaves the stats it had
                 rendering.flush_renders()  # pending async renders finish (their own failures only log)
                 self._write_run_summary(orchestrator, state, task_cursor, status=f"crashed: {type(error).__name__}: {error}")
@@ -242,6 +235,12 @@ class OrchestratedTrial(Proctor):
             gracefully_stopped = self.shutdown.requested
             self.shutdown.stop()
             self.display.close()
+            task_value = None
+            try:
+                self._release_evolution_task_adapters(orchestrator)
+            except Exception:
+                logger.exception("best-effort task payload release failed during final cleanup")
+            self._release_task_pool()
             self.library.flush_stats()
             rendering.flush_renders()  # renders land before GC can delete images and before finalize
             self._persist_resume_state(orchestrator, state, task_cursor)
@@ -271,6 +270,173 @@ class OrchestratedTrial(Proctor):
             lock.release()
             self.experiment_lock = None
 
+    def _load_task_pool(self) -> None:
+        """Discover lightweight task references after the run has a durable home."""
+
+        self.task_pool_ready = False
+        schedule_cfg = self.config.get("schedule", {})
+        prior_manifest = self._read_task_pool_manifest() if self.resume_dir else None
+        console.print(
+            "[bold cyan]Preparing task pool[/bold cyan] · selecting small, revision-pinned rows from each rung; "
+            "task tensors load only when scheduled"
+        )
+        started = time.perf_counter()
+        report = build_pool_report(
+            source=self.config["dataset"],
+            rungs=self.rungs,
+            n_samples=int(self.config["n_samples"]),
+            support_fraction=float(self.config.get("support_fraction", 0.8)),
+            min_fixed_query_samples=int(self.config.get("min_fixed_query_samples", 0)),
+            tasks_per_rung=int(schedule_cfg.get("tasks_per_rung", 100)),
+            shuffle=bool(schedule_cfg.get("shuffle", True)),
+            seed=int(self.config.get("seed", 0)),
+            task_manifest=prior_manifest,
+            cancelled=lambda: self.shutdown.requested,
+        )
+        self.task_pool_load_seconds = time.perf_counter() - started
+        self.pool_report = report
+        self.dataset_provenance = dict(report.provenance)
+        self.pool = list(report.entries)
+
+        include = schedule_cfg.get("task_include", [])
+        exclude = schedule_cfg.get("task_exclude", [])
+        include_patterns = [str(pattern) for pattern in ([include] if isinstance(include, str) else include)]
+        exclude_patterns = [str(pattern) for pattern in ([exclude] if isinstance(exclude, str) else exclude)]
+        if include_patterns:
+            self.pool = [entry for entry in self.pool if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in include_patterns)]
+        if exclude_patterns:
+            self.pool = [entry for entry in self.pool if not any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in exclude_patterns)]
+        self.skipped_rungs = list(report.skipped)
+
+        if report.interrupted or self.shutdown.requested:
+            console.print(f"[yellow]Task-pool discovery stopped safely after {self.task_pool_load_seconds:.1f}s[/yellow]")
+            return
+        for skipped in self.skipped_rungs:
+            console.print(f"[bold red]rung {skipped.rung} skipped[/bold red]: {skipped.error_type}: {skipped.message}")
+        if self.skipped_rungs and bool(schedule_cfg.get("require_all_rungs", False)):
+            reasons = "; ".join(f"rung {skipped.rung}: {skipped.error_type}: {skipped.message}" for skipped in self.skipped_rungs)
+            raise RuntimeError(f"require_all_rungs: {len(self.skipped_rungs)} rung(s) failed to load ({reasons}); probe with `uv run rung_doctor`")
+        if not self.pool:
+            reasons = "; ".join(f"rung {skipped.rung}: {skipped.error_type}" for skipped in self.skipped_rungs) or "no rungs configured"
+            raise RuntimeError(f"no tasks found for rungs {self.rungs} in {self.config['dataset']!r} ({reasons})")
+
+        revision = self.dataset_provenance.get("revision")
+        if revision is not None:
+            self.config["dataset_revision"] = revision
+        self._snapshot_effective_config()
+        self._write_task_pool_manifest()
+        self.task_pool_ready = True
+        console.print(
+            f"[green]Task pool ready[/green] · {len(self.pool)} lightweight references across "
+            f"{len({entry.rung for entry in self.pool})} rung(s) in {self.task_pool_load_seconds:.1f}s"
+        )
+
+    def _read_task_pool_manifest(self) -> dict[str, Any] | None:
+        path = self.run_dir / "task_pool.json"
+        if not path.exists():  # legacy resume: deterministically discover a new pinned pool
+            return None
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict) or int(value.get("schema_version", 0)) != 1:
+            raise ValueError(f"unsupported task-pool manifest: {path}")
+        if not bool(value.get("complete", False)):
+            return None
+        rows = value.get("tasks", [])
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ValueError(f"invalid task-pool rows: {path}")
+        # Eager fixture manifests have identities but no durable shard locators.  They are useful
+        # evidence, not a resume mechanism; live Icarus manifests always take this pinned path.
+        if any("shard" not in row for row in rows):
+            return None
+        return value
+
+    def _write_task_pool_manifest(self) -> None:
+        task_rows = [
+            entry.reference.to_dict() if entry.reference is not None else {"rung": entry.rung, "name": entry.name, "eager": True}
+            for entry in self.pool
+        ]
+        payload = {
+            "schema_version": 1,
+            "complete": True,
+            "dataset": dict(self.dataset_provenance),
+            "selection": {
+                "rungs": list(self.rungs),
+                "tasks_per_rung": int(self.config.get("schedule", {}).get("tasks_per_rung", 100)),
+                "shuffle": bool(self.config.get("schedule", {}).get("shuffle", True)),
+                "seed": int(self.config.get("seed", 0)),
+            },
+            "tasks": task_rows,
+            "skipped_rungs": [
+                {"rung": skipped.rung, "error_type": skipped.error_type, "message": skipped.message} for skipped in self.skipped_rungs
+            ],
+        }
+        self._write_atomic_json(self.run_dir / "task_pool.json", payload)
+
+    @staticmethod
+    def _write_atomic_json(path: Path, value: dict[str, Any]) -> None:
+        payload = (json.dumps(value, indent=2) + "\n").encode()
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+
+    def _materialize_task(self, entry: TaskEntry, orchestrator: Orchestrator) -> tuple[Task, float]:
+        report = self.pool_report
+        if report is None:
+            if entry.task is None:
+                raise RuntimeError("task pool has no materializer")
+            return entry.task, 0.0
+        cached = entry.reference is not None and report.materializer is not None and report.materializer.current_ref == entry.reference
+        if not cached:
+            # Drop the raw task and return Arrow/native allocator pages before asking every worker
+            # to release its encoded view. On a large modality boundary this creates the headroom
+            # needed for concurrent worker GC instead of retaining the old root task throughout it.
+            if report.materializer is not None:
+                report.materializer.release()
+            self._release_evolution_task_adapters(orchestrator)
+        self.display.stage_started("load_task", detail="reuse the active payload or stream its selected Parquet row from the Hugging Face cache")
+        started = time.perf_counter()
+        task = report.materialize(entry)
+        seconds = time.perf_counter() - started
+        detail = "reused the active decoded task" if cached else "loaded the selected task row into the one-task resident slot"
+        self.display.stage_result("load_task", "hit" if cached else "accepted", detail, seconds=seconds)
+        return task, seconds
+
+    def _release_evolution_task_adapters(self, orchestrator: Orchestrator) -> None:
+        """Drop main-process encoded adapters before a different task payload is decoded."""
+
+        # Keep spill paths alive until every shared worker has finished earlier queued work and
+        # acknowledged dropping its one-slot task payload.  This matters when crash cleanup follows
+        # a main-process exception while hybrid map_async work is still outstanding.
+        from ardevo.evolution.evolver import release_shared_task_adapters
+
+        release_shared_task_adapters()
+        evolvers: list[Any] = [self.loop.evolver]
+        evolvers.extend(getattr(strategy, "evolver", None) for _name, strategy in orchestrator.strategies)
+        seen: set[int] = set()
+        for evolver in evolvers:
+            if evolver is None or id(evolver) in seen:
+                continue
+            seen.add(id(evolver))
+            release = getattr(evolver, "release_task_adapter", None)
+            if callable(release):
+                release()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def _release_task_pool(self) -> None:
+        report = getattr(self, "pool_report", None)
+        if report is not None:
+            report.close()
+
     def _prepare_frozen_library(self) -> None:
         if not self.fresh_per_task:
             return
@@ -284,7 +450,7 @@ class OrchestratedTrial(Proctor):
 
     def _solve_isolated(
         self,
-        entry: TaskEntry,
+        task_value: Task,
         task_cursor: int,
         aggregate: Orchestrator,
     ) -> tuple[Solution | None, Any, int] | None:
@@ -312,7 +478,7 @@ class OrchestratedTrial(Proctor):
                 seed = int(self.config.get("seed", 0)) * 1_000_003 + task_cursor
                 state = loop.fresh_state(random.Random(seed))
                 isolated = Orchestrator(self.config, loop, library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
-                solution = isolated.solve(entry.task)
+                solution = isolated.solve(task_value)
                 library.flush_stats()
                 attempt = isolated.attempts[-1] if isolated.attempts else None
                 # The task-local directory is deleted on return. Never publish keys that will point
@@ -423,7 +589,16 @@ class OrchestratedTrial(Proctor):
             "pool_max_connections": float(connection_counts[-1]),
         }
 
-    def _record_task(self, entry: TaskEntry, attempt: Any, new_library_keys: list[str], library_size: int, module_pool_sizes: dict[str, float] | None = None) -> None:
+    def _record_task(
+        self,
+        entry: TaskEntry,
+        attempt: Any,
+        new_library_keys: list[str],
+        library_size: int,
+        module_pool_sizes: dict[str, float] | None = None,
+        *,
+        task_load_seconds: float = 0.0,
+    ) -> None:
         record = {
             "rung": entry.rung,
             "task": entry.name,
@@ -437,6 +612,7 @@ class OrchestratedTrial(Proctor):
             "new_library_keys": list(new_library_keys),
             "library_size": library_size,
         }
+        record["task_load_seconds"] = float(task_load_seconds)
         if attempt is not None and getattr(attempt, "refine_generations", 0):  # only when refinement ran (live mode stays byte-identical)
             record["refine_generations"] = attempt.refine_generations
         if attempt is not None and getattr(attempt, "seconds", 0.0):
@@ -500,6 +676,14 @@ class OrchestratedTrial(Proctor):
             "skipped_rungs": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
             "tasks": self.task_records,
             "interruptions": list(getattr(self, "interruptions", [])),
+            "dataset_provenance": dict(getattr(self, "dataset_provenance", {"source": self.config.get("dataset", ""), "revision": None})),
+            "task_pool": {
+                "path": "task_pool.json",
+                "schema_version": 1,
+                "ready": bool(getattr(self, "task_pool_ready", False)),
+                "entries": len(getattr(self, "pool", [])),
+                "load_seconds": float(getattr(self, "task_pool_load_seconds", 0.0)),
+            },
         }
         hardware_profile = getattr(self, "hardware_profile", None)
         if hardware_profile is not None:
@@ -554,6 +738,11 @@ class OrchestratedTrial(Proctor):
         self.config["config_sha256"] = source_hash
         (self.run_dir / "config.toml").write_bytes(payload)
         (self.run_dir / "config.toml.sha256").write_text(f"{source_hash}  config.toml\n")
+
+        self._snapshot_effective_config()
+
+    def _snapshot_effective_config(self) -> None:
+        """Refresh the executable config snapshot, including the resolved dataset revision."""
 
         effective = json.dumps(self.config, indent=2, sort_keys=True, default=str) + "\n"
         effective_payload = effective.encode("utf-8")
@@ -706,7 +895,12 @@ class OrchestratedTrial(Proctor):
                 "attempts": attempts_to_dicts(orchestrator.attempts),
             },
             "library": {"size": len(self.library), "keys": self.library.keys(), "path": str(self.library.root), "new_keys": new_library_keys, "net_key": net_key},
-            "schedule_coverage": {"rungs": self.rungs, "skipped": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs]},
+            "schedule_coverage": {
+                "rungs": self.rungs,
+                "skipped": [{"rung": s.rung, "error_type": s.error_type, "message": s.message} for s in self.skipped_rungs],
+                "task_pool": "task_pool.json",
+                "dataset_provenance": dict(getattr(self, "dataset_provenance", {"source": self.config.get("dataset", ""), "revision": None})),
+            },
             "modules": {
                 "pool_size": len(state.modules),
                 "species": len(state.species_champions),

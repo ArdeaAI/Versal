@@ -150,7 +150,7 @@ def requests_cuda(spec: RunSpec) -> bool:
 
     config = Config(spec.arm.config).current
     compute = str(config.get("compute", "auto"))
-    return compute.startswith("cuda") or (compute == "auto" and config.get("machine_env") in {"LatticeCUDA", "ClusterCUDA"})
+    return compute.startswith("cuda") or (compute == "auto" and config.get("machine_env") in {"LatticeCUDA", "LocalLatticeCUDA", "ClusterCUDA"})
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:

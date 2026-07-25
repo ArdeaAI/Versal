@@ -10,10 +10,23 @@ clearml = false
 [dataset]
 n_samples = 48
 
+[schedule]
+tasks_per_rung = 1
+
 [orchestrator]
+tasks = 18
 max_task_seconds = 90
 max_total_task_seconds = 90
 max_depth = 1
+
+  [orchestrator.field]
+  train_sites = 1024
+  audit_sites = 4096
+  verify_top_k = 2
+  pop_size = 16
+
+    [orchestrator.field.train]
+    steps = 5
 
   [orchestrator.refine]
   mode = "decay"

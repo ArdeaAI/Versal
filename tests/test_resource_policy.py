@@ -1,12 +1,13 @@
 import random
 from array import array
+from types import SimpleNamespace
 
 import psutil
 import torch
 
 import ardevo.utils.resources as resources
 from ardevo.evolution.composition import CompEdgeGene, CompositionGenome, _glue_for, comp_from_dict, comp_to_dict
-from ardevo.utils.resources import ResourcePolicy
+from ardevo.utils.resources import ResourcePolicy, StageFootprint, format_bytes
 
 
 class _Memory:
@@ -77,3 +78,23 @@ def test_legacy_glue_round_trip_stays_tuple() -> None:
     encoded = comp_to_dict(comp)
     assert encoded["edges"][0]["glue"] == [0.25, -0.5]
     assert isinstance(comp_from_dict(encoded).edges[0].glue, tuple)
+
+
+def test_psicov_decoded_cell_lower_bound_is_refused_without_allocation(monkeypatch) -> None:
+    monkeypatch.setattr(resources, "_cgroup_memory", lambda: (64 * 1024**3, 60 * 1024**3))
+    monkeypatch.setattr(resources.psutil, "virtual_memory", lambda: SimpleNamespace(total=64 * 1024**3, available=60 * 1024**3))
+    cells = 745_000_000_000
+    footprint = StageFootprint(
+        stage="psicov.b22.in0",
+        representation="explicit_flat/minimal",
+        candidate_bytes=cells * 5,
+    )
+    decision = ResourcePolicy(mode="adaptive", host_reserve_bytes=0).assess_stage(footprint)
+    assert decision.accepted is False
+    assert decision.footprint.candidate_bytes > 3 * 1024**4
+    assert format_bytes(decision.footprint.candidate_bytes).endswith("TiB")
+
+
+def test_byte_format_extends_through_exbibytes() -> None:
+    assert format_bytes(2 * 1024**5) == "2.0 PiB"
+    assert format_bytes(3 * 1024**6) == "3.0 EiB"

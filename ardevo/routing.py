@@ -191,7 +191,13 @@ def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_dept
         return None
     in_width, out_width = _entry_widths(entry)
     try:
-        if entry.entry_type == MODULE:
+        if entry.entry_type == MODULE and "field_template" in entry.payload:
+            from ardevo.field import decode_field_payload, field_feature_width
+
+            module, contract = decode_field_payload(entry.payload, library=library, max_inline_depth=max_inline_depth)
+            in_width = field_feature_width(contract.input_channels)
+            out_width = len(genome_from_dict(entry.payload).output_ids)
+        elif entry.entry_type == MODULE:
             module: SubstrateModule = decode_module(
                 genome_from_dict(entry.payload),
                 in_width,
@@ -789,6 +795,11 @@ class RouterService:
                     if source not in self.net.vertex_edge_out:
                         continue
                     for target in ordered_names:
+                        # A diagonal prior is not evidence of recurrent routing. It otherwise draws
+                        # a card-local anchor/output line merely because one expert owns both the
+                        # entry and exit traffic. Observed diagonal transitions above remain intact.
+                        if source == target:
+                            continue
                         if target not in self.net.vertex_edge_in:
                             continue
                         bias = float(self.net.vertex_edge_out[source] @ self.net.vertex_edge_in[target])
@@ -901,6 +912,7 @@ class RouterService:
                 top_k=self.net.top_k,
                 max_steps=self.net.max_steps,
                 pathways=self._pathways(ordered_names),
+                traffic_observed=bool(self.step_usage_totals or self.transition_totals),
             )
             # The view is a full snapshot; only the matplotlib draw rides the shared render thread.
             submit_render(render_overmind, self.image_dir / "overmind.png", view, library=self.library, max_inline_depth=self.max_inline_depth)

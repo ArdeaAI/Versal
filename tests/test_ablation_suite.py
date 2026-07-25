@@ -82,6 +82,20 @@ def test_selection_and_gpu_assignment_are_deterministic() -> None:
     assert [gpu for _run, gpu in assign_gpus(runs, ["2", "5"])] == ["2", "5", "2", "5", "2", "5"]
 
 
+def test_local_lattice_cuda_profile_requests_a_gpu() -> None:
+    arm = ArmSpec(
+        name="local_lattice",
+        priority="P0",
+        config=Config.PROJECT_ROOT / "configs" / "canary-lattice.toml",
+        seeds=(0,),
+        lever="",
+        claim="",
+        measure="",
+    )
+
+    assert requests_cuda(RunSpec(index=0, arm=arm, seed=0))
+
+
 def test_materialized_run_config_hashes_seed_library_and_compute(tmp_path: Path) -> None:
     manifest = load_manifest()
     spec = select_runs(manifest, arms={"full"})[2]

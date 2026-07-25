@@ -66,14 +66,24 @@ def test_report_preserves_missing_vs_zero_and_future_wrapper(tmp_path: Path) -> 
                     ]
                 },
                 "rungs": [1],
+                "dataset_provenance": {
+                    "source": "Ardea/Icarus-dataset",
+                    "revision": "a" * 40,
+                    "selection_algorithm": "shard_round_robin_v1",
+                },
+                "task_pool": {"path": "task_pool.json", "ready": True, "entries": 2, "load_seconds": 1.5},
             }
         )
     )
+    (run / "task_pool.json").write_text(json.dumps({"schema_version": 1, "complete": True, "tasks": []}))
     report = write_run_report(run)
     assert report["quality"]["held_out_query_count"] == 1
     assert report["quality"]["held_out_accuracy_mean"] == 0.0
     assert report["rungs"][0]["query_count"] == 1
     assert report["rungs"][0]["support_mean"] == 0.6  # literal 0.2 plus the legacy metric fallback 1.0
+    assert report["provenance"]["dataset"]["revision"] == "a" * 40
+    assert any(item["path"] == "task_pool.json" for item in report["provenance"]["files"])
+    assert report["resources"]["dataset"]["pool_load_seconds"] == 1.5
     assert "N/A" not in (run / "rung_summary.csv").read_text().splitlines()[1]  # rung aggregate has a valid zero
 
 

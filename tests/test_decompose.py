@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.decompose import Subtask, build_decomposers, input_subsets, output_slices, time_windows
+from ardevo.decompose import Subtask, build_decomposers, input_subsets, output_slices, spatial_patches, time_windows
 
 
 def _stacked_outputs(pairs: list[tuple[Field, Field]]) -> torch.Tensor:
@@ -142,3 +142,17 @@ def test_output_slices_carries_masks() -> None:
         for _, sub_output in sub.task.support + sub.task.query:
             assert sub_output.mask is not None
             assert torch.equal(sub_output.mask, output_mask[start:end])
+
+
+def test_spatial_planning_splits_largest_axis_then_switches() -> None:
+    field = Field(torch.zeros(8, 4), (Axis.HEIGHT, Axis.WIDTH), ValueType.CONTINUOUS, None, None, None)
+    task = Task(TaskMeta(0, TaskKind.MAP, "rect", fixed_split=True), [(field, field)], [])
+    first = spatial_patches(task, rng=random.Random(0), n_patches=2)
+    assert all(child.task.support[0][0].data.shape == (4, 4) for child in first)
+    second = spatial_patches(first[0].task, rng=random.Random(0), n_patches=2)
+    assert all(child.task.support[0][0].data.shape == (4, 2) for child in second)
+
+
+def test_decomposer_priority_places_lossy_input_subsets_last() -> None:
+    table = {"decompose": ["input_subsets", "output_slices", "spatial_patches", "time_windows"]}
+    assert [name for name, _op in build_decomposers(table)] == ["spatial_patches", "time_windows", "output_slices", "input_subsets"]

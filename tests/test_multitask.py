@@ -3,11 +3,12 @@
 All offline: synthetic binary tasks stand in for the rungs (no Hub access)."""
 
 import random
-from typing import Any
+from typing import Any, cast
 
 import torch
 
 from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from ardevo.dataset.icarus_streaming import DatasetProvenance, StreamingTaskRef
 from ardevo.evolution import multitask
 from ardevo.evolution.multitask import task_entry
 from ardevo.evolution.schedule import build_schedule
@@ -30,7 +31,7 @@ def test_task_entry_describes_interface() -> None:
     assert entry.output_width == 1
 
 
-def test_build_pool_report_closes_backend_datasets(monkeypatch) -> None:
+def test_build_pool_report_closes_backend_datasets() -> None:
     closed: list[int] = []
 
     class FakeIcarusDataset:
@@ -47,9 +48,16 @@ def test_build_pool_report_closes_backend_datasets(monkeypatch) -> None:
         def close(self) -> None:
             closed.append(self.rung)
 
-    monkeypatch.setattr(multitask, "IcarusDataset", FakeIcarusDataset)
-
-    report = multitask.build_pool_report("unused", [1, 2], n_samples=4, support_fraction=0.8, tasks_per_rung=1, shuffle=False, seed=0)
+    report = multitask.build_pool_report(
+        "unused",
+        [1, 2],
+        n_samples=4,
+        support_fraction=0.8,
+        tasks_per_rung=1,
+        shuffle=False,
+        seed=0,
+        dataset_factory=FakeIcarusDataset,
+    )
 
     assert [entry.rung for entry in report.entries] == [1, 2]
     # Rungs load on a thread pool, so CLOSE order follows completion order; the guarantee is that
@@ -91,9 +99,115 @@ def test_fixed_split_query_floor_reloads_native_query_without_trimming_support()
     )
 
     assert calls == [4, 8]
-    assert len(report.entries[0].task.support) == 5
-    assert len(report.entries[0].task.query) == 3
+    loaded_task = report.entries[0].task
+    assert loaded_task is not None
+    assert len(loaded_task.support) == 5
+    assert len(loaded_task.query) == 3
     assert len(closed) == 2
+
+
+def test_streaming_manifest_restores_pinned_references_without_reselection() -> None:
+    closed: list[bool] = []
+    revision = "a" * 40
+
+    class ManifestSource:
+        def __init__(self, source: str, *, revision: str | None, pinned_revision: bool = False) -> None:
+            assert source == "published/icarus" and revision == "a" * 40 and pinned_revision
+            self.provenance = DatasetProvenance(source, revision)
+
+        def select(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN201 - must remain unused
+            raise AssertionError("resume reselected tasks instead of using task_pool.json")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    reference = StreamingTaskRef(rung=17, name="raven.b42", config="rung_17", shard="rung_17/shard-00042.parquet", row_index=3, revision=revision)
+    manifest = {
+        "dataset": {"source": "published/icarus", "revision": revision, "selection_algorithm": "shard_round_robin_v1"},
+        "tasks": [reference.to_dict()],
+        "skipped_rungs": [{"rung": 8, "error_type": "Unavailable", "message": "recorded on the original run"}],
+    }
+
+    report = multitask.build_pool_report(
+        "newer/ignored",
+        [17],
+        n_samples=8,
+        support_fraction=0.8,
+        tasks_per_rung=1,
+        shuffle=True,
+        seed=9,
+        task_manifest=manifest,
+        streaming_source_factory=cast(Any, ManifestSource),
+    )
+
+    assert [entry.reference for entry in report.entries] == [reference]
+    assert report.provenance == {"source": "published/icarus", "revision": revision, "selection_algorithm": "shard_round_robin_v1"}
+    assert report.skipped == [multitask.SkippedRung(8, "Unavailable", "recorded on the original run")]
+    report.close()
+    assert closed == [True]
+
+
+def test_local_manifest_resume_needs_no_hub_revision(tmp_path) -> None:
+    class LocalManifestSource:
+        def __init__(self, source: str, *, revision: str | None, pinned_revision: bool = False) -> None:
+            assert source == str(tmp_path) and revision is None and pinned_revision
+            self.provenance = DatasetProvenance(source, None)
+
+        def close(self) -> None:
+            return None
+
+    reference = StreamingTaskRef(rung=2, name="local", config="rung_2", shard="rung_2/shard.parquet", row_index=0, revision=None)
+    manifest = {"dataset": {"source": str(tmp_path), "revision": None}, "tasks": [reference.to_dict()], "skipped_rungs": []}
+
+    report = multitask.build_pool_report(
+        "ignored",
+        [2],
+        n_samples=4,
+        support_fraction=0.8,
+        tasks_per_rung=1,
+        shuffle=False,
+        seed=0,
+        task_manifest=manifest,
+        streaming_source_factory=cast(Any, LocalManifestSource),
+    )
+
+    assert report.entries[0].reference == reference
+
+
+def test_streaming_discovery_records_failed_rung_and_continues() -> None:
+    calls: list[int] = []
+
+    class PartialSource:
+        def __init__(self, source: str, *, revision: str | None, pinned_revision: bool = False) -> None:
+            assert source == "published/icarus" and revision is None and not pinned_revision
+            self.provenance = DatasetProvenance(source, "resolved-sha")
+
+        def select(self, rungs, **_kwargs):  # noqa: ANN001, ANN003, ANN201 - injected source seam
+            rung = int(rungs[0])
+            calls.append(rung)
+            if rung == 3:
+                raise OSError("synthetic metadata failure")
+            return [StreamingTaskRef(rung, f"task{rung}", f"rung_{rung}", f"rung_{rung}/shard.parquet", 0, "resolved-sha")]
+
+        def close(self) -> None:
+            return None
+
+    report = multitask.build_pool_report(
+        "published/icarus",
+        [3, 4],
+        n_samples=8,
+        support_fraction=0.8,
+        tasks_per_rung=1,
+        shuffle=False,
+        seed=0,
+        streaming_source_factory=cast(Any, PartialSource),
+    )
+
+    assert calls == [3, 4]
+    assert [entry.name for entry in report.entries] == ["task4"]
+    assert len(report.skipped) == 1
+    assert report.skipped[0].rung == 3 and report.skipped[0].error_type == "OSError"
+    assert report.skipped[0].message == "synthetic metadata failure"
 
 
 def test_scheduler_state_round_trips() -> None:

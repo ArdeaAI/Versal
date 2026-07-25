@@ -153,6 +153,26 @@ def task_io(task: Task) -> dict[str, Any]:
     }
 
 
+def is_field_payload(payload: dict[str, Any]) -> bool:
+    return "field_template" in payload
+
+
+def is_field_entry(entry: "LibraryEntry") -> bool:
+    return entry.entry_type == MODULE and is_field_payload(entry.payload)
+
+
+def module_representation(entry_or_payload: "LibraryEntry | dict[str, Any]") -> str:
+    payload = entry_or_payload.payload if isinstance(entry_or_payload, LibraryEntry) else entry_or_payload
+    if "field_template" not in payload:
+        return "flat"
+    # Validation is deliberately eager: unknown versions fail closed everywhere that central
+    # representation detection is used.
+    from ardevo.field import payload_field_contract
+
+    payload_field_contract(payload)
+    return "field"
+
+
 @dataclass
 class LibraryEntry:
     """One admitted solution. `payload` is a genome dict (module) or a composition dict."""
@@ -284,6 +304,7 @@ def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
             "connections": sorted((int(conn["in"]), int(conn["out"]), bool(conn["enabled"]), bool(conn.get("recurrent", False))) for conn in payload["connections"]),
             "macros": sorted((macro["ref"], list(macro["inputs"]), list(macro["outputs"]), bool(macro.get("trainable", False))) for macro in payload.get("macros", [])),
             "refine_steps": int(payload.get("refine_steps", 1)),
+            "field_template": payload.get("field_template"),
         }
     else:
         skeleton = {
@@ -391,6 +412,10 @@ class ModuleLibrary:
             "dependency": bool(provenance.get("dependency", False)),
             "behavior": list(provenance.get("behavior", [])),  # QD niche descriptor (archive policy)
             "stats": entry.stats,
+            "representation": "field" if is_field_payload(payload) else entry_type,
+            "field_identity": (
+                hashlib.sha1(json.dumps(payload["field_template"], sort_keys=True).encode()).hexdigest()[:16] if is_field_payload(payload) else None
+            ),
         }
         self._write_index()
         return key
@@ -440,6 +465,8 @@ class ModuleLibrary:
         refs assembling, not to compete for shelf space."""
 
         def group_key(candidate_io: dict[str, Any]) -> tuple:
+            if candidate_io.get("field_identity") is not None:
+                return ("field", candidate_io["field_identity"])
             inputs = tuple((item["signature"], item["width"]) for item in candidate_io["inputs"])
             return (inputs, (candidate_io["output"]["signature"], candidate_io["output"]["width"]))
 
@@ -449,6 +476,31 @@ class ModuleLibrary:
             for summary in self._index.values()
             if summary["entry_type"] == entry_type and not summary.get("retired", False) and not summary.get("dependency", False) and group_key(summary["io"]) == wanted
         ]
+
+    def query_field(self, contract: Any, *, include_retired: bool = False, limit: int = 0) -> list[LibraryEntry]:
+        """Cross-resolution nominations by symbolic field identity; absolute H/W never participate."""
+
+        identity = contract.identity
+        matches = [
+            summary
+            for summary in self._index.values()
+            if summary.get("field_identity") == identity and (include_retired or not summary.get("retired", False))
+        ]
+        # Old indexes did not carry representation summaries. Load only module rows and recover
+        # identity lazily without rewriting the historical index.
+        for summary in self._index.values():
+            if summary in matches or summary.get("entry_type") != MODULE or summary.get("field_identity") is not None:
+                continue
+            try:
+                metadata = self.load(summary["key"]).payload.get("field_template")
+                if metadata is not None and hashlib.sha1(json.dumps(metadata, sort_keys=True).encode()).hexdigest()[:16] == identity:
+                    matches.append(summary)
+            except (KeyError, ValueError):
+                continue
+        matches.sort(key=lambda item: (item.get("weight_robustness", 0.0), item.get("accepted_metric", 0.0)), reverse=True)
+        if limit:
+            matches = matches[:limit]
+        return [self.load(summary["key"]) for summary in matches]
 
     def load(self, key: str) -> LibraryEntry:
         cached = self._entry_cache.get(key)
@@ -729,6 +781,8 @@ def macro_resolver(library: "ModuleLibrary") -> Callable[[str], Genome]:
             entry = library.load(key)
             if entry.entry_type != MODULE:
                 raise ValueError(f"macro ref {key!r} is not a module entry")
+            if is_field_entry(entry):
+                raise ValueError(f"field-template module {key!r} cannot be embedded as a flat macro")
             cache[key] = genome_from_dict(entry.payload)
         return cache[key]
 
@@ -748,6 +802,8 @@ def graft(entry: LibraryEntry, tracker: InnovationTracker) -> Genome:
     aggregations / recurrence preserved."""
     if entry.entry_type != MODULE:
         raise ValueError(f"can only graft module entries, got {entry.entry_type!r}")
+    if is_field_entry(entry):
+        raise ValueError("field-template entries may only seed the field strategy")
     source = genome_from_dict(entry.payload)
     id_map = {old_id: tracker.new_node_id() for old_id in sorted(source.nodes)}
     nodes = {id_map[node.id]: replace(node, id=id_map[node.id]) for node in source.nodes.values()}

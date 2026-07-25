@@ -10,7 +10,7 @@ experiment = "orchestrated_overmind_brute"
 n_samples = 400
 
 [schedule]
-rungs = [4]
+rungs = [1]
 tasks_per_rung = 2000
 
 [orchestrator]

@@ -97,6 +97,57 @@ class ResourceEstimate:
 
 
 @dataclass(frozen=True)
+class StageFootprint:
+    """Representation-neutral, pre-allocation description of one search stage.
+
+    The old guard counted abstract ``glue_values`` and consequently compared Python genes,
+    decoded tensors, and optimizer state as if they had identical storage.  New callers describe
+    the bytes they will actually retain.  ``work_operations`` is deliberately informational until
+    a calibrated throughput is available; certain memory lower bounds remain sufficient to reject.
+    """
+
+    stage: str
+    representation: str
+    candidate_bytes: int
+    population_size: int = 1
+    optimizer_bytes: int = 0
+    activation_bytes: int = 0
+    transfer_bytes: int = 0
+    work_operations: int = 0
+    detail: str = ""
+
+    @property
+    def population_bytes(self) -> int:
+        return max(0, self.candidate_bytes) * max(1, self.population_size)
+
+    @property
+    def total_bytes(self) -> int:
+        return self.population_bytes + max(0, self.optimizer_bytes) + max(0, self.activation_bytes) + max(0, self.transfer_bytes)
+
+
+@dataclass(frozen=True)
+class StageDecision:
+    footprint: StageFootprint
+    host_budget_bytes: int
+    device_budget_bytes: int
+    accepted: bool
+    reason: str | None
+
+    def metrics(self, prefix: str = "resource") -> dict[str, float]:
+        fp = self.footprint
+        return {
+            f"{prefix}_candidate_bytes": float(fp.candidate_bytes),
+            f"{prefix}_population_bytes": float(fp.population_bytes),
+            f"{prefix}_optimizer_bytes": float(fp.optimizer_bytes),
+            f"{prefix}_activation_bytes": float(fp.activation_bytes),
+            f"{prefix}_transfer_bytes": float(fp.transfer_bytes),
+            f"{prefix}_total_bytes": float(fp.total_bytes),
+            f"{prefix}_work_operations": float(fp.work_operations),
+            f"{prefix}_declined": 0.0 if self.accepted else 1.0,
+        }
+
+
+@dataclass(frozen=True)
 class ResourcePolicy:
     """Memory envelope used by the adaptive guards.
 
@@ -219,13 +270,27 @@ class ResourcePolicy:
             mode=mode,
         )
 
+    def assess_stage(self, footprint: StageFootprint, *, device: torch.device | str = "cpu") -> StageDecision:
+        """Assess actual stage residency without assigning meaning to a generic value count."""
+
+        host_budget, device_budget = self._budgets(device)
+        required = footprint.total_bytes
+        if self.mode != "adaptive":
+            accepted = True
+        elif torch.device(device).type in {"cuda", "mps"}:
+            accepted = required <= host_budget and required <= device_budget
+        else:
+            accepted = required <= host_budget
+        reason = None if accepted else f"{footprint.representation} stage requires {format_bytes(required)}; budget is {format_bytes(min(host_budget, device_budget))}"
+        return StageDecision(footprint, host_budget, device_budget, accepted, reason)
+
 
 def format_bytes(value: int) -> str:
     """Compact binary byte count for resource-decline log messages."""
 
     size = float(max(0, value))
-    for suffix in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if size < 1024.0 or suffix == "TiB":
+    for suffix in ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"):
+        if size < 1024.0 or suffix == "EiB":
             return f"{size:.1f} {suffix}"
         size /= 1024.0
-    return f"{size:.1f} TiB"
+    return f"{size:.1f} EiB"
