@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ardevo.local/schemas/paper-evidence-v2.json",
-  "title": "ArdEVO paper evidence manifest",
+  "$id": "https://versal.local/schemas/paper-evidence-v2.json",
+  "title": "Versal paper evidence manifest",
   "oneOf": [
     {"$ref": "#/$defs/manifestV1"},
     {"$ref": "#/$defs/manifestV2"}

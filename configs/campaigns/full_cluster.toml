@@ -11,7 +11,7 @@ p0 = [0, 1, 2]
 p1 = [0, 1, 2]
 
 [slurm]
-job_name = "ardevo-full"
+job_name = "versal-full"
 time = "48:00:00"
 cpus_per_task = 16
 mem = "128G"

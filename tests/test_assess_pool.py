@@ -6,19 +6,19 @@ from typing import Any, cast
 
 import torch
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.genome import Genome, genome_to_dict
-from ardevo.evolution.loop import _assess_comp_in_worker
-from ardevo.evolution.registry import build_evolver, build_loop
-from ardevo.evolution.train import gradient, gradient_batched, last_batch_stats
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
+from versal.dataset.icarus import Task
+from versal.evolution.genome import Genome, genome_to_dict
+from versal.evolution.loop import _assess_comp_in_worker
+from versal.evolution.registry import build_evolver, build_loop
+from versal.evolution.train import gradient, gradient_batched, last_batch_stats
 
 
 def test_hierarchical_process_pool_matches_serial(decomposable_task: Task, tmp_path) -> None:
     """Composition assessment across the shared process pool is bit-identical to serial: champion
     fitness/metrics AND the evolved module pool match (rng streams match; training is rng-free)."""
-    from ardevo.evolution import evolver as ev_mod
+    from versal.evolution import evolver as ev_mod
 
     outcomes = []
     try:
@@ -92,8 +92,8 @@ def test_composition_worker_result_contains_no_torch_storage(xor_task: Task) -> 
 
 def test_composition_pool_sends_encoded_task_by_cached_path(xor_task: Task, tmp_path) -> None:
     """The task tensors travel through the worker's one-slot disk cache, never the job queue."""
-    from ardevo.evolution import evolver as ev_mod
-    from ardevo.evolution.evolver import AdapterRef
+    from versal.evolution import evolver as ev_mod
+    from versal.evolution.evolver import AdapterRef
 
     class InlinePool:
         _processes = 2
@@ -156,8 +156,8 @@ def test_adapter_spill_is_cached_resolves_exactly_and_cleans_up(xor_adapter, tmp
     through a one-slot cache; close_pool removes the spill file."""
     import torch
 
-    from ardevo.evolution import evolver as ev_mod
-    from ardevo.evolution.evolver import AdapterRef
+    from versal.evolution import evolver as ev_mod
+    from versal.evolution.evolver import AdapterRef
 
     config = {
         "seed": 0,
@@ -198,8 +198,8 @@ def test_task_switch_releases_main_and_worker_adapter_before_loading_next(xor_ad
 
     import torch
 
-    from ardevo.evolution import evolver as ev_mod
-    from ardevo.evolution.evolver import AdapterRef
+    from versal.evolution import evolver as ev_mod
+    from versal.evolution.evolver import AdapterRef
 
     config = {
         "seed": 0,
@@ -239,7 +239,7 @@ def test_task_switch_releases_main_and_worker_adapter_before_loading_next(xor_ad
 def test_shared_task_release_collects_an_acknowledgement_from_every_worker() -> None:
     from types import SimpleNamespace
 
-    from ardevo.evolution import evolver as ev_mod
+    from versal.evolution import evolver as ev_mod
 
     class FakePool:
         _pool = [SimpleNamespace(pid=10, is_alive=lambda: True), SimpleNamespace(pid=11, is_alive=lambda: True)]
@@ -257,7 +257,7 @@ def test_shared_task_release_collects_an_acknowledgement_from_every_worker() -> 
 
 
 def test_worker_task_release_returns_native_heap_before_acknowledging(xor_adapter, monkeypatch) -> None:
-    from ardevo.evolution import evolver as ev_mod
+    from versal.evolution import evolver as ev_mod
 
     trims: list[bool] = []
     monkeypatch.setattr(ev_mod, "release_unused_host_memory", lambda: trims.append(True))
@@ -275,8 +275,8 @@ def test_owned_pool_acknowledges_release_before_spill_is_unlinked(xor_adapter, t
     from pathlib import Path
     from types import SimpleNamespace
 
-    from ardevo.evolution import evolver as ev_mod
-    from ardevo.evolution.evolver import AdapterRef
+    from versal.evolution import evolver as ev_mod
+    from versal.evolution.evolver import AdapterRef
 
     evolver = build_evolver(
         {

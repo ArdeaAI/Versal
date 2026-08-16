@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from ardevo import main as main_module
-from ardevo.main import load_run_config, require_orchestrator
-from ardevo.utils.config import Config
+from versal import main as main_module
+from versal.main import load_run_config, require_orchestrator
+from versal.utils.config import Config
 
 
 def test_missing_orchestrator_table_is_a_startup_error():

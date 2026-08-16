@@ -5,10 +5,10 @@ import random
 import pytest
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
-from ardevo.evaluation import encode, input_width, output_features
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
+from versal.evaluation import encode, input_width, output_features
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
 
 _XOR_ROWS = [(0, 0, 0), (0, 1, 1), (1, 0, 1), (1, 1, 0)]
 

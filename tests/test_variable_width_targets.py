@@ -7,8 +7,8 @@ or crop a wider one to the overlap; same-width tasks pass through as the same ob
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, encode_task, model_output_features
-from ardevo.evaluation import evaluate, fit_query_target
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, encode_task, model_output_features
+from versal.evaluation import evaluate, fit_query_target
 
 
 class _FixedHead(torch.nn.Module):

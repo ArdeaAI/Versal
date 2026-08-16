@@ -7,11 +7,11 @@ from typing import Any, cast
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.dataset.icarus_streaming import DatasetProvenance, StreamingTaskRef
-from ardevo.evolution import multitask
-from ardevo.evolution.multitask import task_entry
-from ardevo.evolution.schedule import build_schedule
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.dataset.icarus_streaming import DatasetProvenance, StreamingTaskRef
+from versal.evolution import multitask
+from versal.evolution.multitask import task_entry
+from versal.evolution.schedule import build_schedule
 
 
 def _binary_field(values: list[float]) -> Field:

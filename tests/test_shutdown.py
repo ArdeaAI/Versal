@@ -6,7 +6,7 @@ import termios
 import threading
 import time
 
-from ardevo.utils.shutdown import EscapeShutdown
+from versal.utils.shutdown import EscapeShutdown
 
 
 def test_manual_shutdown_request_is_idempotent() -> None:

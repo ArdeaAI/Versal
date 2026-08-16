@@ -3,13 +3,13 @@ from typing import cast
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
-from ardevo.evaluation import input_width, output_features
-from ardevo.evolution.evolver import Evolver, TaskAdapter
-from ardevo.evolution.loop import CompTaskSpec
-from ardevo.orchestrator import Orchestrator
-from ardevo.strategy import DirectStrategy, StrategyResult, StrategyRuntime
-from ardevo.structured import ShapeRule, encode_structured_grid, evaluate_structured_grid, fit_shape_program
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
+from versal.evaluation import input_width, output_features
+from versal.evolution.evolver import Evolver, TaskAdapter
+from versal.evolution.loop import CompTaskSpec
+from versal.orchestrator import Orchestrator
+from versal.strategy import DirectStrategy, StrategyResult, StrategyRuntime
+from versal.structured import ShapeRule, encode_structured_grid, evaluate_structured_grid, fit_shape_program
 
 
 def _field(height: int, width: int, value: int = 0) -> Field:

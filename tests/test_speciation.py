@@ -1,6 +1,6 @@
 import random
 
-from ardevo.evolution.speciation import NeatSpeciation, NoSpeciation, compatibility_distance
+from versal.evolution.speciation import NeatSpeciation, NoSpeciation, compatibility_distance
 
 
 def test_compatibility_distance_zero_for_identical(solving_genome):

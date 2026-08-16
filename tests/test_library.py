@@ -6,11 +6,11 @@ from typing import cast
 
 import torch
 
-from ardevo.dataset.icarus import Task, TaskKind, TaskMeta
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
-from ardevo.evolution.mutation import MutationContext, add_library_module
-from ardevo.library import INVALID_EXPANDED_COMPLEXITY, MODULE, LibraryEntry, ModuleLibrary, expanded_payload_complexity, graft, payload_shell_complexity, task_io
-from ardevo.substrate import decode
+from versal.dataset.icarus import Task, TaskKind, TaskMeta
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
+from versal.evolution.mutation import MutationContext, add_library_module
+from versal.library import INVALID_EXPANDED_COMPLEXITY, MODULE, LibraryEntry, ModuleLibrary, expanded_payload_complexity, graft, payload_shell_complexity, task_io
+from versal.substrate import decode
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
 
@@ -154,7 +154,7 @@ def test_v1_on_disk_format_still_loads_and_assembles() -> None:
     """Format-compat pin: entries admitted by phase 3 (no retired/dependency keys) keep working."""
     import torch
 
-    from ardevo.evolution.composition import AssemblyContext, assemble, comp_from_dict
+    from versal.evolution.composition import AssemblyContext, assemble, comp_from_dict
 
     library = ModuleLibrary(Path(__file__).parent / "fixtures" / "library_v1")
     assert len(library) == 4
@@ -176,13 +176,13 @@ def test_oversized_payload_warns_but_admits(tmp_path: Path, caplog) -> None:
 
     library = ModuleLibrary(tmp_path / "lib")
     payload = {"nodes": [], "connections": [], "macros": [], "blob": "x" * 2_100_000}
-    ardevo_logger = logging.getLogger("ardevo")  # propagate=False, so caplog needs a direct handler
-    ardevo_logger.addHandler(caplog.handler)
+    versal_logger = logging.getLogger("versal")  # propagate=False, so caplog needs a direct handler
+    versal_logger.addHandler(caplog.handler)
     try:
-        with caplog.at_level(logging.WARNING, logger="ardevo"):
+        with caplog.at_level(logging.WARNING, logger="versal"):
             key = library.add(entry_type=MODULE, payload=payload, io=_IO, provenance={})
     finally:
-        ardevo_logger.removeHandler(caplog.handler)
+        versal_logger.removeHandler(caplog.handler)
     assert key in library.keys()  # champions are never dropped for size
     assert any("glue_rank_threshold" in record.message for record in caplog.records)
 
@@ -309,7 +309,7 @@ def test_summaries_filters_retired_and_dependency(tmp_path: Path, solving_genome
 def test_structural_fingerprint_ignores_weights_but_not_topology(tmp_path: Path, solving_genome: Genome) -> None:
     """The refine identity: a retrained clone shares the fingerprint (entry KEYS never do, they
     hash weights); any structural edit, however small, changes it."""
-    from ardevo.library import structural_fingerprint
+    from versal.library import structural_fingerprint
 
     payload = genome_to_dict(solving_genome)
     reweighted = genome_to_dict(solving_genome)
@@ -379,8 +379,8 @@ def test_expanded_complexity_counts_repeated_placements_and_rejects_bad_referenc
 def test_structural_fingerprint_composition_ignores_glue_values() -> None:
     import random as random_module
 
-    from ardevo.evolution.composition import comp_to_dict, minimal_composition
-    from ardevo.library import COMPOSITION, structural_fingerprint
+    from versal.evolution.composition import comp_to_dict, minimal_composition
+    from versal.library import COMPOSITION, structural_fingerprint
 
     comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random_module.Random(1))
     baseline = comp_to_dict(comp)
@@ -396,8 +396,8 @@ def test_structural_fingerprint_composition_ignores_glue_values() -> None:
 def test_payload_refs_extracts_comp_and_macro_keys(tmp_path: Path, solving_genome: Genome) -> None:
     import random as random_module
 
-    from ardevo.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
-    from ardevo.library import COMPOSITION, payload_refs
+    from versal.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
+    from versal.library import COMPOSITION, payload_refs
 
     assert payload_refs(MODULE, genome_to_dict(solving_genome)) == set()  # no macros, no refs
     macro_payload = genome_to_dict(solving_genome)
@@ -414,8 +414,8 @@ def test_collect_garbage_sweeps_cascades_and_protects(tmp_path: Path, solving_ge
     protected) pin their targets; a retired chain falls together; dry-run touches nothing."""
     import random as random_module
 
-    from ardevo.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
-    from ardevo.library import COMPOSITION
+    from versal.evolution.composition import CompNodeGene, CompNodeKind, comp_to_dict, minimal_composition
+    from versal.library import COMPOSITION
 
     library = ModuleLibrary(tmp_path / "lib")
 

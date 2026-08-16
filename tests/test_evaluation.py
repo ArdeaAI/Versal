@@ -1,6 +1,6 @@
 import random
 
-from ardevo.evolution.train import gradient
+from versal.evolution.train import gradient
 
 
 def test_linear_genome_cannot_solve_xor(linear_genome, xor_adapter):

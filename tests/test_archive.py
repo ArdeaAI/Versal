@@ -3,9 +3,9 @@ just the top-k by metric, so recombination has varied parts to build cross-task 
 
 from pathlib import Path
 
-from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
-from ardevo.library import LIBRARY_ADMISSION, MODULE, ModuleLibrary
-from ardevo.orchestrator import _genome_behavior
+from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+from versal.library import LIBRARY_ADMISSION, MODULE, ModuleLibrary
+from versal.orchestrator import _genome_behavior
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
 

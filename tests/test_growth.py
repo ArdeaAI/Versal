@@ -7,14 +7,14 @@ import random
 
 import torch
 
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
-from ardevo.evolution.growth import node_scores
-from ardevo.evolution.init import minimal
-from ardevo.evolution.mutation import MutationContext, add_hinted_connection, add_hinted_node, split_node
-from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.train import gradient
-from ardevo.substrate import decode, decode_refine
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
+from versal.evolution.growth import node_scores
+from versal.evolution.init import minimal
+from versal.evolution.mutation import MutationContext, add_hinted_connection, add_hinted_node, split_node
+from versal.evolution.registry import build_evolver
+from versal.evolution.train import gradient
+from versal.substrate import decode, decode_refine
 
 
 def _ctx(*genomes: Genome) -> MutationContext:

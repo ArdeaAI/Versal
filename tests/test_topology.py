@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-import ardevo.topology as topology
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
-from ardevo.topology import TopologyTabuSession, TopologyTabuStore, same_topology, topology_record
+import versal.topology as topology
+from versal.library import COMPOSITION, MODULE, ModuleLibrary
+from versal.topology import TopologyTabuSession, TopologyTabuStore, same_topology, topology_record
 
 
 def _module_payload() -> dict:

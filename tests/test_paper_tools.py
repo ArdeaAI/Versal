@@ -52,7 +52,7 @@ def _v2_manifest() -> dict[str, Any]:
 
 
 def _core_source() -> str:
-    return """# ArdEVO
+    return """# Versal
 
 **Researcher**
 Institute
@@ -87,16 +87,16 @@ def test_build_cli_defaults_to_compatible_conference_preprint() -> None:
 
     assert args.edition == "conference"
     assert args.mode == "preprint"
-    assert build_paper.tex_path_for(args.edition, args.mode).name == "ardevo-preprint.tex"
+    assert build_paper.tex_path_for(args.edition, args.mode).name == "versal-preprint.tex"
 
 
 @pytest.mark.parametrize(
     ("edition", "mode", "expected"),
     [
-        ("conference", "preprint", "ardevo-preprint.tex"),
-        ("conference", "submission", "ardevo-submission.tex"),
-        ("conference", "final", "ardevo-final.tex"),
-        ("technical-report", "preprint", "ardevo-technical-report.tex"),
+        ("conference", "preprint", "versal-preprint.tex"),
+        ("conference", "submission", "versal-submission.tex"),
+        ("conference", "final", "versal-final.tex"),
+        ("technical-report", "preprint", "versal-technical-report.tex"),
     ],
 )
 def test_output_names_are_deterministic(edition: str, mode: str, expected: str) -> None:

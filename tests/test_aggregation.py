@@ -4,12 +4,12 @@ import random
 
 import torch
 
-from ardevo.evaluation import evaluate, support_loss
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
-from ardevo.evolution.mutation import MutationContext, mutate_aggregation
-from ardevo.evolution.train import gradient
-from ardevo.substrate import decode
+from versal.evaluation import evaluate, support_loss
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
+from versal.evolution.mutation import MutationContext, mutate_aggregation
+from versal.evolution.train import gradient
+from versal.substrate import decode
 
 
 def _product_genome(product_weight: float = 1.0) -> Genome:

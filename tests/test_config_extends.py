@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ardevo.utils.config import Config
+from versal.utils.config import Config
 
 
 def _effective_hash(value: dict) -> str:

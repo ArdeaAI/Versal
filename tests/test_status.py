@@ -4,7 +4,7 @@ import io
 
 from rich.console import Console
 
-from ardevo.utils.status import BOARD, StatusBoard, _Footer
+from versal.utils.status import BOARD, StatusBoard, _Footer
 
 
 def _terminal_console() -> Console:

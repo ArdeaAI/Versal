@@ -5,12 +5,12 @@ within the 1e-4 batch contract of the fully sequential path (tests/test_train_ba
 
 import random
 
-from ardevo.evolution.evolver import EvolverState
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
-from ardevo.evolution.mutation import MutationContext, add_recurrent_connection, add_rich_node
-from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.train import TRAIN, TRAIN_POPULATION, gradient_refine
 from tests.test_aggregation import _product_xor_genome
+from versal.evolution.evolver import EvolverState
+from versal.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from versal.evolution.mutation import MutationContext, add_recurrent_connection, add_rich_node
+from versal.evolution.registry import build_evolver
+from versal.evolution.train import TRAIN, TRAIN_POPULATION, gradient_refine
 
 
 def _config(workers: int, tmp_path, **train_extras) -> dict:
@@ -86,7 +86,7 @@ def test_gradient_refine_registers_in_both_registries() -> None:
 def test_min_batch_nodes_floor_sends_small_candidates_to_the_pool(xor_adapter, linear_genome: Genome, solving_genome: Genome, tmp_path) -> None:
     """The width floor: below it the 12-worker pool measured FASTER than the device batch, so
     small candidates must partition serial even when batching is on."""
-    from ardevo.evolution.train import partition_batchable
+    from versal.evolution.train import partition_batchable
 
     modules = [xor_adapter.decode(linear_genome), xor_adapter.decode(solving_genome)]
     cores = [module.core() for module in modules]

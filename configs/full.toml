@@ -69,6 +69,6 @@ device_bytes_per_value = 20
 [archive]
 enabled = false
 backend = "s3"
-uri_env = "ARDEVO_ARCHIVE_URI"
+uri_env = "VERSAL_ARCHIVE_URI"
 snapshot_every_tasks = 1
 retain_local_snapshots = 2

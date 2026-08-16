@@ -1,7 +1,7 @@
 import random
 
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, make_acyclic, topological_order, would_create_cycle
-from ardevo.evolution.mutation import MutationContext, add_connection, add_deep_node, add_node, add_rich_node, perturb_weights
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, make_acyclic, topological_order, would_create_cycle
+from versal.evolution.mutation import MutationContext, add_connection, add_deep_node, add_node, add_rich_node, perturb_weights
 
 
 def _context(genome) -> MutationContext:

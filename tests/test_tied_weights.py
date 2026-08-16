@@ -7,14 +7,14 @@ import random
 
 import torch
 
-from ardevo.dataset.icarus import Level0Encoder, Task
-from ardevo.evaluation import encode, input_width, output_features
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
-from ardevo.evolution.init import stamp_input_coordinates
-from ardevo.evolution.mutation import MutationContext, add_shared_motif, untie_motif_weights
-from ardevo.evolution.train import gradient
-from ardevo.substrate import decode
+from versal.dataset.icarus import Level0Encoder, Task
+from versal.evaluation import encode, input_width, output_features
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
+from versal.evolution.init import stamp_input_coordinates
+from versal.evolution.mutation import MutationContext, add_shared_motif, untie_motif_weights
+from versal.evolution.train import gradient
+from versal.substrate import decode
 
 
 def _tied_pair_genome(weight: float = 0.7) -> Genome:
@@ -65,7 +65,7 @@ def test_tied_gradient_accumulates_and_members_stay_in_sync(xor_task: Task) -> N
 def test_untied_twin_diverges_where_tied_twin_cannot() -> None:
     # y = x0 (input-ASYMMETRIC on purpose: XOR is symmetric under input swap, so equal starting
     # weights would receive equal gradients even untied and the divergence assertion would be void).
-    from ardevo.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
+    from versal.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
 
     def field(values: list[float]) -> Field:
         return Field(torch.tensor(values, dtype=torch.float32), (Axis.EXTRA,), ValueType.BINARY, None, None, None)
@@ -103,7 +103,7 @@ def test_tied_nets_never_enter_the_batch_program() -> None:
 
 def test_add_shared_motif_tied_stamps_shared_groups() -> None:
     rng = random.Random(4)
-    from ardevo.evolution.init import minimal
+    from versal.evolution.init import minimal
 
     genome = stamp_input_coordinates(minimal(9, 1, rng=rng), (3, 3))
     ctx = _ctx(genome)
@@ -134,7 +134,7 @@ def test_untie_is_function_preserving() -> None:
 
 
 def test_add_shared_motif_untied_path_is_byte_identical_to_the_historical_operator() -> None:
-    from ardevo.evolution.init import minimal
+    from versal.evolution.init import minimal
 
     genome = stamp_input_coordinates(minimal(9, 1, rng=random.Random(2)), (3, 3))
     ctx_a = _ctx(genome)
@@ -156,13 +156,13 @@ def _restamped_ctx(genome: Genome) -> MutationContext:
 
 
 def test_census_flags_tied_motifs() -> None:
-    from ardevo.motifs import TIED_EDGE, diversity_class, module_motif_graph
+    from versal.motifs import TIED_EDGE, diversity_class, module_motif_graph
 
     genome = _tied_pair_genome()
     labels, edges = module_motif_graph(genome_to_dict(genome))
     assert edges[(0, 3)] & TIED_EDGE and edges[(1, 3)] & TIED_EDGE
     assert not edges[(3, 4)] & TIED_EDGE
-    from ardevo.motifs import canonical_form
+    from versal.motifs import canonical_form
 
     graph = canonical_form([labels[0], labels[3]], [(0, 1, edges[(0, 3)])])
     assert "tied" in diversity_class(graph)

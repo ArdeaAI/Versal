@@ -7,12 +7,12 @@ from pathlib import Path
 
 import torch
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.genome import InnovationTracker, NodeKind, genome_to_dict, topological_order
-from ardevo.evolution.init import factored, minimal, sparse
-from ardevo.evolution.mutation import MutationContext, prune_and_regrow
-from ardevo.substrate import decode
 from tests.test_orchestrator import _fake_run_task, _orchestrator, _patch_run_task
+from versal.dataset.icarus import Task
+from versal.evolution.genome import InnovationTracker, NodeKind, genome_to_dict, topological_order
+from versal.evolution.init import factored, minimal, sparse
+from versal.evolution.mutation import MutationContext, prune_and_regrow
+from versal.substrate import decode
 
 
 def _ctx(*genomes) -> MutationContext:
@@ -122,7 +122,7 @@ def test_prune_and_regrow_passes_cyclic_genomes_through() -> None:
     # tolerate one. The 2026-07-12 overnight run died here: topological_order raised mid-pipeline.
     from dataclasses import replace
 
-    from ardevo.evolution.genome import ConnectionGene
+    from versal.evolution.genome import ConnectionGene
 
     genome = sparse(20, 4, rng=random.Random(0), density=0.1, threshold=64)
     hidden_a, hidden_b = genome.max_node_id() + 1, genome.max_node_id() + 2
@@ -137,7 +137,7 @@ def test_prune_and_regrow_passes_cyclic_genomes_through() -> None:
 def test_prune_and_regrow_never_targets_macro_stubs() -> None:
     from dataclasses import replace
 
-    from ardevo.evolution.genome import MacroGene
+    from versal.evolution.genome import MacroGene
 
     genome = sparse(50, 5, rng=random.Random(0), density=0.05, threshold=64)
     stub_id = genome.max_node_id() + 1
@@ -151,8 +151,8 @@ def test_prune_and_regrow_never_targets_macro_stubs() -> None:
 
 
 def test_direct_strategy_declines_wide_outputs(decomposable_task: Task) -> None:
-    from ardevo.strategy import EVOLVE_STRATEGY
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.strategy import EVOLVE_STRATEGY
 
     config = _loop_config()
     config["orchestrator"] = {"direct": {"max_flat_outputs": 1}}
@@ -164,8 +164,8 @@ def test_direct_strategy_declines_wide_outputs(decomposable_task: Task) -> None:
 
 
 def test_direct_strategy_guard_defaults_off(decomposable_task: Task) -> None:
-    from ardevo.strategy import EVOLVE_STRATEGY
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.strategy import EVOLVE_STRATEGY
 
     config = _loop_config()
     config["orchestrator"] = {"direct": {}}
@@ -178,9 +178,9 @@ def test_direct_strategy_declines_oversize_init_genes(decomposable_task: Task) -
     # The 2026-07-06 recon wedge: a 409,600 x 8 task built a 3.3M-gene population whose init plus
     # first generation ran for hours BEFORE any deadline check exists. The guard must refuse the
     # attempt from the dense-init arithmetic alone, before the adapter or population is built.
-    from ardevo.dataset.icarus import support_loader
-    from ardevo.strategy import EVOLVE_STRATEGY
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.dataset.icarus import support_loader
+    from versal.strategy import EVOLVE_STRATEGY
 
     support_input, support_output = support_loader(decomposable_task)
     flat_in = 1
@@ -229,7 +229,7 @@ def test_decompose_first_failure_falls_through_to_the_ladder_once(tmp_path: Path
 def test_decompose_first_off_registers_nothing(tmp_path: Path, decomposable_task: Task) -> None:
     orchestrator = _orchestrator(tmp_path)
     assert "decompose_first" not in orchestrator.counters
-    from ardevo.orchestrator import comp_task_spec
+    from versal.orchestrator import comp_task_spec
 
     assert orchestrator._wants_decompose_first(decomposable_task, comp_task_spec(decomposable_task)) is False
 
@@ -240,7 +240,7 @@ def test_adaptive_decompose_first_uses_hardware_envelope(tmp_path: Path, decompo
         table={"decompose_first_above": "adaptive"},
         config_extra={"resources": {"mode": "adaptive", "host_reserve_gb": 1_000_000, "device_reserve_gb": 1_000_000}},
     )
-    from ardevo.orchestrator import comp_task_spec
+    from versal.orchestrator import comp_task_spec
 
     assert orchestrator._wants_decompose_first(decomposable_task, comp_task_spec(decomposable_task)) is True
     assert "resource_declines" in orchestrator.counters

@@ -9,13 +9,13 @@ import random
 
 import torch
 
-from ardevo.evolution.crossover import neat
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind
-from ardevo.evolution.mutation import MUTATION, AdaptiveMutationPipeline, MutationContext, remove_connection, remove_hidden_node
-from ardevo.evolution.registry import build_evolver
-from ardevo.substrate import decode, decode_recurrent
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_recurrence import _running_parity_genome
+from versal.evolution.crossover import neat
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind
+from versal.evolution.mutation import MUTATION, AdaptiveMutationPipeline, MutationContext, remove_connection, remove_hidden_node
+from versal.evolution.registry import build_evolver
+from versal.substrate import decode, decode_recurrent
 
 
 def _ctx() -> MutationContext:
@@ -126,7 +126,7 @@ def test_self_adaptive_pipeline_carries_prune_rates(solving_genome: Genome) -> N
 def test_operators_absent_from_config_are_never_constructed() -> None:
     from functools import partial
 
-    from ardevo.evolution.mutation import MutationPipeline
+    from versal.evolution.mutation import MutationPipeline
 
     evolver = build_evolver(_loop_config())
     assert isinstance(evolver.mutation, MutationPipeline)

@@ -1,8 +1,8 @@
 import hashlib
 import json
 
-from ardevo.tools.runtime_inventory import DEFAULT_MANIFEST, RUN_PATHS, build_inventory, check_manifest
-from ardevo.utils.config import Config
+from versal.tools.runtime_inventory import DEFAULT_MANIFEST, RUN_PATHS, build_inventory, check_manifest
+from versal.utils.config import Config
 
 TOP_LEVEL_CONFIGS = {
     "configs/brute.toml",
@@ -101,6 +101,6 @@ def test_runtime_inventory_covers_live_surfaces() -> None:
     assert {"config_path", "config_sha256", "orchestrator"} <= set(inventory["runtime_config_keys"])
     assert "gradient_scheduled" in inventory["registries"]["train"]
     assert "untie_motif_weights" in inventory["registries"]["mutation"]
-    assert inventory["console_scripts"]["app"] == "ardevo.main:main"
-    assert inventory["console_scripts"]["runtime_inventory"] == "ardevo.tools.runtime_inventory:main"
+    assert inventory["console_scripts"]["app"] == "versal.main:main"
+    assert inventory["console_scripts"]["runtime_inventory"] == "versal.tools.runtime_inventory:main"
     assert {row["path"] for row in inventory["run_paths"]} == {row["path"] for row in RUN_PATHS}

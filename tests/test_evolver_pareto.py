@@ -7,10 +7,10 @@ gated behavior when it is present (NoSpeciation = one global species, so ranks a
 import random
 from typing import Any
 
-from ardevo.evolution.evolver import Evolver, TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome
-from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.selection import pareto_ranks_and_crowding
+from versal.evolution.evolver import Evolver, TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome
+from versal.evolution.registry import build_evolver
+from versal.evolution.selection import pareto_ranks_and_crowding
 
 
 def _config(objectives: bool) -> dict[str, Any]:

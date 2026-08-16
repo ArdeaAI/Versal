@@ -2,8 +2,8 @@ import random
 
 import pytest
 
-from ardevo.evolution.init import INIT, estimate_initialization
-from ardevo.substrate import decode
+from versal.evolution.init import INIT, estimate_initialization
+from versal.substrate import decode
 
 
 @pytest.mark.parametrize(

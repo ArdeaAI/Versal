@@ -2,12 +2,12 @@
 
 import random
 
-from ardevo.evaluation import support_loss
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import Genome
-from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.train import gradient, gradient_batched, gradient_scheduled, gradient_scheduled_population, last_batch_stats
 from tests.test_substrate_batched import _mixed_activation_genome
+from versal.evaluation import support_loss
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import Genome
+from versal.evolution.registry import build_evolver
+from versal.evolution.train import gradient, gradient_batched, gradient_scheduled, gradient_scheduled_population, last_batch_stats
 
 
 def _clones(adapter: TaskAdapter, genomes: list[Genome]) -> tuple[list[Genome], list]:
@@ -66,7 +66,7 @@ def test_scheduled_microbatches_match_sequential_schedule(xor_adapter: TaskAdapt
 
 
 def test_adaptive_microbatch_halves_after_oom(monkeypatch, xor_adapter: TaskAdapter, linear_genome: Genome, solving_genome: Genome) -> None:
-    from ardevo import substrate_batched
+    from versal import substrate_batched
 
     genomes = [linear_genome, solving_genome, _mixed_activation_genome()]
     original_init = substrate_batched.BatchedGraphNet.__init__

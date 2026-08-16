@@ -10,9 +10,9 @@ import math
 import random
 import time
 
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, coordinate_distance, genome_to_dict, would_create_cycle
-from ardevo.evolution.init import minimal, stamp_input_coordinates
-from ardevo.evolution.mutation import (
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, coordinate_distance, genome_to_dict, would_create_cycle
+from versal.evolution.init import minimal, stamp_input_coordinates
+from versal.evolution.mutation import (
     MutationContext,
     _weighted_choice,
     add_connection,
@@ -178,7 +178,7 @@ def _reference_make_acyclic(genome: Genome) -> Genome:
 
 
 def test_make_acyclic_matches_reference_on_cyclic_and_acyclic_genomes() -> None:
-    from ardevo.evolution.genome import make_acyclic
+    from versal.evolution.genome import make_acyclic
 
     for genome in _cases():
         acyclic = make_acyclic(genome)
@@ -199,7 +199,7 @@ def test_make_acyclic_fast_path_speed_guard() -> None:
     (2026-07-05) was per-edge adjacency rebuilds here. Acyclic genomes must repair in O(V+E)."""
     import time
 
-    from ardevo.evolution.genome import make_acyclic
+    from versal.evolution.genome import make_acyclic
 
     genome = _grid_genome(16, seed=11, rounds=6)  # a few hundred genes
     start = time.perf_counter()

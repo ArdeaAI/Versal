@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from ardevo.evolution.registry import build_evolver
+from versal.evolution.registry import build_evolver
 
 _CONFIG: dict[str, Any] = {
     "seed": 0,

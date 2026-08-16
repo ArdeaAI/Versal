@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from ardevo.tools import ablation_suite
-from ardevo.tools.ablation_suite import (
+from versal.tools import ablation_suite
+from versal.tools.ablation_suite import (
     ArmSpec,
     RunSpec,
     SuiteManifest,
@@ -23,7 +23,7 @@ from ardevo.tools.ablation_suite import (
     select_runs,
     state_path,
 )
-from ardevo.utils.config import Config
+from versal.utils.config import Config
 
 
 def test_checked_in_manifest_expands_p0_and_p1_seed_protocols() -> None:

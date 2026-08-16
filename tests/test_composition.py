@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from ardevo.evaluation import support_loss
-from ardevo.evolution.composition import (
+from versal.evaluation import support_loss
+from versal.evolution.composition import (
     AssemblyContext,
     CompEdgeGene,
     CompMutationContext,
@@ -32,10 +32,10 @@ from ardevo.evolution.composition import (
     toggle_comp_edge,
     writeback_composition,
 )
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
-from ardevo.evolution.train import gradient
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
-from ardevo.substrate import decode
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
+from versal.evolution.train import gradient
+from versal.library import COMPOSITION, MODULE, ModuleLibrary
+from versal.substrate import decode
 
 _BANK = "BINARY|K"
 _IO = {"inputs": [{"signature": _BANK, "width": 2}], "output": {"signature": _BANK, "width": 1}}
@@ -285,7 +285,7 @@ def test_factored_glue_matches_dense_equivalent() -> None:
 
 
 def test_factored_glue_writeback_round_trip() -> None:
-    from ardevo.evolution.composition import _glue_for
+    from versal.evolution.composition import _glue_for
 
     rng = random.Random(0)
     glue, rank = _glue_for(6, 5, rng, glue_rank=2, glue_rank_threshold=10)
@@ -307,7 +307,7 @@ def test_factored_glue_writeback_round_trip() -> None:
 
 
 def test_glue_for_auto_select_threshold() -> None:
-    from ardevo.evolution.composition import _glue_for
+    from versal.evolution.composition import _glue_for
 
     rng = random.Random(0)
     _glue, rank = _glue_for(3, 2, rng, glue_rank=2, glue_rank_threshold=10)
@@ -337,7 +337,7 @@ def test_comp_neat_never_mixes_glue_ranks() -> None:
     parent_b = parent_a.clone()
     from dataclasses import replace as gene_replace
 
-    from ardevo.evolution.composition import _glue_init
+    from versal.evolution.composition import _glue_init
 
     parent_b.edges = [gene_replace(edge, glue=_glue_init(8, 8, rng), glue_rank=0) if edge.glue_rank else edge for edge in parent_b.edges]
     child = comp_neat(parent_a, parent_b, rng=random.Random(1))

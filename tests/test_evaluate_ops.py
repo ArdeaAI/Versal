@@ -1,10 +1,10 @@
 """Evaluate-stage operators: standard delegation, weight sampling, hybrid merge, registry wiring."""
 
-from ardevo.evolution.evaluate import DEFAULT_WEIGHT_SAMPLES, hybrid, standard, weight_samples
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.fitness import FITNESS
-from ardevo.evolution.genome import Genome
-from ardevo.evolution.registry import build_evolver
+from versal.evolution.evaluate import DEFAULT_WEIGHT_SAMPLES, hybrid, standard, weight_samples
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.fitness import FITNESS
+from versal.evolution.genome import Genome
+from versal.evolution.registry import build_evolver
 
 _ROBUSTNESS_KEYS = {
     "mean_sample_accuracy",
@@ -62,7 +62,7 @@ def test_batched_samples_parity_with_serial(xor_adapter: TaskAdapter, solving_ge
 
 def test_batched_samples_auto_gates_on_node_count(xor_adapter: TaskAdapter, solving_genome: Genome, monkeypatch) -> None:
     """`"auto"` uses the stacked path only at the measured break-even node count and above."""
-    from ardevo.evolution import evaluate as evaluate_module
+    from versal.evolution import evaluate as evaluate_module
 
     stacked_calls: list[int] = []
     original = evaluate_module._stacked_sample_metrics
@@ -92,10 +92,10 @@ def test_batched_samples_head_columns_path(xor_adapter: TaskAdapter, solving_gen
 
     import torch
 
-    from ardevo.dataset.icarus import EncodedTask, Level0Encoder
-    from ardevo.evaluation import evaluate
-    from ardevo.evolution.genome import ConnectionGene, NodeGene, NodeKind
-    from ardevo.substrate import GraphNet, SubstrateModule, decode
+    from versal.dataset.icarus import EncodedTask, Level0Encoder
+    from versal.evaluation import evaluate
+    from versal.evolution.genome import ConnectionGene, NodeGene, NodeKind
+    from versal.substrate import GraphNet, SubstrateModule, decode
 
     class _ColumnSlicedNet(SubstrateModule):
         """Minimal head wrapper: the inner net is a normal trainable submodule, this only selects
@@ -153,9 +153,9 @@ def test_non_batchable_modules_fall_back_to_serial(xor_adapter: TaskAdapter) -> 
 
 def test_frozen_parameters_are_never_filled_during_sampling(tmp_path, xor_adapter: TaskAdapter, solving_genome: Genome) -> None:
     """Robustness measures what evolution/training CONTROLS: frozen library inners stay intact."""
-    from ardevo.evolution.composition import AssemblyContext, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, assemble
-    from ardevo.evolution.genome import genome_to_dict
-    from ardevo.library import MODULE, ModuleLibrary
+    from versal.evolution.composition import AssemblyContext, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, assemble
+    from versal.evolution.genome import genome_to_dict
+    from versal.library import MODULE, ModuleLibrary
 
     library = ModuleLibrary(tmp_path / "lib")
     io = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
@@ -222,8 +222,8 @@ def test_hybrid_stamps_weight_robustness_through_temporal_adapter(temporal_task)
     which is why the retire guard demands a strict margin instead of weak dominance."""
     import math
 
-    from ardevo.temporal import temporal_adapter
     from tests.test_recurrence import _running_parity_genome
+    from versal.temporal import temporal_adapter
 
     adapter = temporal_adapter(temporal_task)
     genome = _running_parity_genome()

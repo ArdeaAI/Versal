@@ -2,8 +2,8 @@
 
 import random
 
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, coordinate_distance
-from ardevo.evolution.mutation import MutationContext, add_local_connection, add_local_node, add_shared_motif
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, coordinate_distance
+from versal.evolution.mutation import MutationContext, add_local_connection, add_local_node, add_shared_motif
 
 
 def _line_genome() -> Genome:

@@ -12,8 +12,8 @@ import pytest
 import torch
 from datasets import Dataset
 
-from ardevo.dataset.icarus import ICARUS_FEATURES, Axis, Field, Task, TaskKind, TaskMeta, ValueType, serialize_task
-from ardevo.dataset.icarus_streaming import SELECTION_ALGORITHM, DatasetSelectionCancelled, IcarusStreamingSource, OneTaskMaterializer, StreamingTaskRef
+from versal.dataset.icarus import ICARUS_FEATURES, Axis, Field, Task, TaskKind, TaskMeta, ValueType, serialize_task
+from versal.dataset.icarus_streaming import SELECTION_ALGORITHM, DatasetSelectionCancelled, IcarusStreamingSource, OneTaskMaterializer, StreamingTaskRef
 
 
 def _field(values: list[float]) -> Field:
@@ -66,7 +66,7 @@ def test_selection_cancellation_stops_before_opening_a_shard(tmp_path: Path, mon
     def forbidden(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202 - fail-fast test sentinel
         raise AssertionError("cancelled selection opened a shard")
 
-    monkeypatch.setattr("ardevo.dataset.icarus_streaming.load_dataset", forbidden)
+    monkeypatch.setattr("versal.dataset.icarus_streaming.load_dataset", forbidden)
     with pytest.raises(DatasetSelectionCancelled, match="graceful shutdown"):
         IcarusStreamingSource(str(tmp_path)).select(rungs=[4], n_tasks=1, shuffle=False, seed=0, cancelled=lambda: True)
 
@@ -120,7 +120,7 @@ def test_hub_materialization_pins_revision_and_reuses_downloader_cache_path(tmp_
 
     expected = {"repo_id": "example/icarus", "filename": f"rung_7/{fixture.name}", "repo_type": "dataset", "revision": "abc123"}
     assert calls == [expected, expected]
-    assert misses == 1  # the downloader owns the standard content-addressed cache; ArdEVO adds no second cache
+    assert misses == 1  # the downloader owns the standard content-addressed cache; Versal adds no second cache
     assert source.provenance.to_dict() == {"source": "example/icarus", "revision": "abc123", "selection_algorithm": SELECTION_ALGORITHM}
 
 
@@ -153,7 +153,7 @@ def test_manifest_pinned_source_resumes_without_hub_api_access(tmp_path: Path) -
 
 
 def test_one_task_materializer_reuses_immediate_repeat_and_releases_on_switch(tmp_path: Path, monkeypatch) -> None:
-    from ardevo.dataset import icarus_streaming as streaming_module
+    from versal.dataset import icarus_streaming as streaming_module
 
     _write_shard(tmp_path, 6, 0, [_task("first", rung=6), _task("second", rung=6)])
     source = IcarusStreamingSource(str(tmp_path))

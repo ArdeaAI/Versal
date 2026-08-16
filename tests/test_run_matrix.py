@@ -4,8 +4,8 @@ run_summary.json records (the tier ladder T0-T4 that operationalizes "meaningful
 import hashlib
 from pathlib import Path
 
-from ardevo.tools.run_matrix import build_scorecard, flatten_rows, parse_rungs, rung_tier
-from ardevo.utils.config import Config
+from versal.tools.run_matrix import build_scorecard, flatten_rows, parse_rungs, rung_tier
+from versal.utils.config import Config
 
 
 def _summary(tasks: list[dict], **overrides: object) -> dict:

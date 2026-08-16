@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from ardevo.evolution.genome import (
+from versal.evolution.genome import (
     ConnectionGene,
     Genome,
     InnovationTracker,
@@ -17,9 +17,9 @@ from ardevo.evolution.genome import (
     genome_to_dict,
     would_create_cycle,
 )
-from ardevo.evolution.mutation import MutationContext, add_macro_node
-from ardevo.library import MODULE, ModuleLibrary, graft, macro_resolver, module_level
-from ardevo.substrate import decode, decode_recurrent, set_macro_resolver
+from versal.evolution.mutation import MutationContext, add_macro_node
+from versal.library import MODULE, ModuleLibrary, graft, macro_resolver, module_level
+from versal.substrate import decode, decode_recurrent, set_macro_resolver
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
 
@@ -84,7 +84,7 @@ def test_nested_macros_resolve_recursively(tmp_path: Path, solving_genome: Genom
 
 
 def test_macro_inner_weights_are_frozen_through_training(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
-    from ardevo.evolution.train import gradient
+    from versal.evolution.train import gradient
 
     library, key = _library_with_xor(tmp_path, solving_genome)
     genome = _macro_host(key, readout_weight=0.5)
@@ -99,7 +99,7 @@ def test_macro_inner_weights_are_frozen_through_training(tmp_path: Path, solving
 
 
 def test_weight_samples_never_fill_macro_inners(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
-    from ardevo.evolution.evaluate import weight_samples
+    from versal.evolution.evaluate import weight_samples
 
     library, key = _library_with_xor(tmp_path, solving_genome)
     genome = _macro_host(key)
@@ -212,7 +212,7 @@ def test_add_macro_node_uses_genome_node_count_not_io_width(tmp_path: Path) -> N
 
 
 def test_mutators_never_target_macro_stubs(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
-    from ardevo.evolution.mutation import add_connection, add_deep_node, add_recurrent_connection, mutate_activation, mutate_aggregation
+    from versal.evolution.mutation import add_connection, add_deep_node, add_recurrent_connection, mutate_activation, mutate_aggregation
 
     library, key = _library_with_xor(tmp_path, solving_genome)
     ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh", "relu"], default_activation="tanh", library=library)
@@ -228,7 +228,7 @@ def test_mutators_never_target_macro_stubs(tmp_path: Path, solving_genome: Genom
 
 
 def test_crossover_inherits_macros_as_units(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
-    from ardevo.evolution.crossover import neat
+    from versal.evolution.crossover import neat
 
     library, _key = _library_with_xor(tmp_path, solving_genome)
     ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh"], default_activation="tanh", library=library)
@@ -240,7 +240,7 @@ def test_crossover_inherits_macros_as_units(tmp_path: Path, solving_genome: Geno
 
 
 def test_speciation_sees_macro_markers(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
-    from ardevo.evolution.speciation import compatibility_distance
+    from versal.evolution.speciation import compatibility_distance
 
     library, _key = _library_with_xor(tmp_path, solving_genome)
     ctx = MutationContext(innovations=InnovationTracker.from_genomes([linear_genome]), activations=["tanh"], default_activation="tanh", library=library)
@@ -302,9 +302,9 @@ def test_configurable_macro_depth_counts_reference_boundaries_from_a_free_root(t
 def test_adapter_carries_depth_limit_through_main_and_worker_decode(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
     from dataclasses import replace
 
-    from ardevo.evolution.evolver import _FLOOR_FITNESS, _assess_in_worker
-    from ardevo.evolution.registry import build_evolver
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.evolution.evolver import _FLOOR_FITNESS, _assess_in_worker
+    from versal.evolution.registry import build_evolver
 
     library = ModuleLibrary(tmp_path / "lib")
     keys = _macro_chain(library, solving_genome, links=5)
@@ -381,9 +381,9 @@ def test_add_macro_node_uses_configured_depth_limit(monkeypatch, tmp_path: Path,
 def test_undecodable_genome_floors_instead_of_killing_the_run(tmp_path: Path, solving_genome: Genome, xor_adapter) -> None:
     """A corpse in the population is buried by assessment, never fatal: serial, pooled-worker, and
     champion-verification paths all floor (the two_spirals pool.map crash regression test)."""
-    from ardevo.evolution.evolver import _FLOOR_FITNESS, EvolverState, _assess_in_worker
-    from ardevo.evolution.registry import build_evolver
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.evolution.evolver import _FLOOR_FITNESS, EvolverState, _assess_in_worker
+    from versal.evolution.registry import build_evolver
 
     dead = solving_genome.clone()
     dead.macros.append(MacroGene(ref="library:m1_gone", input_node_ids=(0,), output_node_ids=(3,), innovation=99, trainable=False))

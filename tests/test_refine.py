@@ -6,11 +6,11 @@ import random
 
 import torch
 
-from ardevo.evaluation import support_loss, support_loss_deep
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
-from ardevo.evolution.mutation import MutationContext, tweak_refine_steps
-from ardevo.evolution.train import gradient_refine
-from ardevo.substrate import GraphNet, RefineGraphNet, decode, decode_refine
+from versal.evaluation import support_loss, support_loss_deep
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_from_dict, genome_to_dict
+from versal.evolution.mutation import MutationContext, tweak_refine_steps
+from versal.evolution.train import gradient_refine
+from versal.substrate import GraphNet, RefineGraphNet, decode, decode_refine
 
 
 def _accumulator() -> Genome:

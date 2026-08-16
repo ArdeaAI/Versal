@@ -3,12 +3,12 @@
 import random
 from pathlib import Path
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
-from ardevo.evolution.init import minimal
-from ardevo.evolution.mutation import MutationContext, add_rich_node
-from ardevo.library import LIBRARY_ADMISSION, MODULE, ModuleLibrary
 from tests.test_orchestrator import _orchestrator
+from versal.dataset.icarus import Task
+from versal.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from versal.evolution.init import minimal
+from versal.evolution.mutation import MutationContext, add_rich_node
+from versal.library import LIBRARY_ADMISSION, MODULE, ModuleLibrary
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
 

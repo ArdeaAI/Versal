@@ -119,9 +119,9 @@ def source_for_edition(edition: str) -> str:
 
 def tex_path_for(edition: str, mode: str) -> Path:
     if edition == "technical-report":
-        return OUTPUT_DIR / "ardevo-technical-report.tex"
+        return OUTPUT_DIR / "versal-technical-report.tex"
     if edition == "conference":
-        return OUTPUT_DIR / f"ardevo-{mode}.tex"
+        return OUTPUT_DIR / f"versal-{mode}.tex"
     raise BuildError(f"unknown paper edition: {edition}")
 
 
@@ -184,7 +184,7 @@ def _render_tex(manuscript: Manuscript, mode: str, destination: Path) -> bool:
         "abstract": manuscript.abstract,
     }
 
-    with tempfile.TemporaryDirectory(prefix="ardevo-paper-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="versal-paper-") as temporary_directory:
         temporary = Path(temporary_directory)
         metadata_path = temporary / "metadata.json"
         rendered_path = temporary / destination.name

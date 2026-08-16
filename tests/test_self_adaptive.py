@@ -8,9 +8,9 @@ byte-identical, empty rates never serialized.
 
 import random
 
-from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
-from ardevo.evolution.mutation import AdaptiveMutationPipeline, MutationContext
-from ardevo.evolution.registry import build_evolver
+from versal.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
+from versal.evolution.mutation import AdaptiveMutationPipeline, MutationContext
+from versal.evolution.registry import build_evolver
 
 
 def _ctx() -> MutationContext:
@@ -18,7 +18,7 @@ def _ctx() -> MutationContext:
 
 
 def _pipeline(**kwargs) -> AdaptiveMutationPipeline:
-    from ardevo.evolution.mutation import MUTATION
+    from versal.evolution.mutation import MUTATION
 
     specs = [
         ("add_connection", MUTATION.get("add_connection"), {"prob": 0.2}),
@@ -74,7 +74,7 @@ def test_operator_rates_round_trip_and_absent_when_empty(solving_genome) -> None
 
 
 def test_clone_and_crossover_carry_rates(solving_genome, linear_genome) -> None:
-    from ardevo.evolution.crossover import neat
+    from versal.evolution.crossover import neat
 
     adapted = _pipeline()(solving_genome, _ctx(), rng=random.Random(0))
     assert adapted.clone().operator_rates == adapted.operator_rates
@@ -97,7 +97,7 @@ def test_registry_builds_adaptive_pipeline_when_configured() -> None:
         },
         "fitness": {"components": ["support_accuracy"]},
     }
-    from ardevo.evolution.mutation import MutationPipeline
+    from versal.evolution.mutation import MutationPipeline
 
     assert isinstance(build_evolver(base).mutation, MutationPipeline)  # default stays the plain pipeline
 

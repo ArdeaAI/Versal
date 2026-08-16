@@ -7,8 +7,8 @@ import random
 from pathlib import Path
 from typing import Any
 
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
-from ardevo.motifs import (
+from versal.library import COMPOSITION, MODULE, ModuleLibrary
+from versal.motifs import (
     FORWARD_EDGE,
     MACRO_EDGE,
     RECURRENT_EDGE,
@@ -294,7 +294,7 @@ def test_reuse_census_handles_legacy_v1_index() -> None:
 
 
 def test_run_census_cli_core_writes_json(tmp_path: Path) -> None:
-    from ardevo.tools.motif_census import run_census
+    from versal.tools.motif_census import run_census
 
     library = ModuleLibrary(tmp_path / "lib")
     for index in range(2):
@@ -324,7 +324,7 @@ def test_run_census_cli_core_writes_json(tmp_path: Path) -> None:
 
 
 def test_render_motif_atlas_smoke(tmp_path: Path) -> None:
-    from ardevo.rendering import render_motif_atlas
+    from versal.rendering import render_motif_atlas
 
     graph = canonical_form(_GADGET_LABELS, _GADGET_EDGES)
     loop_graph = canonical_form([_HID_TANH], [(0, 0, RECURRENT_EDGE)])
@@ -341,7 +341,7 @@ def test_render_motif_atlas_smoke(tmp_path: Path) -> None:
 
 
 def test_render_motif_atlas_empty_note_smoke(tmp_path: Path) -> None:
-    from ardevo.rendering import render_motif_atlas
+    from versal.rendering import render_motif_atlas
 
     noted = render_motif_atlas(tmp_path / "empty_note.png", [], empty_note="1 module entries scanned; rerun with --min-support 1 for intra-entry structure.")
     assert noted.exists() and noted.stat().st_size > 0
@@ -353,7 +353,7 @@ def test_render_motif_atlas_empty_note_smoke(tmp_path: Path) -> None:
 def test_run_census_meta_pure_core_and_fingerprint(tmp_path: Path) -> None:
     from datetime import datetime
 
-    from ardevo.tools.motif_census import run_census
+    from versal.tools.motif_census import run_census
 
     library = ModuleLibrary(tmp_path / "lib")
     for index in range(2):

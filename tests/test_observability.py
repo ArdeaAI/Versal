@@ -8,12 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-from ardevo.dataset.icarus import Task
-from ardevo.dataset.icarus_streaming import StreamingTaskRef
-from ardevo.evolution.multitask import reference_entry, task_entry
-from ardevo.orchestrator import Attempt
-from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from tests.test_orchestrator import _orchestrator
+from versal.dataset.icarus import Task
+from versal.dataset.icarus_streaming import StreamingTaskRef
+from versal.evolution.multitask import reference_entry, task_entry
+from versal.orchestrator import Attempt
+from versal.trials.orchestrated_trial import OrchestratedTrial
 
 
 class _StubScheduler:
@@ -313,8 +313,8 @@ def test_task_pool_manifest_records_exact_resume_locators_atomically(tmp_path: P
 def test_pool_loading_failure_is_reported_after_loading_status_exists(tmp_path: Path, monkeypatch) -> None:
     import pytest
 
-    from ardevo.trials import orchestrated_trial
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.trials import orchestrated_trial
 
     config = _loop_config()
     config.update({"dataset": "offline", "n_samples": 4, "seed": 0, "live_status": False})
@@ -400,7 +400,7 @@ def test_load_prior_records_tolerates_missing_summary(tmp_path: Path) -> None:
 
 
 def test_fresh_per_task_freezes_the_starting_library_once(tmp_path: Path) -> None:
-    from ardevo.library import ModuleLibrary
+    from versal.library import ModuleLibrary
 
     trial = object.__new__(OrchestratedTrial)
     trial.fresh_per_task = True
@@ -443,9 +443,9 @@ def test_require_all_rungs_gates_deferred_pool_load(tmp_path: Path, xor_task: Ta
     """Construction is cheap; a missing rung gates the deferred pool load inside ``run``."""
     import pytest
 
-    from ardevo.evolution import multitask
-    from ardevo.trials import orchestrated_trial
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.evolution import multitask
+    from versal.trials import orchestrated_trial
 
     report = multitask.PoolReport(entries=[task_entry(xor_task)], skipped=[multitask.SkippedRung(rung=7, error_type="RuntimeError", message="synthetic load failure")])
     monkeypatch.setattr(orchestrated_trial, "build_pool_report", lambda **_kwargs: report)
@@ -473,9 +473,9 @@ def test_require_all_rungs_gates_deferred_pool_load(tmp_path: Path, xor_task: Ta
 def test_schedule_task_name_filters_are_deterministic(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
     from dataclasses import replace
 
-    from ardevo.evolution import multitask
-    from ardevo.trials import orchestrated_trial
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.evolution import multitask
+    from versal.trials import orchestrated_trial
 
     train = replace(xor_task, meta=replace(xor_task.meta, name="arc.train.one"))
     evaluation = replace(xor_task, meta=replace(xor_task.meta, name="arc.eval.one"))
@@ -494,10 +494,10 @@ def test_schedule_task_name_filters_are_deterministic(tmp_path: Path, xor_task: 
 
 
 def test_library_gc_cli_dry_run_and_checkpoint_protection(tmp_path: Path, monkeypatch) -> None:
-    from ardevo.evolution.genome import genome_to_dict
-    from ardevo.library import MODULE, ModuleLibrary
-    from ardevo.tools.library_gc import checkpoint_macro_refs, run_gc
     from tests.test_recurrence import _running_parity_genome
+    from versal.evolution.genome import genome_to_dict
+    from versal.library import MODULE, ModuleLibrary
+    from versal.tools.library_gc import checkpoint_macro_refs, run_gc
 
     genome = _running_parity_genome()
     library = ModuleLibrary(tmp_path / "lib")

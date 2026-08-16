@@ -11,13 +11,13 @@ import random
 import pytest
 import torch
 
-from ardevo.cppn import CPPN_INPUTS, CppnPhenotypeNet, CppnTaskAdapter, cppn_output_count, fourier_cppn_genome, synthetic_two_spirals_task
-from ardevo.dataset.icarus import Level0Encoder
-from ardevo.evaluation import encode, support_loss
-from ardevo.evolution.evaluate import weight_samples
-from ardevo.evolution.registry import build_evolver
-from ardevo.evolution.train import gradient
-from ardevo.substrate import decode as decode_graphnet
+from versal.cppn import CPPN_INPUTS, CppnPhenotypeNet, CppnTaskAdapter, cppn_output_count, fourier_cppn_genome, synthetic_two_spirals_task
+from versal.dataset.icarus import Level0Encoder
+from versal.evaluation import encode, support_loss
+from versal.evolution.evaluate import weight_samples
+from versal.evolution.registry import build_evolver
+from versal.evolution.train import gradient
+from versal.substrate import decode as decode_graphnet
 
 # The pinned existence fixture (established best-of-8 in the Phase-0 harness; see the plan).
 _FIXTURE = {"m": 3, "seed": 6}

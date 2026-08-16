@@ -4,7 +4,7 @@
 
 Human intelligence is not a single faculty, and intelligence itself is neither uniquely human nor
 confined to one substrate. Trying to specify every useful mechanism by hand tends to produce narrow
-or jagged systems. ArdEVO starts from a different premise: search for structure, preserve what works,
+or jagged systems. Versal starts from a different premise: search for structure, preserve what works,
 and let later searches build on the accumulated result.
 
 The long-term aim is a system that is not taught a vocabulary of solutions, but can develop the
@@ -14,12 +14,12 @@ for testing whether one evolutionary process can cross task modalities while ret
 its discoveries.
 
 The broader research program ultimately asks whether this road can support genuine agency,
-objectness, selfhood, and conscious experience. ArdEVO currently supplies no operational measure of
+objectness, selfhood, and conscious experience. Versal currently supplies no operational measure of
 those properties; benchmark capability and subjective experience are separate claims.
 
-## What ArdEVO is today
+## What Versal is today
 
-ArdEVO is a Python 3.12 evolutionary neural architecture search system. Evolution owns network and
+Versal is a Python 3.12 evolutionary neural architecture search system. Evolution owns network and
 composition structure; gradient descent trains candidate weights. Every accepted result can enter a
 persistent library, where it becomes a frozen module available to later tasks.
 
@@ -98,11 +98,11 @@ The library and results are durable, gitignored experiment state. Use an explici
 experiment must not share prior discoveries:
 
 ```bash
-uv run app --config configs/canary.toml --library-dir /tmp/ardevo-cold-library
+uv run app --config configs/canary.toml --library-dir /tmp/versal-cold-library
 uv run app --resume results/<timestamp>_orchestrated
 ```
 
-During an interactive run, press **Escape** to request a cooperative stop. ArdEVO finishes the
+During an interactive run, press **Escape** to request a cooperative stop. Versal finishes the
 current optimizer or generation boundary, restores the terminal, writes the resumable checkpoint,
 refreshes reports, and marks the run `stopped`. Ctrl-C remains an immediate interruption path.
 
@@ -193,23 +193,23 @@ listable, verifiable, and restorable.
 ## ClearML
 
 Set `[run] clearml = true` to record telemetry and artifacts; offline runs remain fully functional.
-By default, ArdEVO sends Python logging records but leaves stdout/stderr uncaptured so Rich's
+By default, Versal sends Python logging records but leaves stdout/stderr uncaptured so Rich's
 transient progress redraws stay local instead of flooding the ClearML console. Set
 `[run] clearml_capture_streams = true` only when a non-interactive run needs complete raw stream
 capture.
-ArdEVO deliberately disables ClearML’s automatic PyTorch model attachment. Router shards loaded by
+Versal deliberately disables ClearML’s automatic PyTorch model attachment. Router shards loaded by
 `torch.load` are internal evolving state, not alternative input models; automatic attachment made
-many identically named shard loads look like ambiguous model inputs. ArdEVO uploads deliberate
+many identically named shard loads look like ambiguous model inputs. Versal uploads deliberate
 artifacts explicitly instead.
 
 ## Project map
 
 ```text
-ardevo/evolution/             genomes, operators, populations, and compositions
-ardevo/dataset/               the vendored Icarus runtime
-ardevo/trials/                the supported orchestrated run
-ardevo/tools/                 reports, diagnostics, campaigns, migration, and maintenance
-ardevo/utils/                 config, display, shutdown, ClearML, devices, and resources
+versal/evolution/             genomes, operators, populations, and compositions
+versal/dataset/               the vendored Icarus runtime
+versal/trials/                the supported orchestrated run
+versal/tools/                 reports, diagnostics, campaigns, migration, and maintenance
+versal/utils/                 config, display, shutdown, ClearML, devices, and resources
 configs/                      the complete method and scale/hardware overlays
 tests/                        offline regression and integration coverage
 library/                      persistent learned state (gitignored)
@@ -219,7 +219,7 @@ ai/walkthrough.md             current-code execution guide
 runtime_inventory.json        generated registry/config/path contract
 ```
 
-Do not edit `ardevo/dataset/icarus.py` directly; it is vendored/generated. New evolutionary
+Do not edit `versal/dataset/icarus.py` directly; it is vendored/generated. New evolutionary
 behavior should be registered and selected through configuration rather than hard-coded into the
 loop.
 

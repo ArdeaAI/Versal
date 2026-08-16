@@ -11,12 +11,12 @@ import random
 import pytest
 import torch
 
-from ardevo.evaluation import support_loss
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
-from ardevo.evolution.mutation import MutationContext, mutate_activation
-from ardevo.evolution.train import gradient
-from ardevo.substrate import _ACTIVATIONS, activation_names
-from ardevo.utils.config import Config
+from versal.evaluation import support_loss
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
+from versal.evolution.mutation import MutationContext, mutate_activation
+from versal.evolution.train import gradient
+from versal.substrate import _ACTIVATIONS, activation_names
+from versal.utils.config import Config
 
 _NEW_NAMES = {"sin", "gaussian"}
 

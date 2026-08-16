@@ -8,8 +8,8 @@ init: the search proceeds on ordinary explicit genomes.
 
 import random
 
-from ardevo.evolution.init import cppn_seed, minimal
-from ardevo.evolution.registry import build_evolver
+from versal.evolution.init import cppn_seed, minimal
+from versal.evolution.registry import build_evolver
 
 
 def _init(n_inputs: int = 2, n_outputs: int = 1, seed: int = 0, **params):

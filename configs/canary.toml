@@ -2,7 +2,7 @@
 # decomposition mechanism enabled. Intended for an M4 Max and roughly a 1-2 hour run.
 
 [run]
-project = "ardevo"
+project = "versal"
 experiment = "orchestrated_overmind_canary"
 clearml = true
 # Keep Rich's transient progress footer local. Python logs, metrics, and artifacts still report.
@@ -11,7 +11,7 @@ machine = "MonadMetal"
 seed = 0
 log_level = "INFO"
 output_uri = false
-repo = "https://github.com/ArdeaAI/ardevo.git"
+repo = "https://github.com/ArdeaAI/versal.git"
 render_async = true
 tf32 = false
 live_status = true
@@ -50,7 +50,7 @@ quick_eval_top_k = 5
 library_dir = "library"
 # Oversized dense initializations decompose before trying a flat network.
 decompose_first_above = 2000000
-evolve = ["routed", "grammar", "field", "direct", "composition"]
+evolve = ["routed", "grammar", "direct", "composition"] ## "field"
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 output_slices_max_output_features = 1024

@@ -5,8 +5,8 @@ import random
 import pytest
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.decompose import Subtask, build_decomposers, input_subsets, output_slices, spatial_patches, time_windows
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.decompose import Subtask, build_decomposers, input_subsets, output_slices, spatial_patches, time_windows
 
 
 def _stacked_outputs(pairs: list[tuple[Field, Field]]) -> torch.Tensor:

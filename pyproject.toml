@@ -1,5 +1,5 @@
 [project]
-name = "ardevo"
+name = "versal"
 version = "0.1.0"
 description = "Playground for evolution experimentation"
 authors = [{ name = "John Gardner (Sinjhin)", email = "john@ardea.io" }]
@@ -20,26 +20,26 @@ dependencies = [
 ]
 
 [project.scripts]
-app = "ardevo.main:main"
-run_report = "ardevo.tools.run_report:main"
-rung_doctor = "ardevo.tools.rung_doctor:main"
-render = "ardevo.tools.net_gallery:main"
-benchmark = "ardevo.tools.bench_throughput:main"
-library_gc = "ardevo.tools.library_gc:main"
-motif_census = "ardevo.tools.motif_census:main"
-cppn_spike = "ardevo.tools.cppn_spike:main"
-run_matrix = "ardevo.tools.run_matrix:main"
-ablation_suite = "ardevo.tools.ablation_suite:main"
-experiment_archive = "ardevo.tools.experiment_archive:main"
-router_migrate = "ardevo.tools.router_migrate:main"
-runtime_inventory = "ardevo.tools.runtime_inventory:main"
+app = "versal.main:main"
+run_report = "versal.tools.run_report:main"
+rung_doctor = "versal.tools.rung_doctor:main"
+render = "versal.tools.net_gallery:main"
+benchmark = "versal.tools.bench_throughput:main"
+library_gc = "versal.tools.library_gc:main"
+motif_census = "versal.tools.motif_census:main"
+cppn_spike = "versal.tools.cppn_spike:main"
+run_matrix = "versal.tools.run_matrix:main"
+ablation_suite = "versal.tools.ablation_suite:main"
+experiment_archive = "versal.tools.experiment_archive:main"
+router_migrate = "versal.tools.router_migrate:main"
+runtime_inventory = "versal.tools.runtime_inventory:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ardevo"]
+packages = ["versal"]
 
 [dependency-groups]
 dev = [
@@ -52,7 +52,7 @@ dev = [
 line-length = 180
 target-version = "py312"
 # Vendored, generated single-file runtime; edit upstream in the Icarus-Dataset repo, not here.
-extend-exclude = ["ardevo/dataset/icarus.py"]
+extend-exclude = ["versal/dataset/icarus.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

@@ -4,9 +4,9 @@ trial's observe hook) and the Phase-4 contractivity penalty on the refine traine
 import random
 from typing import cast
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.multitask import TaskEntry
-from ardevo.evolution.schedule import RegretSchedule, build_schedule
+from versal.dataset.icarus import Task
+from versal.evolution.multitask import TaskEntry
+from versal.evolution.schedule import RegretSchedule, build_schedule
 
 
 def _pool() -> list[TaskEntry]:
@@ -80,11 +80,11 @@ def test_within_rung_tasks_advance_by_cursor() -> None:
 def test_contractivity_penalty_shrinks_recurrent_norm(xor_adapter) -> None:
     import torch
 
-    from ardevo.evolution.train import gradient_refine
-    from ardevo.substrate import decode_refine
+    from versal.evolution.train import gradient_refine
+    from versal.substrate import decode_refine
 
     def refine_genome():
-        from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+        from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
 
         nodes = {
             0: NodeGene(0, NodeKind.INPUT, "identity"),

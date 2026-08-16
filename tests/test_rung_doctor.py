@@ -2,11 +2,11 @@
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.evolution.genome import genome_to_dict
-from ardevo.evolution.multitask import build_pool_report
-from ardevo.library import MODULE, ModuleLibrary, task_io
-from ardevo.tools.rung_doctor import parse_rungs, rung_report
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.evolution.genome import genome_to_dict
+from versal.evolution.multitask import build_pool_report
+from versal.library import MODULE, ModuleLibrary, task_io
+from versal.tools.rung_doctor import parse_rungs, rung_report
 
 
 def _binary_task(rung: int) -> Task:
@@ -63,7 +63,7 @@ def test_rung_report_rows(tmp_path) -> None:
 
 
 def _solving():
-    from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+    from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
 
     nodes = {
         0: NodeGene(0, NodeKind.INPUT, "identity"),

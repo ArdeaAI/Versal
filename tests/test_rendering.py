@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from ardevo.evolution.composition import minimal_composition
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, genome_to_dict
-from ardevo.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
-from ardevo.rendering import (
+from versal.evolution.composition import minimal_composition
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, MacroGene, NodeGene, NodeKind, genome_to_dict
+from versal.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
+from versal.rendering import (
     RENDER_MAX_DEPTH,
     THEME,
     build_entry_spec,
@@ -193,7 +193,7 @@ def test_depth_guard_stops_expansion() -> None:
 
 
 def test_overmind_card_root_does_not_consume_reference_depth() -> None:
-    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec
+    from versal.rendering import OvermindVertex, OvermindView, build_overmind_spec
 
     chain = _render_chain()
 
@@ -329,7 +329,7 @@ def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling() -> None:
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
 
-    from ardevo.rendering import _MAX_STRAIGHT_EDGES, RenderSpec, SpecEdge, draw_spec
+    from versal.rendering import _MAX_STRAIGHT_EDGES, RenderSpec, SpecEdge, draw_spec
 
     count = _MAX_STRAIGHT_EDGES + 10_000
     edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
@@ -345,7 +345,7 @@ def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling() -> None:
 def test_shared_datashader_edge_chunks_include_every_scene_edge(monkeypatch) -> None:
     import numpy as np
 
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     monkeypatch.setattr(rendering, "_DENSITY_EDGE_CHUNK", 2)
     spec = rendering.RenderSpec(
@@ -388,7 +388,7 @@ def test_render_composition_network_writes_png(tmp_path: Path) -> None:
 
 
 def test_render_entry_density_dispatch_threshold_and_compositions(monkeypatch, tmp_path: Path) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     density_calls: list[str] = []
     detail_calls: list[str] = []
@@ -419,7 +419,7 @@ def test_render_entry_density_dispatch_threshold_and_compositions(monkeypatch, t
 
 
 def test_density_renderer_is_not_used_by_task_gallery_nested_or_overmind_paths(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("individual-entry density renderer was invoked")
@@ -463,7 +463,7 @@ def test_density_renderer_is_not_used_by_task_gallery_nested_or_overmind_paths(m
     ],
 )
 def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels) -> None:
-    from ardevo.rendering import _density_layout
+    from versal.rendering import _density_layout
 
     entry = _spatial_entry("spatial", descriptors)
     first = _density_layout(entry)
@@ -486,7 +486,7 @@ def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels
     ],
 )
 def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coordinate, reason) -> None:
-    from ardevo.rendering import _density_layout
+    from versal.rendering import _density_layout
 
     entry = _spatial_entry("fallback", [("CONTINUOUS|C,H,W", (1, 2, 2))])
     entry.io["inputs"][0]["signature"] = signature
@@ -501,7 +501,7 @@ def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coord
 
 
 def test_density_duplicate_coordinates_use_packed_grid() -> None:
-    from ardevo.rendering import _density_layout
+    from versal.rendering import _density_layout
 
     entry = _spatial_entry("duplicate", [("CONTINUOUS|C,H,W", (1, 2, 2))])
     entry.payload["nodes"][1]["coordinate"] = entry.payload["nodes"][0]["coordinate"]
@@ -516,7 +516,7 @@ def test_density_rasterizes_every_edge_category_and_counts_all_enabled() -> None
     import numpy as np
     import pandas as pd
 
-    from ardevo.rendering import _density_layout, _macro_implied_payload_edges, _rasterized_edge_layers
+    from versal.rendering import _density_layout, _macro_implied_payload_edges, _rasterized_edge_layers
 
     entry = _spatial_entry("layers", [("CONTINUOUS|C,H,W", (1, 2, 2))])
     hidden_id = next(node["id"] for node in entry.payload["nodes"] if node["kind"] == "hidden")
@@ -543,7 +543,7 @@ def test_density_edge_chunk_boundary_includes_every_enabled_edge() -> None:
     import numpy as np
     import pandas as pd
 
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     positions = {0: (0.1, 0.1), 1: (0.9, 0.9)}
     connection = {"in": 0, "out": 1, "weight": 1.0, "enabled": True, "recurrent": False}
@@ -560,7 +560,7 @@ def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch,
     import numpy as np
     from matplotlib.axes import Axes
 
-    from ardevo.rendering import _render_large_module_density
+    from versal.rendering import _render_large_module_density
 
     entry = _spatial_entry("portrait", [("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))])
     labels: list[str] = []
@@ -590,7 +590,7 @@ def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch,
 
 
 def test_large_density_failure_atomically_replaces_with_opaque_summary(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     target = tmp_path / "portrait.png"
     target.write_bytes(b"old portrait")
@@ -628,7 +628,7 @@ def test_render_library_gallery_smoke(tmp_path: Path) -> None:
 
 
 def test_gallery_limits_nested_detail_to_one_reference_level(monkeypatch, tmp_path: Path) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     library = ModuleLibrary(_FIXTURE_LIBRARY)
     observed_depths: list[int] = []
@@ -661,14 +661,14 @@ def test_composition_spec_without_library_uses_opaque_boxes() -> None:
 
 
 def _grid_view(count: int):
-    from ardevo.rendering import OvermindVertex, OvermindView
+    from versal.rendering import OvermindVertex, OvermindView
 
     vertices = [OvermindVertex(key="", label=f"v{index}", embedding_rank=index) for index in range(count)]
     return OvermindView(vertices=vertices, input_signatures=["IN_2"], output_signatures=["OUT_1"], d_model=8, top_k=1, max_steps=2)
 
 
 def test_overmind_grid_bands_and_rows() -> None:
-    from ardevo.rendering import THEME, build_overmind_spec
+    from versal.rendering import THEME, build_overmind_spec
 
     spec = build_overmind_spec(_grid_view(5), columns=4, legend=False)
     input_nodes = [node for node in spec.nodes if node.color == THEME["node_input"]]
@@ -693,7 +693,7 @@ def test_overmind_grid_bands_and_rows() -> None:
 
 
 def test_overmind_default_grid_keeps_order_at_eight_across() -> None:
-    from ardevo.rendering import build_overmind_spec
+    from versal.rendering import build_overmind_spec
 
     spec = build_overmind_spec(_grid_view(9), legend=False)
     cells = [box for box in spec.containers if box.depth == 1]
@@ -705,7 +705,7 @@ def test_overmind_default_grid_keeps_order_at_eight_across() -> None:
 
 
 def test_pruned_overmind_compacts_survivors_to_eight_across_and_remaps_paths() -> None:
-    from ardevo.rendering import build_overmind_spec, prune_overmind_view
+    from versal.rendering import build_overmind_spec, prune_overmind_view
 
     view = _grid_view(10)
     view.vertices[1].retired = True
@@ -723,7 +723,7 @@ def test_pruned_overmind_compacts_survivors_to_eight_across_and_remaps_paths() -
 
 
 def test_overmind_render_uses_double_resolution_and_wider_sides(monkeypatch, tmp_path: Path) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     captured: dict[str, float | int] = {}
     paths: list[Path] = []
@@ -741,7 +741,7 @@ def test_overmind_render_uses_double_resolution_and_wider_sides(monkeypatch, tmp
 
 
 def test_overmind_fresh_library_draws_uniform_feeds() -> None:
-    from ardevo.rendering import THEME, build_overmind_spec
+    from versal.rendering import THEME, build_overmind_spec
 
     spec = build_overmind_spec(_grid_view(3), legend=False)  # every share is 0.0: no traffic yet
     entry_edges = [edge for edge in spec.edges if edge.color == THEME["edge_entry"]]
@@ -753,7 +753,7 @@ def test_overmind_fresh_library_draws_uniform_feeds() -> None:
 
 
 def test_overmind_pathway_flows_from_card_output_to_input_anchor() -> None:
-    from ardevo.rendering import THEME, build_overmind_spec
+    from versal.rendering import THEME, build_overmind_spec
 
     view = _grid_view(2)
     view.pathways = [(0, 1, 0.75), (1, 1, 0.5)]  # repeated selection is recurrent flow through one expert
@@ -768,7 +768,7 @@ def test_overmind_pathway_flows_from_card_output_to_input_anchor() -> None:
 
 
 def test_overmind_nested_flow_runs_from_footprint_to_callout_anchor(tmp_path: Path, solving_genome: Genome) -> None:
-    from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
+    from versal.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec
 
     library = ModuleLibrary(tmp_path / "lib")
     inner_key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={"accepted_metric": 1.0})
@@ -807,7 +807,7 @@ def test_overmind_nested_flow_runs_from_footprint_to_callout_anchor(tmp_path: Pa
 
 
 def test_overmind_legend_populates_texts_and_widens() -> None:
-    from ardevo.rendering import build_overmind_spec
+    from versal.rendering import build_overmind_spec
 
     bare = build_overmind_spec(_grid_view(2), legend=False)
     keyed = build_overmind_spec(_grid_view(2), legend=True)
@@ -821,7 +821,7 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
 
 
 def test_cold_overmind_labels_routing_potential_not_observed_traffic() -> None:
-    from ardevo.rendering import build_overmind_spec
+    from versal.rendering import build_overmind_spec
 
     view = _grid_view(2)
     view.traffic_observed = False
@@ -839,7 +839,7 @@ def test_spec_text_draws() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from ardevo.rendering import RenderSpec, SpecText, draw_spec
+    from versal.rendering import RenderSpec, SpecText, draw_spec
 
     spec = RenderSpec(texts=[SpecText(1.0, 2.0, "hello")], width=4.0, height=4.0)
     figure, axis = plt.subplots()
@@ -851,7 +851,7 @@ def test_spec_text_draws() -> None:
 def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
     import matplotlib.image as mpimg
 
-    from ardevo.rendering import RenderSpec, _render_spec_png
+    from versal.rendering import RenderSpec, _render_spec_png
 
     tall = _render_spec_png(tmp_path / "tall.png", RenderSpec(width=10.0, height=80.0), "tall")
     image = mpimg.imread(tall)
@@ -861,7 +861,7 @@ def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
 def test_render_spec_png_preserves_destination_when_save_fails(monkeypatch, tmp_path: Path) -> None:
     from matplotlib.figure import Figure
 
-    from ardevo.rendering import RenderSpec, _render_spec_png
+    from versal.rendering import RenderSpec, _render_spec_png
 
     target = tmp_path / "portrait.png"
     target.write_bytes(b"old portrait")
@@ -884,7 +884,7 @@ def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     def fail(*_args, **_kwargs):
         raise ImportError("Datashader unavailable")
@@ -908,8 +908,8 @@ def test_overmind_caps_per_cell_detail_for_wide_experts(tmp_path: Path, solving_
     """An image-scale expert (the 798-node MNIST stepping stone class) must degrade to its opaque
     footprint instead of embedding a ~784-node input column that degenerates the whole portrait
     into a tall-narrow bar and starves every other cell's budget."""
-    from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
-    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec
+    from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+    from versal.rendering import OvermindVertex, OvermindView, build_overmind_spec
 
     nodes = {i: NodeGene(i, NodeKind.INPUT, "identity") for i in range(784)}
     nodes[784] = NodeGene(784, NodeKind.OUTPUT, "identity")

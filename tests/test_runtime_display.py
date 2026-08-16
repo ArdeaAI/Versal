@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 from rich.console import Console
 
-from ardevo.utils.logging import Logger
-from ardevo.utils.runtime_display import STAGES, RuntimeDisplay
+from versal.utils.logging import Logger
+from versal.utils.runtime_display import STAGES, RuntimeDisplay
 
 
 def _render_display(width: int = 100) -> tuple[RuntimeDisplay, io.StringIO]:

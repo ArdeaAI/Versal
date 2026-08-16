@@ -7,9 +7,9 @@ from pathlib import Path
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.decompose import input_subsets, output_slices, spatial_patches, time_windows
-from ardevo.evolution.composition import (
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.decompose import input_subsets, output_slices, spatial_patches, time_windows
+from versal.evolution.composition import (
     AssemblyContext,
     CompEdgeGene,
     CompNodeGene,
@@ -22,15 +22,15 @@ from ardevo.evolution.composition import (
     comp_to_dict,
     minimal_composition,
 )
-from ardevo.evolution.genome import InnovationTracker, genome_to_dict
-from ardevo.evolution.loop import AssessedComposition
-from ardevo.external_archive import ArchiveManager, restore_snapshot
-from ardevo.library import MODULE, ModuleLibrary, task_io
-from ardevo.motif_discovery import _rewire_degree_preserving, classify_counterfactuals
-from ardevo.orchestrator import comp_task_spec
-from ardevo.reporting import write_run_report
-from ardevo.routing import RouterService, migrate_router_library
-from ardevo.strategy import StrategyResult
+from versal.evolution.genome import InnovationTracker, genome_to_dict
+from versal.evolution.loop import AssessedComposition
+from versal.external_archive import ArchiveManager, restore_snapshot
+from versal.library import MODULE, ModuleLibrary, task_io
+from versal.motif_discovery import _rewire_degree_preserving, classify_counterfactuals
+from versal.orchestrator import comp_task_spec
+from versal.reporting import write_run_report
+from versal.routing import RouterService, migrate_router_library
+from versal.strategy import StrategyResult
 
 
 def test_report_preserves_missing_vs_zero_and_future_wrapper(tmp_path: Path) -> None:

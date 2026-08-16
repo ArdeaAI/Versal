@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from ardevo.evolution.fitness import (
+from versal.evolution.fitness import (
     FITNESS,
     FitnessAggregator,
     bounded_negative_support_loss,
@@ -16,7 +16,7 @@ from ardevo.evolution.fitness import (
     support_accuracy,
     weight_robustness,
 )
-from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
 
 
 def test_bounded_support_loss_maps_to_unit_range() -> None:

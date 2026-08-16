@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import psutil
 import torch
 
-import ardevo.utils.resources as resources
-from ardevo.evolution.composition import CompEdgeGene, CompositionGenome, _glue_for, comp_from_dict, comp_to_dict
-from ardevo.utils.resources import ResourcePolicy, StageFootprint, format_bytes
+import versal.utils.resources as resources
+from versal.evolution.composition import CompEdgeGene, CompositionGenome, _glue_for, comp_from_dict, comp_to_dict
+from versal.utils.resources import ResourcePolicy, StageFootprint, format_bytes
 
 
 class _Memory:

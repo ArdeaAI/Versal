@@ -10,10 +10,10 @@ from typing import Any
 import pytest
 import torch
 
-from ardevo.evolution.evolver import Evolver, TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome
-from ardevo.evolution.novelty import archive_insert, compute_descriptor, novelty_scores, probe_indices, probe_tensor
-from ardevo.evolution.registry import build_evolver
+from versal.evolution.evolver import Evolver, TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome
+from versal.evolution.novelty import archive_insert, compute_descriptor, novelty_scores, probe_indices, probe_tensor
+from versal.evolution.registry import build_evolver
 
 
 def _config(novelty_table: dict[str, Any] | None) -> dict[str, Any]:
@@ -143,7 +143,7 @@ def test_non_finite_descriptor_is_rejected() -> None:
 def test_probe_tensor_skips_non_flat_tasks() -> None:
     from typing import cast
 
-    from ardevo.dataset.icarus import EncodedTask
+    from versal.dataset.icarus import EncodedTask
 
     class _FakeEncoded:
         support_input = (torch.zeros((3, 4, 2)), None)  # a TIME-axis shape

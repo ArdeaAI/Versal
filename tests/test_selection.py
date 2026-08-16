@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from ardevo.evolution.selection import nsga2, pareto_ranks_and_crowding, tournament, truncation
+from versal.evolution.selection import nsga2, pareto_ranks_and_crowding, tournament, truncation
 
 # Front 0 = the first three (mutually non-dominating); (2,2) is dominated by (3,3) only; (0,0) by all.
 _OBJECTIVES = [[1.0, 5.0], [5.0, 1.0], [3.0, 3.0], [2.0, 2.0], [0.0, 0.0]]
@@ -158,8 +158,8 @@ def test_nsga2_scalar_path_parsimony_decides_within_a_band() -> None:
 def test_parsimony_epsilon_flows_from_config() -> None:
     from functools import partial
 
-    from ardevo.evolution.registry import build_evolver
     from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.evolution.registry import build_evolver
 
     config = _loop_config()
     config["evolution"]["selection"] = {"kind": "tournament", "tournament_size": 3, "parsimony_epsilon": 0.01}

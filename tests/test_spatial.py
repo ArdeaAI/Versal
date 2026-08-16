@@ -6,8 +6,8 @@ import random
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.decompose import spatial_patches
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.decompose import spatial_patches
 
 
 def _grid_to_grid_task(height: int = 4, width: int = 3, n: int = 6) -> Task:
@@ -49,8 +49,8 @@ def test_spatial_patches_uses_other_reducible_axis_when_height_is_short() -> Non
 
 def test_orchestrated_config_wires_geometry_refine_and_spatial() -> None:
     """The image-wall levers must actually be reachable from the production config."""
-    from ardevo.evolution.registry import build_loop
-    from ardevo.utils.config import Config
+    from versal.evolution.registry import build_loop
+    from versal.utils.config import Config
 
     config = Config(conf_path="configs/canary.toml").current
     operators = set(config["evolution"]["mutation"]["operators"])

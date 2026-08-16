@@ -1,6 +1,6 @@
 ## Technical Supplement
 
-This supplement accompanies **ArdEVO: Toward Task-General Intelligence with Persistent, Compounding Neuroevolution**. It retains the extended task contract, method details, historical experiments, complete rung tables, engineering postmortems, and reproducibility notes that are intentionally compressed in the conference core. Claims inherit the evidence boundary stated in the core: historical runs describe the code that produced them, current mechanisms are not credited with retroactive effects, and regression-tested behavior is not presented as measured campaign performance.
+This supplement accompanies **Versal: Toward Task-General Intelligence with Persistent, Compounding Neuroevolution**. It retains the extended task contract, method details, historical experiments, complete rung tables, engineering postmortems, and reproducibility notes that are intentionally compressed in the conference core. Claims inherit the evidence boundary stated in the core: historical runs describe the code that produced them, current mechanisms are not credited with retroactive effects, and regression-tested behavior is not presented as measured campaign performance.
 
 ## Appendix A: Icarus Task Contract
 
@@ -37,7 +37,7 @@ Library signatures derive from value type, semantic axes, and flattened width. T
 
 Counts and widths were enumerated from the published dataset during the historical evidence freeze. The Psicov range is intentionally open-ended: the July 12 run observed a 13,966,425-input by 245,025-output task beyond the earlier probe range. Flattened widths describe the library-facing Level0 view; temporal substrates recover step structure where applicable.
 
-The dataset is generated in a separate repository and published as `Ardea/Icarus-dataset`. ArdEVO vendors only the loader/encoder runtime. Rungs 4 and 5 originate from policy rollouts but are stored and evaluated as supervised traces. No interactive environment is present in the consumer. The rung scheduler is checkpointable and normally interleaves rungs so that library state changes between families.
+The dataset is generated in a separate repository and published as `Ardea/Icarus-dataset`. Versal vendors only the loader/encoder runtime. Rungs 4 and 5 originate from policy rollouts but are stored and evaluated as supervised traces. No interactive environment is present in the consumer. The rung scheduler is checkpointable and normally interleaves rungs so that library state changes between families.
 
 ### A.3 Structured outputs and metric availability
 
@@ -325,7 +325,7 @@ Archive format v2 stores a manifest whose file records point to content-addresse
 
 ## Appendix J: Broader Impact and Claim Discipline
 
-ArdEVO searches small supervised neural systems under fixed tasks, verifiers, and budgets. Its durable artifacts are inert serialized networks and compositions. They do not write code or act outside the runtime. The nearest-term risks are scientific and operational: warm-library provenance can inflate results; broad support fitting can be mistaken for held-out capability; and structured cell accuracy can be mistaken for task-exact reasoning. The evidence and report pipeline is designed to make those errors visible.
+Versal searches small supervised neural systems under fixed tasks, verifiers, and budgets. Its durable artifacts are inert serialized networks and compositions. They do not write code or act outside the runtime. The nearest-term risks are scientific and operational: warm-library provenance can inflate results; broad support fitting can be mistaken for held-out capability; and structured cell accuracy can be mistaken for task-exact reasoning. The evidence and report pipeline is designed to make those errors visible.
 
 Longer-term systems that select their own objectives, modify their implementation, or operate persistently in open environments would present a different risk profile. The current architecture could be one component of such a system because it accumulates reusable structure, but it does not implement those capabilities. Likewise, neither evolved structure nor benchmark performance is evidence of consciousness. Any future claim about objectness, selfhood, qualia, or sentience would require operational definitions and experiments absent here.
 

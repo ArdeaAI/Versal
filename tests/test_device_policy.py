@@ -12,8 +12,8 @@ from typing import Any, cast
 import pytest
 import torch
 
-from ardevo.evolution.registry import build_evolver
-from ardevo.utils.device import (
+from versal.evolution.registry import build_evolver
+from versal.utils.device import (
     POPULATION_CPU_MODE,
     POPULATION_CUDA_MODE,
     SERIAL_MODE,
@@ -76,7 +76,7 @@ def test_auto_device_prefers_cuda_over_mps(monkeypatch) -> None:
 
 
 def test_calibration_selects_valid_speedup_and_round_trips(monkeypatch, tmp_path) -> None:
-    from ardevo.utils import device as device_module
+    from versal.utils import device as device_module
 
     hardware = capture_hardware_profile()
 
@@ -206,7 +206,7 @@ def test_explicit_scheduled_batching_overrides_missing_profile(monkeypatch) -> N
 def test_resolve_worker_count(monkeypatch) -> None:
     import os
 
-    from ardevo.utils import device as device_module
+    from versal.utils import device as device_module
 
     resolve_worker_count = device_module.resolve_worker_count
 
@@ -227,7 +227,7 @@ def test_resolve_worker_count(monkeypatch) -> None:
 
 
 def test_proctor_delegates_to_resolver(monkeypatch) -> None:
-    from ardevo.utils.proctor import Proctor
+    from versal.utils.proctor import Proctor
 
     class DummyTrial(Proctor):
         def run(self) -> dict[str, Any]:  # pragma: no cover - never called
@@ -240,7 +240,7 @@ def test_proctor_delegates_to_resolver(monkeypatch) -> None:
 
 
 def test_cluster_cuda_uses_local_launcher_with_clearml_telemetry(monkeypatch) -> None:
-    from ardevo.utils import pipelines
+    from versal.utils import pipelines
 
     monkeypatch.setattr(pipelines, "HAS_CLEARML", True)
     monkeypatch.setattr(pipelines.Pipeline, "_create_task", lambda self: None)
@@ -251,7 +251,7 @@ def test_cluster_cuda_uses_local_launcher_with_clearml_telemetry(monkeypatch) ->
 
 @pytest.mark.parametrize("machine_env", ["LocalLatticeCPU", "LocalLatticeCUDA"])
 def test_local_lattice_runs_inline_once_with_clearml_telemetry(monkeypatch, machine_env: str) -> None:
-    from ardevo.utils import pipelines
+    from versal.utils import pipelines
 
     calls = {"task_init": 0, "trial_run": 0, "execute_remotely": 0, "close": 0}
 
@@ -298,7 +298,7 @@ def test_local_lattice_runs_inline_once_with_clearml_telemetry(monkeypatch, mach
 
 
 def test_clearml_disables_stream_and_pytorch_interception_but_keeps_explicit_telemetry(monkeypatch) -> None:
-    from ardevo.utils import pipelines
+    from versal.utils import pipelines
 
     captured: dict[str, Any] = {}
 
@@ -324,7 +324,7 @@ def test_clearml_disables_stream_and_pytorch_interception_but_keeps_explicit_tel
         {
             "machine_env": "MonadMetal",
             "clearml_run": True,
-            "project_name": "ardevo",
+            "project_name": "versal",
             "experiment_name": "test",
             "hyperparameters": {"seed": 1},
         }
@@ -337,7 +337,7 @@ def test_clearml_disables_stream_and_pytorch_interception_but_keeps_explicit_tel
 
 
 def test_clearml_full_stream_capture_remains_an_opt_in(monkeypatch) -> None:
-    from ardevo.utils import pipelines
+    from versal.utils import pipelines
 
     captured: dict[str, Any] = {}
 

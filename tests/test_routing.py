@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 import torch
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.composition import comp_to_dict, minimal_composition
-from ardevo.evolution.genome import Genome, InnovationTracker, genome_to_dict
-from ardevo.evolution.loop import AssessedComposition
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
-from ardevo.orchestrator import comp_task_spec
-from ardevo.routing import RoutedNet, RoutedTaskView, RouterService, build_vertex, sanitize_key
 from tests.test_orchestrator import _orchestrator
+from versal.dataset.icarus import Task
+from versal.evolution.composition import comp_to_dict, minimal_composition
+from versal.evolution.genome import Genome, InnovationTracker, genome_to_dict
+from versal.evolution.loop import AssessedComposition
+from versal.library import COMPOSITION, MODULE, ModuleLibrary, task_io
+from versal.orchestrator import comp_task_spec
+from versal.routing import RoutedNet, RoutedTaskView, RouterService, build_vertex, sanitize_key
 
 
 def _seed_library(tmp_path: Path, xor_task: Task, solving_genome: Genome, *, with_composition: bool = False) -> ModuleLibrary:
@@ -131,7 +131,7 @@ def test_router_construction_sync_and_reload_honor_reference_depth(tmp_path: Pat
 
 
 def test_routed_strategy_reads_authoritative_composition_depth() -> None:
-    from ardevo.routing import build_routed_strategy
+    from versal.routing import build_routed_strategy
 
     strategy = build_routed_strategy({"evolution": {"composition": {"max_inline_depth": 7}}})
     assert strategy.max_inline_depth == 7
@@ -169,7 +169,7 @@ def test_retired_vertices_are_masked(tmp_path: Path, xor_task: Task, solving_gen
 def test_routed_win_distills_into_admitted_composition(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     """The DSL contract end-to-end: a routed win over a planted expert must come back as a VERIFIED
     composition referencing that expert, admitted into the library (a new routable vertex)."""
-    from ardevo.evolution.composition import comp_from_dict
+    from versal.evolution.composition import comp_from_dict
 
     torch.manual_seed(0)
     table = {
@@ -224,7 +224,7 @@ def test_routed_no_experts_short_circuits_and_escalates(tmp_path: Path, xor_task
 def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     """A router-space win whose pathway cannot be kept (here: an impossible usage floor, the
     adapter-bypass proxy) must report as a miss with the marker, never as a solve."""
-    from ardevo.routing import RoutedStrategy
+    from versal.routing import RoutedStrategy
 
     torch.manual_seed(0)
     orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.2, "decompose": []})
@@ -247,7 +247,7 @@ def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, s
 
 
 def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
-    from ardevo.routing import RoutedStrategy
+    from versal.routing import RoutedStrategy
 
     torch.manual_seed(0)
     orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.95, "decompose": []})
@@ -285,8 +285,8 @@ def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, t
 
 
 def test_routed_distillation_declines_oversized_glue_before_allocation(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
-    import ardevo.routing as routing_module
-    from ardevo.routing import RoutedStrategy
+    import versal.routing as routing_module
+    from versal.routing import RoutedStrategy
 
     orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.2, "decompose": []})
     key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
@@ -317,7 +317,7 @@ def test_routed_distillation_declines_oversized_glue_before_allocation(monkeypat
 def test_pending_embedding_places_new_vertex(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
     """A distilled entry's vertex is born AT the task embedding that produced it (fingerprint-matched
     at sync), not at the mean-of-peers default."""
-    from ardevo.library import structural_fingerprint
+    from versal.library import structural_fingerprint
 
     torch.manual_seed(0)
     library = ModuleLibrary(tmp_path / "lib")
@@ -409,7 +409,7 @@ def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solvi
 def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(
     tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ardevo.rendering as rendering
+    import versal.rendering as rendering
 
     library = _seed_library(tmp_path, xor_task, solving_genome)
     evicted_key = library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
@@ -433,7 +433,7 @@ def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(
 
 
 def test_build_overmind_spec_embeds_experts_and_degrades(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
-    from ardevo.rendering import OvermindVertex, OvermindView, build_overmind_spec, library_resolver
+    from versal.rendering import OvermindVertex, OvermindView, build_overmind_spec, library_resolver
 
     library = _seed_library(tmp_path, xor_task, solving_genome, with_composition=True)
     keys = library.keys()
@@ -458,7 +458,7 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
     steps, on the planted-solution XOR fixture AND on half-parity (not linearly separable, so the
     adapter path cannot trivially absorb it). The comparison is REPORTED (research signal); the
     instrumentation is asserted."""
-    from ardevo.routing import RoutedStrategy
+    from versal.routing import RoutedStrategy
 
     results: dict[tuple[str, str, int], float] = {}
     variants = [("xor", xor_task, 0), ("half_parity", decomposable_task, 0), ("half_parity", decomposable_task, 2)]
@@ -492,7 +492,7 @@ def test_expert_ablation_diagnostic(tmp_path: Path, xor_task: Task, decomposable
 
 
 def test_routed_training_budget_scales_steps_and_never_overcharges() -> None:
-    from ardevo.routing import RoutedStrategy
+    from versal.routing import RoutedStrategy
 
     strategy = RoutedStrategy(library_dir="unused", train_steps=200, generation_cost=10, persist=False)
     assert strategy._step_cap(0) == 0
@@ -668,7 +668,7 @@ def test_pathways_prefer_observed_traffic_and_fall_back_to_prior(tmp_path: Path,
 
 
 def test_overmind_spec_draws_pathway_and_traffic_feed_edges(tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
-    from ardevo.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec, library_resolver
+    from versal.rendering import THEME, OvermindVertex, OvermindView, build_overmind_spec, library_resolver
 
     library = _seed_library(tmp_path, xor_task, solving_genome, with_composition=True)
     keys = library.keys()
@@ -695,7 +695,7 @@ def test_overmind_spec_draws_pathway_and_traffic_feed_edges(tmp_path: Path, xor_
 
 
 def test_overmind_vertex_order_is_traffic_first() -> None:
-    from ardevo.routing import mean_firing_step, overmind_vertex_order
+    from versal.routing import mean_firing_step, overmind_vertex_order
 
     assert mean_firing_step([]) is None and mean_firing_step([0.0, 0.0]) is None
     assert mean_firing_step([0.0, 2.0]) == pytest.approx(1.0)

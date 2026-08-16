@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from ardevo.dataset.icarus import Level0Encoder, Task, encode_task
-from ardevo.evolution.composition import CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome
-from ardevo.evolution.evolver import Evolver
-from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind, genome_to_dict, topological_order
-from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, state_from_dict, state_to_dict
-from ardevo.evolution.registry import build_loop
-from ardevo.library import MODULE, ModuleLibrary, task_io
+from versal.dataset.icarus import Level0Encoder, Task, encode_task
+from versal.evolution.composition import CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome
+from versal.evolution.evolver import Evolver
+from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind, genome_to_dict, topological_order
+from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, state_from_dict, state_to_dict
+from versal.evolution.registry import build_loop
+from versal.library import MODULE, ModuleLibrary, task_io
 
 
 def _config() -> dict:
@@ -109,8 +109,8 @@ def test_run_task_end_to_end(decomposable_task: Task) -> None:
 
 
 def test_refinement_filters_repeated_initial_compositions_before_glue_fit(tmp_path: Path, xor_task: Task) -> None:
-    from ardevo.evolution.composition import comp_to_dict
-    from ardevo.topology import TopologyTabuSession, TopologyTabuStore
+    from versal.evolution.composition import comp_to_dict
+    from versal.topology import TopologyTabuSession, TopologyTabuStore
 
     library = ModuleLibrary(tmp_path / "lib")
     loop = build_loop(_config())
@@ -217,7 +217,7 @@ def test_decay_never_rewards_negative_fitness() -> None:
 
 def test_elites_with_dead_refs_are_repaired_not_floored(xor_task: Task) -> None:
     """B3 regression: an elite whose live species died must be re-pointed, not silently floored."""
-    from ardevo.evolution.genome import InnovationTracker
+    from versal.evolution.genome import InnovationTracker
 
     loop = build_loop(_config())
     state = loop.fresh_state(random.Random(0))
@@ -275,8 +275,8 @@ def test_repair_refs_repoints_dead_species() -> None:
 
 
 def test_absorb_new_entries_grafts_over_worst_non_champions(tmp_path: Path, solving_genome) -> None:
-    from ardevo.evolution.init import minimal
-    from ardevo.library import MODULE, ModuleLibrary
+    from versal.evolution.init import minimal
+    from versal.library import MODULE, ModuleLibrary
 
     library = ModuleLibrary(tmp_path / "lib")
     module_genome = minimal(4, 1, rng=random.Random(3))
@@ -303,8 +303,8 @@ def test_absorb_new_entries_grafts_over_worst_non_champions(tmp_path: Path, solv
 
 def test_mutation_context_sees_live_library_entries(tmp_path: Path, solving_genome) -> None:
     """The by-path cache snapshot goes stale; the live handle must see mid-run admissions."""
-    from ardevo.evolution.mutation import add_library_module
-    from ardevo.library import MODULE, ModuleLibrary
+    from versal.evolution.mutation import add_library_module
+    from versal.library import MODULE, ModuleLibrary
 
     config = _config()
     loop = build_loop(config)

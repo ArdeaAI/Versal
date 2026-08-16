@@ -9,17 +9,17 @@ from typing import cast
 import pytest
 import torch
 
-from ardevo import checkpoint
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.composition import AssemblyContext, ComposedNet, assemble, comp_from_dict, minimal_composition
-from ardevo.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
-from ardevo.evolution.loop import AssessedComposition, state_from_dict, state_to_dict
-from ardevo.evolution.registry import build_loop
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary, task_io
-from ardevo.orchestrator import Attempt, Orchestrator, RefinementRank, StallDetector, attempts_from_dicts, attempts_to_dicts, comp_task_spec, refinement_improves
-from ardevo.strategy import StrategyResult
-from ardevo.trials.orchestrated_trial import OrchestratedTrial
 from tests.test_hierarchical_loop import _config as _loop_config
+from versal import checkpoint
+from versal.dataset.icarus import Task
+from versal.evolution.composition import AssemblyContext, ComposedNet, assemble, comp_from_dict, minimal_composition
+from versal.evolution.genome import InnovationTracker, genome_from_dict, genome_to_dict
+from versal.evolution.loop import AssessedComposition, state_from_dict, state_to_dict
+from versal.evolution.registry import build_loop
+from versal.library import COMPOSITION, MODULE, ModuleLibrary, task_io
+from versal.orchestrator import Attempt, Orchestrator, RefinementRank, StallDetector, attempts_from_dicts, attempts_to_dicts, comp_task_spec, refinement_improves
+from versal.strategy import StrategyResult
+from versal.trials.orchestrated_trial import OrchestratedTrial
 
 
 def _orchestrator(tmp_path: Path, **overrides) -> Orchestrator:
@@ -79,10 +79,10 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
 
 
 def test_field_library_hit_matches_across_resolution_after_full_support_check(tmp_path: Path) -> None:
-    from ardevo.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
-    from ardevo.evolution.init import minimal
-    from ardevo.field import field_contract, field_feature_width, field_payload
     from tests.test_field import _task
+    from versal.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width, field_payload
 
     source = _task()
     contract = field_contract(source)
@@ -181,7 +181,7 @@ def test_max_depth_prevents_decomposition(tmp_path: Path, decomposable_task: Tas
 def test_attempts_carry_champion_sample_metrics(tmp_path: Path, xor_task: Task) -> None:
     """The G0 diagnostic: hybrid-eval champions stamp their weight-sample metrics onto the Attempt
     (whitelisted keys only), and metrics without the weight-sample marker leave the field empty."""
-    from ardevo.evolution.composition import minimal_composition as _minimal
+    from versal.evolution.composition import minimal_composition as _minimal
 
     orchestrator = _orchestrator(tmp_path, table={"max_depth": 0})
 
@@ -257,7 +257,7 @@ def test_failed_subtask_fails_the_decomposition_gracefully(tmp_path: Path, decom
 
 
 def test_stall_detector_flatline_and_floor() -> None:
-    from ardevo.evolution.composition import CompositionGenome
+    from versal.evolution.composition import CompositionGenome
 
     def metric_of(item: AssessedComposition) -> float:
         return item.metrics.get("query_accuracy", 0.0)
@@ -280,9 +280,9 @@ def test_stall_detector_flatline_and_floor() -> None:
 
 
 def test_port_wired_skeleton_assembles_and_routes(tmp_path: Path, decomposable_task: Task) -> None:
-    from ardevo.decompose import output_slices
-    from ardevo.evolution.composition import comp_to_dict
-    from ardevo.orchestrator import Solution
+    from versal.decompose import output_slices
+    from versal.evolution.composition import comp_to_dict
+    from versal.orchestrator import Solution
 
     orchestrator = _orchestrator(tmp_path)
     spec = comp_task_spec(decomposable_task)
@@ -300,10 +300,10 @@ def test_port_wired_skeleton_assembles_and_routes(tmp_path: Path, decomposable_t
 
 
 def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(monkeypatch, tmp_path: Path, decomposable_task: Task) -> None:
-    import ardevo.orchestrator as orchestrator_module
-    from ardevo.decompose import output_slices
-    from ardevo.evolution.composition import comp_to_dict
-    from ardevo.orchestrator import Solution
+    import versal.orchestrator as orchestrator_module
+    from versal.decompose import output_slices
+    from versal.evolution.composition import comp_to_dict
+    from versal.orchestrator import Solution
 
     orchestrator = _orchestrator(tmp_path)
     orchestrator.loop.max_initial_glue_values = 100
@@ -437,7 +437,7 @@ def test_decompose_forensics_record_where_it_died(tmp_path: Path, decomposable_t
 
 
 def test_solvability_gate_off_by_default_passes_all(tmp_path: Path, decomposable_task: Task) -> None:
-    from ardevo.decompose import output_slices
+    from versal.decompose import output_slices
 
     orchestrator = _orchestrator(tmp_path)
     assert orchestrator.decompose_solvability_floor == 0.0  # legacy behavior: gate disabled
@@ -446,8 +446,8 @@ def test_solvability_gate_off_by_default_passes_all(tmp_path: Path, decomposable
 
 
 def test_solvability_gate_rejects_unfittable_subtasks(tmp_path: Path, decomposable_task: Task) -> None:
-    from ardevo.decompose import output_slices
-    from ardevo.strategy import StrategyResult
+    from versal.decompose import output_slices
+    from versal.strategy import StrategyResult
 
     orchestrator = _orchestrator(tmp_path, table={"decompose_solvability_floor": 0.6, "decompose_probe_generations": 2})
     subtasks = output_slices(decomposable_task, rng=random.Random(0), n_groups=2)
@@ -637,7 +637,7 @@ def test_refine_depth_guard_skips_subsolve_hits(tmp_path: Path, xor_task: Task, 
 
 
 def test_refine_composition_hit_seeds_run_task(tmp_path: Path, xor_task: Task) -> None:
-    from ardevo.evolution.composition import comp_to_dict
+    from versal.evolution.composition import comp_to_dict
 
     orchestrator = _orchestrator(tmp_path, table={**_refine_table(), "accept_threshold": 0.0})
     comp = minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random.Random(1))
@@ -814,7 +814,7 @@ def test_refine_compression_gain_spends_lineage_cooldown(tmp_path: Path, xor_tas
     orchestrator.library.seed_refine_stats(solution.key, attempts=2, failures=2)  # after a second compression
     assert orchestrator._effective_refine_budget(orchestrator.library.load(solution.key)) == 2  # < min_generations: skips
     improved, generations = orchestrator._refine_hit(
-        __import__("ardevo.orchestrator", fromlist=["Solution"]).Solution(key=solution.key, entry_type=MODULE, metric=1.0), xor_task, comp_task_spec(xor_task), 0
+        __import__("versal.orchestrator", fromlist=["Solution"]).Solution(key=solution.key, entry_type=MODULE, metric=1.0), xor_task, comp_task_spec(xor_task), 0
     )
     assert improved is None and generations == 0
     assert orchestrator.counters["refine_skipped_decayed"] == 1

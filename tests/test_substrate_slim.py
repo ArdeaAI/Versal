@@ -11,13 +11,13 @@ import random
 import torch
 from torch import nn
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, encode_task
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
-from ardevo.evolution.init import minimal
-from ardevo.evolution.mutation import MutationContext, add_connection, add_deep_node, add_recurrent_connection, add_rich_node
-from ardevo.evolution.train import _writeback, gradient
-from ardevo.substrate import GraphNet, decode, decode_recurrent, decode_refine
-from ardevo.substrate_batched import BatchedGraphNet
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, encode_task
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
+from versal.evolution.init import minimal
+from versal.evolution.mutation import MutationContext, add_connection, add_deep_node, add_recurrent_connection, add_rich_node
+from versal.evolution.train import _writeback, gradient
+from versal.substrate import GraphNet, decode, decode_recurrent, decode_refine
+from versal.substrate_batched import BatchedGraphNet
 
 
 class DenseReference(nn.Module):

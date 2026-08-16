@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
-from ardevo.field import field_contract, field_feature_width, gather_local_multiscale_v1
-from ardevo.library import MODULE, ModuleLibrary, structural_fingerprint
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
+from versal.field import field_contract, field_feature_width, gather_local_multiscale_v1
+from versal.library import MODULE, ModuleLibrary, structural_fingerprint
 
 
 def _field(data: torch.Tensor, axes: tuple[Axis, ...], mask: torch.Tensor | None = None) -> Field:
@@ -47,8 +47,8 @@ def test_rejects_spatial_mismatch_and_time() -> None:
 
 
 def test_field_payload_cross_resolution_round_trip_and_unknown_version_fails(tmp_path) -> None:
-    from ardevo.evolution.init import minimal
-    from ardevo.field import decode_field_payload, field_payload, payload_field_contract
+    from versal.evolution.init import minimal
+    from versal.field import decode_field_payload, field_payload, payload_field_contract
 
     contract = field_contract(_task())
     assert contract is not None
@@ -75,8 +75,8 @@ def test_field_payload_cross_resolution_round_trip_and_unknown_version_fails(tmp
 def test_native_larger_resolution_prediction_and_mask_padding_invariance() -> None:
     import random
 
-    from ardevo.evolution.init import minimal
-    from ardevo.field import FieldAdapter, deterministic_sites, encode_sites, predict_field, valid_sites
+    from versal.evolution.init import minimal
+    from versal.field import FieldAdapter, deterministic_sites, encode_sites, predict_field, valid_sites
 
     task = _task(11)
     contract = field_contract(task)
@@ -142,7 +142,7 @@ def test_cpu_cuda_feature_parity_when_available() -> None:
 def test_field_module_executes_inside_nested_compositions(tmp_path) -> None:
     import random
 
-    from ardevo.evolution.composition import (
+    from versal.evolution.composition import (
         AssemblyContext,
         CompEdgeGene,
         CompNodeGene,
@@ -153,8 +153,8 @@ def test_field_module_executes_inside_nested_compositions(tmp_path) -> None:
         assemble,
         comp_to_dict,
     )
-    from ardevo.evolution.init import minimal
-    from ardevo.field import field_payload
+    from versal.evolution.init import minimal
+    from versal.field import field_payload
 
     contract = field_contract(_task())
     assert contract is not None
@@ -188,8 +188,8 @@ def test_field_module_executes_inside_nested_compositions(tmp_path) -> None:
     net = assemble(outer, AssemblyContext(bank_columns={"SITE": range(width)}, library=library), width)
     assert net(torch.zeros(3, width)).shape == (3, 1)
 
-    from ardevo.rendering import build_entry_spec
-    from ardevo.routing import build_vertex
+    from versal.rendering import build_entry_spec
+    from versal.routing import build_vertex
 
     entry = library.load(module_key)
     vertex = build_vertex(entry, library)

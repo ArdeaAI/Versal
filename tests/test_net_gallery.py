@@ -7,12 +7,12 @@ from typing import Any, cast
 
 import pytest
 
-import ardevo.rendering as rendering
-import ardevo.routing as routing
-from ardevo.evolution.genome import Genome, genome_to_dict
-from ardevo.library import MODULE, ModuleLibrary
-from ardevo.tools import net_gallery
-from ardevo.tools.net_gallery import render_all_entries
+import versal.rendering as rendering
+import versal.routing as routing
+from versal.evolution.genome import Genome, genome_to_dict
+from versal.library import MODULE, ModuleLibrary
+from versal.tools import net_gallery
+from versal.tools.net_gallery import render_all_entries
 
 _FIXTURE_LIBRARY = Path(__file__).parent / "fixtures" / "library_v1"
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}

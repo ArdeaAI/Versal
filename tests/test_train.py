@@ -3,8 +3,8 @@ import random
 
 import pytest
 
-from ardevo.evaluation import support_loss
-from ardevo.evolution.train import _scheduled_learning_rates, gradient, gradient_scheduled, no_train
+from versal.evaluation import support_loss
+from versal.evolution.train import _scheduled_learning_rates, gradient, gradient_scheduled, no_train
 
 
 def test_gradient_reduces_support_loss(linear_genome, xor_adapter):
@@ -53,7 +53,7 @@ def test_gradient_scheduled_reduces_support_loss(linear_genome, xor_adapter):
 def test_gradient_scheduled_writeback_and_nan_guard(monkeypatch, linear_genome, xor_adapter):
     import torch
 
-    import ardevo.evolution.train as train_module
+    import versal.evolution.train as train_module
 
     module = xor_adapter.decode(linear_genome)
     genome, _module = gradient_scheduled(linear_genome, module, xor_adapter.encoded, rng=random.Random(0), steps=20, lr=0.05, writeback=True)
@@ -74,7 +74,7 @@ def test_gradient_stops_on_nonfinite_loss(monkeypatch, linear_genome, xor_adapte
     non-finite grads, so a single step would poison every weight). The guard breaks the loop first."""
     import torch
 
-    import ardevo.evolution.train as train_module
+    import versal.evolution.train as train_module
 
     module = xor_adapter.decode(linear_genome)
 

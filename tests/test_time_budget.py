@@ -12,11 +12,11 @@ from pathlib import Path
 
 import torch
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.genome import Genome
-from ardevo.orchestrator import StallDetector
-from ardevo.strategy import EVOLVE_STRATEGY, StrategyResult
 from tests.test_orchestrator import _fake_run_task, _orchestrator, _patch_run_task
+from versal.dataset.icarus import Task
+from versal.evolution.genome import Genome
+from versal.orchestrator import StallDetector
+from versal.strategy import EVOLVE_STRATEGY, StrategyResult
 
 _CALLS: list[str] = []
 
@@ -93,9 +93,9 @@ def test_gradient_deadline_interrupts_before_optimizer_step(solving_genome, xor_
     import random
     import time
 
-    from ardevo.dataset.icarus import Level0Encoder, encode_task
-    from ardevo.evolution.train import gradient
-    from ardevo.substrate import decode
+    from versal.dataset.icarus import Level0Encoder, encode_task
+    from versal.evolution.train import gradient
+    from versal.substrate import decode
 
     encoded = encode_task(xor_task, Level0Encoder(2))
     module = decode(solving_genome, 2, 1)

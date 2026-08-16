@@ -4,19 +4,19 @@ import random
 from dataclasses import replace as gene_replace
 from pathlib import Path
 
-from ardevo.dataset.icarus import Task
-from ardevo.evolution.genome import InnovationTracker, genome_to_dict
-from ardevo.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
-from ardevo.evolution.registry import build_loop
-from ardevo.library import MODULE, ModuleLibrary, task_io
-from ardevo.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
 from tests.test_orchestrator import _orchestrator
+from versal.dataset.icarus import Task
+from versal.evolution.genome import InnovationTracker, genome_to_dict
+from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
+from versal.evolution.registry import build_loop
+from versal.library import MODULE, ModuleLibrary, task_io
+from versal.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
 
 
 def _runtime_for(loop: HierarchicalLoop, state: HierarchicalState, threshold: float) -> StrategyRuntime:
-    from ardevo.library import ModuleLibrary
+    from versal.library import ModuleLibrary
 
     library = loop.library if loop.library is not None else ModuleLibrary("/tmp/claude/unused_strategy_test_lib")
     return StrategyRuntime(
@@ -54,8 +54,8 @@ def test_verification_reassembles_against_current_state(xor_task: Task) -> None:
 
 
 def test_field_strategy_runs_compact_program_and_full_verifies(tmp_path: Path) -> None:
-    from ardevo.strategy import FieldStrategy
     from tests.test_field import _task
+    from versal.strategy import FieldStrategy
 
     config = _loop_config()
     config["orchestrator"] = {
@@ -129,7 +129,7 @@ def test_evolve_runs_strategies_in_order_with_budget_carry(tmp_path: Path, xor_t
     def _build_high(config: dict):
         def run(task, spec: CompTaskSpec, runtime, *, budget: int, seed_comps=None) -> StrategyResult:
             calls.append(("high", budget))
-            from ardevo.evolution.composition import minimal_composition
+            from versal.evolution.composition import minimal_composition
 
             comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, runtime.state.comp_innovations, runtime.state.rng)
             champion = AssessedComposition(comp=comp, metrics={"query_accuracy": 1.0, "query_loss": 0.1, "support_accuracy": 1.0, "support_loss": 0.1}, fitness=1.0, net=None)
@@ -174,7 +174,7 @@ def test_metric_only_routed_miss_escalates_to_an_admissible_strategy(tmp_path: P
     def _build_after_routed(config: dict):
         def run(task, spec: CompTaskSpec, runtime, *, budget, seed_comps=None) -> StrategyResult:
             calls.append("composition")
-            from ardevo.evolution.composition import minimal_composition
+            from versal.evolution.composition import minimal_composition
 
             comp = minimal_composition(spec.input_specs, spec.output_ref, spec.output_width, runtime.state.comp_innovations, runtime.state.rng)
             metrics = {"support_accuracy": 1.0, "support_loss": 0.0, "query_accuracy": 1.0, "query_loss": 0.0}
@@ -223,8 +223,8 @@ def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Pa
 
 
 def test_direct_strategy_picks_temporal_adapter(temporal_task: Task, xor_task: Task) -> None:
-    from ardevo.evolution.evolver import TaskAdapter
-    from ardevo.temporal import TemporalTaskAdapter
+    from versal.evolution.evolver import TaskAdapter
+    from versal.temporal import TemporalTaskAdapter
 
     config = {
         "evolution": {"init": {"kind": "minimal"}, "mutation": {"operators": []}, "train": {"kind": "none"}},
@@ -240,7 +240,7 @@ def test_direct_strategy_picks_temporal_adapter(temporal_task: Task, xor_task: T
 def test_stamp_input_coordinates_unravels_row_major(linear_genome) -> None:
     import pytest
 
-    from ardevo.evolution.init import minimal, stamp_input_coordinates
+    from versal.evolution.init import minimal, stamp_input_coordinates
 
     genome = minimal(6, 1, rng=random.Random(0))
     stamped = stamp_input_coordinates(genome, (2, 3))
@@ -252,8 +252,8 @@ def test_stamp_input_coordinates_unravels_row_major(linear_genome) -> None:
 
 
 def test_seed_state_seeded_front_injects_grafted_genome(tmp_path: Path, xor_task: Task, xor_adapter, solving_genome) -> None:
-    from ardevo.evolution.registry import build_evolver
-    from ardevo.library import ModuleLibrary, graft
+    from versal.evolution.registry import build_evolver
+    from versal.library import ModuleLibrary, graft
 
     library = ModuleLibrary(tmp_path / "lib")
     key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={})
@@ -273,7 +273,7 @@ def test_seed_state_seeded_front_injects_grafted_genome(tmp_path: Path, xor_task
 
 
 def test_seed_state_without_seeded_front_is_unchanged(xor_adapter) -> None:
-    from ardevo.evolution.registry import build_evolver
+    from versal.evolution.registry import build_evolver
 
     baseline = build_evolver(_loop_config()).seed_state(xor_adapter, random.Random(0))
     explicit_none = build_evolver(_loop_config()).seed_state(xor_adapter, random.Random(0), seeded_front=None)
@@ -281,9 +281,9 @@ def test_seed_state_without_seeded_front_is_unchanged(xor_adapter) -> None:
 
 
 def test_refinement_filters_weight_only_initial_population_before_assessment(tmp_path: Path, xor_task: Task, xor_adapter, solving_genome) -> None:
-    from ardevo.evolution.registry import build_evolver
-    from ardevo.library import ModuleLibrary, graft
-    from ardevo.topology import TopologyTabuSession, TopologyTabuStore
+    from versal.evolution.registry import build_evolver
+    from versal.library import ModuleLibrary, graft
+    from versal.topology import TopologyTabuSession, TopologyTabuStore
 
     library = ModuleLibrary(tmp_path / "lib")
     key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={})
@@ -321,7 +321,7 @@ def test_refinement_filters_weight_only_initial_population_before_assessment(tmp
 
 
 def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Path, xor_task: Task, solving_genome) -> None:
-    from ardevo.orchestrator import comp_task_spec
+    from versal.orchestrator import comp_task_spec
 
     orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct", "composition"], "direct": {"pop_size": 8, "elitism": 2}})
     key = orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
@@ -336,7 +336,7 @@ def test_direct_strategy_seed_entries_clears_bar_in_one_generation(tmp_path: Pat
 
 
 def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Path, xor_task: Task) -> None:
-    from ardevo.orchestrator import comp_task_spec
+    from versal.orchestrator import comp_task_spec
 
     orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct", "composition"], "direct": {"pop_size": 4, "elitism": 1}})
     strategy = dict(orchestrator.strategies)["direct"]
@@ -347,8 +347,8 @@ def test_direct_strategy_without_seed_entries_stamps_no_seed_metric(tmp_path: Pa
 def test_grammar_strategy_seeds_compatible_program_into_direct(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
     from types import SimpleNamespace
 
-    from ardevo import grammar as grammar_module
-    from ardevo.library import ModuleLibrary
+    from versal import grammar as grammar_module
+    from versal.library import ModuleLibrary
 
     loop = build_loop(_loop_config())
     loop.attach_library(ModuleLibrary(tmp_path / "lib"))
@@ -373,7 +373,7 @@ def test_grammar_strategy_seeds_compatible_program_into_direct(monkeypatch, tmp_
 
 
 def test_grammar_strategy_is_zero_cost_before_independent_motifs_exist(tmp_path: Path, xor_task: Task) -> None:
-    from ardevo.library import ModuleLibrary
+    from versal.library import ModuleLibrary
 
     loop = build_loop(_loop_config())
     loop.attach_library(ModuleLibrary(tmp_path / "empty"))

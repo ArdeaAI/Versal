@@ -2,9 +2,9 @@
 
 import torch
 
-from ardevo.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
-from ardevo.substrate import decode
-from ardevo.substrate_batched import BatchedGraphNet
+from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
+from versal.substrate import decode
+from versal.substrate_batched import BatchedGraphNet
 
 
 def _mixed_activation_genome() -> Genome:

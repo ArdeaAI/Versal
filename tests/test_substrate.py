@@ -1,6 +1,6 @@
 import torch
 
-from ardevo.substrate import decode
+from versal.substrate import decode
 
 
 def test_decode_forward_shape(linear_genome):

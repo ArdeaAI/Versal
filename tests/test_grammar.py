@@ -7,9 +7,9 @@ from typing import Any
 
 import pytest
 
-from ardevo.evolution.composition import CompositionGenome, comp_topological_order
-from ardevo.evolution.genome import Genome, InnovationTracker, topological_order
-from ardevo.grammar import (
+from versal.evolution.composition import CompositionGenome, comp_topological_order
+from versal.evolution.genome import Genome, InnovationTracker, topological_order
+from versal.grammar import (
     Grammar,
     GrammarError,
     Program,
@@ -26,7 +26,7 @@ from ardevo.grammar import (
     seed_program,
     validate_program,
 )
-from ardevo.library import COMPOSITION, MODULE, ModuleLibrary
+from versal.library import COMPOSITION, MODULE, ModuleLibrary
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 1}], "output": {"signature": "BINARY|K", "width": 1}}
 _WIDE_IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}

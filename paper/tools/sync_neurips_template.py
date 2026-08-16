@@ -74,7 +74,7 @@ def check_assets() -> tuple[int, int]:
 
 def fetch_assets(*, reset_editable: bool) -> tuple[int, int]:
     lock = _load_lock()
-    request = urllib.request.Request(lock["source_url"], headers={"User-Agent": "ArdEVO-paper-build/1"})
+    request = urllib.request.Request(lock["source_url"], headers={"User-Agent": "Versal-paper-build/1"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             archive = response.read()

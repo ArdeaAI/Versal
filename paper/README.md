@@ -1,4 +1,4 @@
-# ArdEVO Paper Workflow
+# Versal Paper Workflow
 
 The paper has two hand-edited Markdown sources:
 
@@ -36,7 +36,7 @@ uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition 
 uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition conference --mode final
 ```
 
-Outputs are `latex/neurips_2026/ardevo-{mode}.tex` and `.pdf`. Submission rendering removes acknowledgments and uses the official style's anonymization. Submission and final modes fail closed until every checklist macro is answered, the instruction block is removed, evidence verifies, and layout checks pass.
+Outputs are `latex/neurips_2026/versal-{mode}.tex` and `.pdf`. Submission rendering removes acknowledgments and uses the official style's anonymization. Submission and final modes fail closed until every checklist macro is answered, the instruction block is removed, evidence verifies, and layout checks pass.
 
 ## Technical Report Edition
 
@@ -46,7 +46,7 @@ The technical report combines the conference core with the supplement before the
 uv run --with pypandoc-binary==1.15 python paper/tools/build_paper.py --edition technical-report
 ```
 
-It produces `latex/neurips_2026/ardevo-technical-report.tex` and `.pdf`. The technical report supports preprint mode only; submission and final modes are intentionally rejected. Detailed rung tables, extended methods, historical diagnostics, engineering incidents, and provenance belong in the supplement rather than the conference core.
+It produces `latex/neurips_2026/versal-technical-report.tex` and `.pdf`. The technical report supports preprint mode only; submission and final modes are intentionally rejected. Detailed rung tables, extended methods, historical diagnostics, engineering incidents, and provenance belong in the supplement rather than the conference core.
 
 ## Template and Generated Files
 

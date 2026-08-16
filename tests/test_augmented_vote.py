@@ -5,14 +5,14 @@ import random
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
-from ardevo.evaluation import encode, input_width, output_features
-from ardevo.evolution.evaluate import _d4_index_maps, _voted_raw, augmented_vote, hybrid
-from ardevo.evolution.evolver import TaskAdapter
-from ardevo.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
-from ardevo.evolution.init import minimal
-from ardevo.evolution.mutation import MutationContext, add_relation_node
-from ardevo.substrate import decode
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType
+from versal.evaluation import encode, input_width, output_features
+from versal.evolution.evaluate import _d4_index_maps, _voted_raw, augmented_vote, hybrid
+from versal.evolution.evolver import TaskAdapter
+from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind
+from versal.evolution.init import minimal
+from versal.evolution.mutation import MutationContext, add_relation_node
+from versal.substrate import decode
 
 
 def _grid_task(cells: int = 9) -> Task:

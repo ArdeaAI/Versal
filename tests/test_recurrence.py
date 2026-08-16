@@ -4,7 +4,7 @@ import random
 
 import torch
 
-from ardevo.evolution.genome import (
+from versal.evolution.genome import (
     ConnectionGene,
     Genome,
     InnovationTracker,
@@ -15,9 +15,9 @@ from ardevo.evolution.genome import (
     make_acyclic,
     topological_order,
 )
-from ardevo.evolution.mutation import MutationContext, add_recurrent_connection
-from ardevo.evolution.train import _writeback
-from ardevo.substrate import decode, decode_recurrent
+from versal.evolution.mutation import MutationContext, add_recurrent_connection
+from versal.evolution.train import _writeback
+from versal.substrate import decode, decode_recurrent
 
 
 def _accumulator_genome() -> Genome:
@@ -142,7 +142,7 @@ def test_set_connection_keeps_forward_and_recurrent_pairs_distinct() -> None:
     """B1 regression: a forward and a recurrent gene on the SAME node pair are different genes."""
     from dataclasses import replace as gene_replace
 
-    from ardevo.evolution.genome import set_connection
+    from versal.evolution.genome import set_connection
 
     genome = _accumulator_genome()
     forward = ConnectionGene(3, 3, 0.5, True, 9, recurrent=False)
@@ -160,7 +160,7 @@ def test_add_node_split_preserves_recurrence() -> None:
     genome = _accumulator_genome()
     ctx = MutationContext(innovations=InnovationTracker.from_genomes([genome]), activations=["identity"], default_activation="identity")
     rng = random.Random(4)
-    from ardevo.evolution.mutation import add_node
+    from versal.evolution.mutation import add_node
 
     child = genome
     for _ in range(50):  # rng.choice must eventually pick the recurrent self-loop

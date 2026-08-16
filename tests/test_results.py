@@ -1,8 +1,8 @@
 import json
 
-from ardevo.evolution.genome import genome_from_dict, genome_to_dict
-from ardevo.results import render_speciation, write_stats
-from ardevo.substrate import decode
+from versal.evolution.genome import genome_from_dict, genome_to_dict
+from versal.results import render_speciation, write_stats
+from versal.substrate import decode
 
 
 def test_genome_dict_round_trip_preserves_accuracy(solving_genome, xor_adapter):

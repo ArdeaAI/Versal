@@ -298,19 +298,19 @@
     "substrate"
   ],
   "console_scripts": {
-    "ablation_suite": "ardevo.tools.ablation_suite:main",
-    "app": "ardevo.main:main",
-    "benchmark": "ardevo.tools.bench_throughput:main",
-    "cppn_spike": "ardevo.tools.cppn_spike:main",
-    "experiment_archive": "ardevo.tools.experiment_archive:main",
-    "library_gc": "ardevo.tools.library_gc:main",
-    "motif_census": "ardevo.tools.motif_census:main",
-    "render": "ardevo.tools.net_gallery:main",
-    "router_migrate": "ardevo.tools.router_migrate:main",
-    "run_matrix": "ardevo.tools.run_matrix:main",
-    "run_report": "ardevo.tools.run_report:main",
-    "rung_doctor": "ardevo.tools.rung_doctor:main",
-    "runtime_inventory": "ardevo.tools.runtime_inventory:main"
+    "ablation_suite": "versal.tools.ablation_suite:main",
+    "app": "versal.main:main",
+    "benchmark": "versal.tools.bench_throughput:main",
+    "cppn_spike": "versal.tools.cppn_spike:main",
+    "experiment_archive": "versal.tools.experiment_archive:main",
+    "library_gc": "versal.tools.library_gc:main",
+    "motif_census": "versal.tools.motif_census:main",
+    "render": "versal.tools.net_gallery:main",
+    "router_migrate": "versal.tools.router_migrate:main",
+    "run_matrix": "versal.tools.run_matrix:main",
+    "run_report": "versal.tools.run_report:main",
+    "rung_doctor": "versal.tools.rung_doctor:main",
+    "runtime_inventory": "versal.tools.runtime_inventory:main"
   },
   "registries": {
     "comp_crossover": [

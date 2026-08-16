@@ -4,11 +4,11 @@ import random
 
 import torch
 
-from ardevo.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, support_loader
-from ardevo.evaluation import support_loss
-from ardevo.evolution.train import gradient
-from ardevo.temporal import TemporalEncoder, temporal_adapter
 from tests.test_recurrence import _running_parity_genome
+from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, TaskMeta, ValueType, support_loader
+from versal.evaluation import support_loss
+from versal.evolution.train import gradient
+from versal.temporal import TemporalEncoder, temporal_adapter
 
 
 def test_t1_encoding_matches_level0() -> None:

@@ -9,11 +9,11 @@ from typing import Any
 
 import pytest
 
-import ardevo.external_archive as archive_module
-from ardevo import rendering
-from ardevo.external_archive import ArchiveManager, ExperimentLock, list_runs, restore_snapshot
-from ardevo.tools.experiment_archive import main as archive_main
-from ardevo.trials.orchestrated_trial import OrchestratedTrial
+import versal.external_archive as archive_module
+from versal import rendering
+from versal.external_archive import ArchiveManager, ExperimentLock, list_runs, restore_snapshot
+from versal.tools.experiment_archive import main as archive_main
+from versal.trials.orchestrated_trial import OrchestratedTrial
 
 
 def _experiment_tree(root: Path, name: str) -> tuple[Path, Path]:
@@ -143,11 +143,11 @@ def test_verify_rejects_manifest_snapshot_id_redirect(tmp_path: Path) -> None:
 
 def test_archive_config_missing_uri_and_backend_mismatch_are_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run, library = _experiment_tree(tmp_path, "alpha")
-    monkeypatch.delenv("ARDEVO_MISSING_ARCHIVE", raising=False)
+    monkeypatch.delenv("VERSAL_MISSING_ARCHIVE", raising=False)
 
     assert ArchiveManager.from_config({"archive": {"enabled": False}}, run, library) is None
-    with pytest.raises(RuntimeError, match="ARDEVO_MISSING_ARCHIVE.*empty"):
-        ArchiveManager.from_config({"archive": {"enabled": True, "uri_env": "ARDEVO_MISSING_ARCHIVE"}}, run, library)
+    with pytest.raises(RuntimeError, match="VERSAL_MISSING_ARCHIVE.*empty"):
+        ArchiveManager.from_config({"archive": {"enabled": True, "uri_env": "VERSAL_MISSING_ARCHIVE"}}, run, library)
     with pytest.raises(ValueError, match="backend='s3'"):
         ArchiveManager.from_config({"archive": {"enabled": True, "backend": "s3", "uri": (tmp_path / "remote").resolve().as_uri()}}, run, library)
 
