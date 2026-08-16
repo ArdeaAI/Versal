@@ -85,10 +85,15 @@ class StrategyResult:
     generations_used: int
     champion_comp: AssessedComposition | None = None  # composition-shaped winner (verified fresh)
     champion_genome: Genome | None = None  # module-shaped winner (trained weights written back)
+    # Best support-search payload retained only for one later held-out report. Unlike a champion,
+    # these candidates have not cleared the verification/admission contract.
+    report_candidate_comp: AssessedComposition | None = None
+    report_candidate_genome: Genome | None = None
     champion_metrics: dict[str, float] = field(default_factory=dict)
     # Held-out metrics are kept on a separate rail. They are reporting only and must never affect
     # admission, refinement, robustness ranking, or the next task's search state.
     report_metrics: dict[str, float] = field(default_factory=dict)
+    report_attempted: bool = False
     # A routed winner is a RECORD (versal.routing.RoutedSolution), not an admissible payload: the
     # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
     champion_routed: Any | None = None
@@ -107,6 +112,12 @@ class StrategyResult:
     # Present only for resolution-independent site programs. The genome remains ordinary.
     field_template: dict[str, Any] | None = None
     representation: str | None = None
+
+    @property
+    def has_report_candidate(self) -> bool:
+        """Whether a support-selected payload is available for held-out reporting."""
+
+        return self.champion_comp is not None or self.champion_genome is not None or self.report_candidate_comp is not None or self.report_candidate_genome is not None
 
     @property
     def has_admissible_champion(self) -> bool:
@@ -178,12 +189,13 @@ def _restamp_composition(source: CompositionGenome, tracker: InnovationTracker) 
 
 @EVOLVE_STRATEGY.register("composition")
 def _build_composition(config: dict[str, Any]) -> "CompositionStrategy":
-    return CompositionStrategy()
+    return CompositionStrategy(blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)))
 
 
 @dataclass
 class CompositionStrategy:
     name: str = "composition"
+    blind_query: bool = False
 
     @staticmethod
     def _initial_glue_values(spec: CompTaskSpec, runtime: StrategyRuntime, seed_comps: list[CompositionGenome] | None) -> int:
@@ -261,7 +273,26 @@ class CompositionStrategy:
                 runtime.on_generation(self.name, generation, best, mean_fitness)
 
         best = runtime.loop.run_task(spec, runtime.state, budget=budget, stop=runtime.stall_factory(budget), seed_comps=seed_comps, on_generation=hook)
-        verified = self._verify(best, spec, runtime)
+        verification_timed_out = False
+        try:
+            verified = self._verify(best, spec, runtime)
+        except TimeoutError:
+            if not self.blind_query:
+                raise
+            verified = None
+            verification_timed_out = True
+        if self.blind_query and (runtime.should_stop() or verification_timed_out):
+            return StrategyResult(
+                strategy=self.name,
+                metric=runtime.metric_of(best),
+                generations_used=progress["generations"],
+                report_candidate_comp=best,
+                champion_metrics=dict(best.metrics),
+                size_metrics=comp_size_metrics(best.comp),
+                resource_metrics=combined_resource_metrics,
+                representation="composition",
+            )
+        assert verified is not None
         return StrategyResult(
             strategy=self.name,
             metric=runtime.metric_of(verified),
@@ -356,6 +387,25 @@ class FieldStrategy:
         decision = runtime.loop.resource_policy.assess_stage(footprint)
         return StrategyPreflight(decision.accepted, footprint.representation, footprint, decision, decision.reason)
 
+    def evaluate_report(self, genome: Genome, task: Task, field_template: dict[str, Any]) -> dict[str, float]:
+        """Decode a field payload and evaluate its held-out query without training."""
+
+        if not task.query:
+            return {"query_loss": math.inf}
+        from versal.field import decode_field_payload, evaluate_field_module
+
+        payload = genome_to_dict(genome)
+        payload["field_template"] = field_template
+        try:
+            module, contract = decode_field_payload(
+                payload,
+                library=getattr(self.evolver, "library", None),
+                max_inline_depth=int(getattr(self.evolver, "max_inline_depth", DEFAULT_MAX_INLINE_DEPTH)),
+            )
+        except (KeyError, ValueError):
+            return {}
+        return evaluate_field_module(module, task, contract, split="query", chunk_size=self.verify_chunk_size, deadline=None)
+
     def __call__(
         self,
         task: Task,
@@ -446,16 +496,28 @@ class FieldStrategy:
                 break
         if best_full is None:
             verify_front()
+        if self.blind_query and (runtime.should_stop() or best_full is None):
+            metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
+            best_sampled = max(state.population, key=lambda item: item.fitness)
+            return StrategyResult(
+                strategy=self.name,
+                metric=runtime.metric_of(best_sampled),
+                generations_used=generations,
+                report_candidate_genome=best_sampled.genome,
+                champion_metrics=dict(best_sampled.metrics),
+                size_metrics=_module_size_metrics(best_sampled.genome, state.population),
+                resource_metrics=metrics,
+                strategy_metrics={
+                    "field_deadline_before_full_verification": 1.0,
+                    "field_application_sites": float(len(all_sites)),
+                    "field_sampled_sites": float(len(audit_sites)),
+                },
+                field_template=contract.to_dict(),
+                representation=f"field/{contract.version}",
+            )
         if best_full is None:
             metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
             return StrategyResult(self.name, 0.0, generations, resource_metrics=metrics, strategy_metrics={"field_deadline_before_full_verification": 1.0})
-        report: dict[str, float] = {}
-        if self.blind_query and task.query and not runtime.should_stop():
-            assert best_full.module is not None
-            try:
-                report = evaluate_field_module(best_full.module, task, contract, split="query", chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
-            except TimeoutError:
-                report = {}
         resource_metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
         return StrategyResult(
             strategy=self.name,
@@ -463,7 +525,6 @@ class FieldStrategy:
             generations_used=generations,
             champion_genome=best_full.genome,
             champion_metrics=dict(best_full.metrics),
-            report_metrics=report,
             size_metrics=_module_size_metrics(best_full.genome, state.population),
             resource_metrics=resource_metrics,
             strategy_metrics={
@@ -604,6 +665,20 @@ class DirectStrategy:
             max_inline_depth=max_inline_depth,
         )
 
+    def evaluate_report(self, genome: Genome, task: Task) -> dict[str, float]:
+        """Evaluate one support-selected payload on the full task without training."""
+
+        previous_deadline = getattr(self.evolver, "deadline", None)
+        previous_callback = getattr(self.evolver, "deadline_exceeded", None)
+        self.evolver.deadline = None
+        self.evolver.deadline_exceeded = None
+        try:
+            assessed = self.evolver.evaluate_only(genome, self._adapter(task, include_query=True))
+            return {} if assessed.module is None else dict(assessed.metrics)
+        finally:
+            self.evolver.deadline = previous_deadline
+            self.evolver.deadline_exceeded = previous_callback
+
     @staticmethod
     def _grid_shape(task: Task) -> tuple[int, ...] | None:
         support_input, _support_output = support_loader(task)
@@ -712,7 +787,7 @@ class DirectStrategy:
                 runtime.on_generation(self.name, generation, generation_best, mean_fitness)
             runtime.state.generation += 1  # the global clock spans strategies for monotonic logging
             generations = generation + 1
-            if runtime.accepted(best) or stop(generation, best):
+            if runtime.accepted(best) or stop(generation, best) or (self.blind_query and runtime.should_stop()):
                 break
             self.evolver.advance(state, adapter)
             if state.topology_exhausted:
@@ -720,27 +795,48 @@ class DirectStrategy:
 
         # Verification: the genome PAYLOAD (not the live module object) must reproduce the metric,
         # because the payload is what admission persists and lookups re-decode.
-        if best.module is None and runtime.should_stop():
+        verification_timed_out = runtime.should_stop() and self.blind_query
+        verified: Assessed | None = None
+        if not verification_timed_out:
+            if best.module is None and runtime.should_stop():
+                return StrategyResult(
+                    strategy=self.name,
+                    metric=0.0,
+                    generations_used=generations,
+                    champion_metrics=dict(best.metrics),
+                    resource_metrics=resource_metrics,
+                    strategy_metrics={"deadline_before_fully_evaluated_candidate": 1.0},
+                )
+            try:
+                verified = best if runtime.should_stop() else self.evolver.evaluate_only(best.genome, adapter)
+            except TimeoutError:
+                if not self.blind_query:
+                    raise
+                verification_timed_out = True
+        if verification_timed_out:
+            final_best = max(state.population, key=lambda item: item.fitness)
+            if final_best.fitness > best.fitness:
+                best = final_best
             return StrategyResult(
                 strategy=self.name,
-                metric=0.0,
+                metric=runtime.metric_of(best),
                 generations_used=generations,
+                report_candidate_genome=best.genome,
                 champion_metrics=dict(best.metrics),
+                seed_metric=seed_metric,
+                size_metrics=_module_size_metrics(best.genome, state.population),
                 resource_metrics=resource_metrics,
                 strategy_metrics={"deadline_before_fully_evaluated_candidate": 1.0},
+                representation=preflight.representation,
             )
-        verified = best if runtime.should_stop() else self.evolver.evaluate_only(best.genome, adapter)
-        reported = self.evolver.evaluate_only(verified.genome, self._adapter(task, include_query=True)) if self.blind_query and not runtime.should_stop() else None
+        assert verified is not None
         search_metric = runtime.metric_of(verified)
         return StrategyResult(
             strategy=self.name,
-            # Acceptance remains support-only in blind mode. Query metrics on ``verified`` are a
-            # one-shot report attached to the champion and cannot steer search or early stopping.
-            metric=search_metric if self.blind_query else runtime.metric_of(verified),
+            metric=search_metric,
             generations_used=generations,
             champion_genome=verified.genome,
             champion_metrics=dict(verified.metrics),
-            report_metrics=dict(reported.metrics) if reported is not None else {},
             seed_metric=seed_metric,
             size_metrics=_module_size_metrics(verified.genome, state.population),
             resource_metrics=resource_metrics,
@@ -753,6 +849,7 @@ def _build_grammar(config: dict[str, Any]) -> "GrammarStrategy":
     table = config.get("orchestrator", {}).get("grammar", {}) or {}
     return GrammarStrategy(
         direct=_build_direct(config),
+        blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)),
         max_productions=max(1, int(table.get("max_productions", 12))),
         candidates_per_production=max(1, int(table.get("candidates_per_production", 3))),
         mutation_steps=max(0, int(table.get("mutation_steps", 2))),
@@ -768,6 +865,7 @@ class GrammarStrategy:
     """Search programs assembled only from motifs independently rediscovered by evolution."""
 
     direct: Callable[..., StrategyResult]
+    blind_query: bool = False
     max_productions: int = 12
     candidates_per_production: int = 3
     mutation_steps: int = 2
@@ -867,7 +965,7 @@ class GrammarStrategy:
                 return result
         remaining = max(0, budget - used)
         if comp_seeds and remaining > 0:
-            result = CompositionStrategy()(task, spec, runtime, budget=remaining, seed_comps=[*(seed_comps or []), *comp_seeds])
+            result = CompositionStrategy(blind_query=self.blind_query)(task, spec, runtime, budget=remaining, seed_comps=[*(seed_comps or []), *comp_seeds])
             used += result.generations_used
             results.append(result)
         winner = max(results, key=lambda item: item.metric)

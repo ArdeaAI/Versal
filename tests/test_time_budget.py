@@ -10,13 +10,14 @@ import time
 import types
 from pathlib import Path
 
+import pytest
 import torch
 
 from tests.test_orchestrator import _fake_run_task, _orchestrator, _patch_run_task
 from versal.dataset.icarus import Task
 from versal.evolution.genome import Genome
 from versal.orchestrator import StallDetector
-from versal.strategy import EVOLVE_STRATEGY, StrategyResult
+from versal.strategy import EVOLVE_STRATEGY, DirectStrategy, StrategyResult
 
 _CALLS: list[str] = []
 
@@ -49,6 +50,38 @@ def _build_tb_stone(config: dict):
         return StrategyResult(strategy="tb_stone", metric=0.9, generations_used=1, champion_genome=_STONE_GENOME["genome"], champion_metrics=metrics)
 
     return run
+
+
+def _blind_direct_orchestrator(tmp_path: Path, *, table: dict | None = None, **overrides):
+    settings = {
+        "max_depth": 0,
+        "evolve": ["direct"],
+        "decompose": [],
+        "blind_query": True,
+        "search_metric": "support_accuracy",
+        "report_metric": "query_accuracy",
+        **(table or {}),
+    }
+    return _orchestrator(tmp_path, table=settings, **overrides)
+
+
+def _direct_best(best: Genome, *, generations_used: int = 1, verified: bool = True) -> StrategyResult:
+    return StrategyResult(
+        strategy="direct",
+        metric=0.8,
+        generations_used=generations_used,
+        champion_genome=best if verified else None,
+        report_candidate_genome=None if verified else best,
+        champion_metrics={"support_accuracy": 0.8, "support_loss": 0.2},
+    )
+
+
+def _patch_direct_reporter(monkeypatch, evaluated: list[Genome], report_metrics: dict[str, float]) -> None:
+    def evaluate_report(_strategy, genome: Genome, _task: Task) -> dict[str, float]:
+        evaluated.append(genome)
+        return dict(report_metrics)
+
+    monkeypatch.setattr(DirectStrategy, "evaluate_report", evaluate_report, raising=False)
 
 
 def test_off_is_byte_identical(tmp_path: Path) -> None:
@@ -105,33 +138,220 @@ def test_gradient_deadline_interrupts_before_optimizer_step(solving_genome, xor_
         assert torch.equal(old, current)
 
 
-def test_total_timeout_finalizes_a_remembered_parent_champion(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
-    orchestrator = _orchestrator(
+def test_timed_out_population_best_is_still_evaluated_on_query(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(tmp_path, table={"max_task_seconds": 3600})
+    best = solving_genome.clone()
+    evaluated: list[Genome] = []
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return _direct_best(best, verified=False)
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    _patch_direct_reporter(monkeypatch, evaluated, {"query_accuracy": 0.7, "query_loss": 0.3})
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.failure_stage == "time_budget"
+    assert attempt.support_accuracy == 0.8
+    assert attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
+    assert orchestrator.counters["time_budget_hits"] == 1
+    assert len(evaluated) == 1 and evaluated[0] is best
+
+
+def test_timed_out_above_threshold_champion_is_reported_but_not_accepted(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(
         tmp_path,
-        table={"max_total_task_seconds": 1, "blind_query": True, "search_metric": "support_accuracy", "report_metric": "query_accuracy"},
+        table={"max_task_seconds": 3600, "accept_metric": "support_accuracy", "accept_threshold": 0.95},
     )
-    result = StrategyResult(
-        strategy="direct",
-        metric=0.8,
-        generations_used=3,
-        champion_genome=solving_genome,
-        champion_metrics={"support_accuracy": 0.8, "support_loss": 0.2},
+    best = solving_genome.clone()
+    evaluated: list[Genome] = []
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return StrategyResult(
+            strategy="direct",
+            metric=1.0,
+            generations_used=1,
+            champion_genome=best,
+            champion_metrics={"support_accuracy": 1.0, "support_loss": 0.0},
+        )
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    _patch_direct_reporter(monkeypatch, evaluated, {"query_accuracy": 0.7, "query_loss": 0.3})
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.failure_stage == "time_budget"
+    assert attempt.query_status == "evaluated"
+    assert evaluated == [best]
+    assert orchestrator.counters["accepts"] == 0
+    assert orchestrator.counters["time_budget_hits"] == 1
+
+
+def test_report_overrun_does_not_reclassify_support_success_as_timeout(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(
+        tmp_path,
+        table={"max_task_seconds": 3600, "accept_metric": "support_accuracy", "accept_threshold": 0.95},
     )
+    best = solving_genome.clone()
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        return StrategyResult(
+            strategy="direct",
+            metric=1.0,
+            generations_used=1,
+            champion_genome=best,
+            champion_metrics={"support_accuracy": 1.0, "support_loss": 0.0},
+        )
+
+    def report_after_deadline(_strategy, genome: Genome, _task: Task) -> dict[str, float]:
+        assert genome is best
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return {"query_accuracy": 0.7, "query_loss": 0.3}
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    monkeypatch.setattr(DirectStrategy, "evaluate_report", report_after_deadline)
+
+    assert orchestrator.solve(xor_task) is not None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "evolved"
+    assert attempt.failure_stage is None
+    assert attempt.query_accuracy == 0.7
+    assert orchestrator.counters["time_budget_hits"] == 0
+
+
+def test_report_overrun_does_not_reclassify_below_threshold_support_as_timeout(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(
+        tmp_path,
+        table={"max_task_seconds": 3600, "accept_metric": "support_accuracy", "accept_threshold": 0.95},
+    )
+    best = solving_genome.clone()
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        return _direct_best(best)
+
+    def report_after_deadline(_strategy, genome: Genome, _task: Task) -> dict[str, float]:
+        assert genome is best
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return {"query_accuracy": 0.7, "query_loss": 0.3}
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    monkeypatch.setattr(DirectStrategy, "evaluate_report", report_after_deadline)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.failure_stage is None
+    assert attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
+    assert orchestrator.counters["time_budget_hits"] == 0
+
+
+def test_below_threshold_population_best_is_still_evaluated_on_query(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(tmp_path, table={"accept_threshold": 0.95})
+    best = solving_genome.clone()
+    evaluated: list[Genome] = []
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        return _direct_best(best)
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    _patch_direct_reporter(monkeypatch, evaluated, {"query_accuracy": 0.7, "query_loss": 0.3})
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.failure_stage is None
+    assert attempt.support_accuracy == 0.8
+    assert attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
+    assert len(evaluated) == 1 and evaluated[0] is best
+
+
+@pytest.mark.parametrize(
+    ("report_metrics", "expected_status"),
+    [
+        pytest.param({}, "evaluation_unavailable", id="metric-unavailable"),
+        pytest.param({"query_loss": float("inf")}, "query_split_unavailable", id="query-split-unavailable"),
+    ],
+)
+def test_timed_out_attempted_query_evaluation_reports_its_actual_status(
+    tmp_path: Path,
+    xor_task: Task,
+    solving_genome: Genome,
+    monkeypatch,
+    report_metrics: dict[str, float],
+    expected_status: str,
+) -> None:
+    orchestrator = _blind_direct_orchestrator(tmp_path, table={"max_task_seconds": 3600})
+    best = solving_genome.clone()
+    evaluated: list[Genome] = []
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return _direct_best(best, verified=False)
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    _patch_direct_reporter(monkeypatch, evaluated, report_metrics)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.failure_stage == "time_budget"
+    assert attempt.query_accuracy is None
+    assert attempt.query_status == expected_status
+    assert attempt.query_status != "time_limit_before_evaluation"
+    assert len(evaluated) == 1 and evaluated[0] is best
+
+
+def test_shutdown_skips_query_evaluation_for_a_present_candidate(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    shutdown = {"requested": False}
+    orchestrator = _blind_direct_orchestrator(tmp_path, shutdown_requested=lambda: shutdown["requested"])
+    best = solving_genome.clone()
+    evaluated: list[Genome] = []
+
+    def support_search(_strategy, _task, _spec, _runtime, *, budget, **_kwargs) -> StrategyResult:
+        shutdown["requested"] = True
+        return _direct_best(best, verified=False)
+
+    monkeypatch.setattr(DirectStrategy, "__call__", support_search)
+    _patch_direct_reporter(monkeypatch, evaluated, {"query_accuracy": 0.7, "query_loss": 0.3})
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.outcome == "failed"
+    assert attempt.failure_stage == "shutdown_requested"
+    assert attempt.support_accuracy == 0.8
+    assert attempt.query_accuracy is None
+    assert attempt.query_status == "shutdown_before_evaluation"
+    assert evaluated == []
+
+
+def test_total_timeout_finalizes_a_remembered_parent_champion(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch) -> None:
+    orchestrator = _blind_direct_orchestrator(tmp_path, table={"max_total_task_seconds": 1})
+    best = solving_genome.clone()
+    result = _direct_best(best, generations_used=3, verified=False)
     orchestrator._best_parent_result = result
-    finalized: list[bool] = []
-
-    def attach(candidate, _spec):
-        finalized.append(True)
-        candidate.report_metrics = {"query_accuracy": 0.7, "query_loss": 0.3}
-        return candidate
-
-    monkeypatch.setattr(orchestrator, "_attach_report_metrics", attach)
+    evaluated: list[Genome] = []
+    _patch_direct_reporter(monkeypatch, evaluated, {"query_accuracy": 0.7, "query_loss": 0.3})
     orchestrator._record_total_timeout(xor_task, 0)
 
     attempt = orchestrator.attempts[-1]
-    assert finalized == [True]  # reporting is allowed after the search deadline
+    assert attempt.outcome == "failed"
+    assert len(evaluated) == 1 and evaluated[0] is best
     assert attempt.strategy == "direct" and attempt.generations == 3
     assert attempt.support_accuracy == 0.8 and attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
     assert attempt.failure_stage == "time_budget"
 
 

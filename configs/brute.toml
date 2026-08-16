@@ -10,21 +10,21 @@ experiment = "orchestrated_overmind_brute"
 n_samples = 400
 
 [schedule]
-rungs = [1]
-tasks_per_rung = 2000
+rungs = [18]
+tasks_per_rung = 200
 
 [orchestrator]
-tasks = 2000
-max_task_seconds = 7200
-max_total_task_seconds = 7200
+tasks = 200
+max_task_seconds = 240
+max_total_task_seconds = 480
 
   [orchestrator.budgets]
-  depth0 = 2000
-  depth1 = 1000
-  depth2 = 500
-  depth3 = 250
-  depth4 = 125
-  depth5 = 62
-  depth6 = 31
-  depth7 = 15
-  depth8 = 7
+  depth0 = 200
+  depth1 = 100
+  depth2 = 60
+  depth3 = 50
+  depth4 = 40
+  depth5 = 30
+  depth6 = 20
+  depth7 = 10
+  depth8 = 10

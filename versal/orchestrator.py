@@ -454,6 +454,7 @@ class Orchestrator:
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
         self._stepping_stone = False  # marks the admission inside a wall-ledger shelving
         self._last_refine_strategy_metrics: dict[str, float] = {}
+        self._last_decompose_report_overrun = False
 
     # --- public API ---------------------------------------------------------------------------------
 
@@ -521,6 +522,8 @@ class Orchestrator:
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
+        result: StrategyResult | None = None
+        support_timed_out: bool | None = None
         decomposed_first = False
         if self._wants_decompose_first(task, spec) and depth < self.max_depth and not self._deadline_exceeded():
             decomposed_first = True
@@ -531,20 +534,27 @@ class Orchestrator:
                 self._active_stages["decompose_first"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
+            if self._deadline_exceeded():
+                result = self._remember_or_recover_parent_result(StrategyResult("decompose", metric=0.0, generations_used=0), depth)
+                support_timed_out = self._time_deadline_exceeded() and not self._last_decompose_report_overrun
             # Fall through to the ordinary ladder: a scale-safe init (factored/sparse) rides the
             # same config, so the flat attempt below stays affordable even at init-wall widths.
 
-        stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
-        if stone_modules or stone_comps:
-            self.counters["wall_seeded_attempts"] += 1
-        result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
-        result = self._remember_or_recover_parent_result(result, depth)
+        if result is None:
+            stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
+            if stone_modules or stone_comps:
+                self.counters["wall_seeded_attempts"] += 1
+            result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
+            result = self._remember_or_recover_parent_result(result, depth)
+            support_timed_out = self._time_deadline_exceeded()
+        assert result is not None and support_timed_out is not None
         if self.blind_query and not self._shutdown_requested():
-            result = self._attach_report_metrics(result, report_spec)
+            result = self._attach_report_metrics(result, task, report_spec)
             _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_admissible_champion:
+            if result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
-        if self._accepts_result(result):
+        stopping = self._shutdown_requested()
+        if not support_timed_out and not stopping and self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=None)
             self.display.stage_result(
                 "persist",
@@ -556,9 +566,12 @@ class Orchestrator:
             self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key))
             return self._solution_from_result(result, key)
 
-        stopping = self._shutdown_requested()
-        timed_out = self._time_deadline_exceeded()
-        halted = stopping or timed_out
+        # The held-out pass is intentionally allowed to overrun the support deadline. Such an
+        # overrun blocks new decomposition work, but it must not relabel completed support search
+        # as a timeout. A later decomposition can still establish a genuine support timeout below.
+        timed_out = support_timed_out
+        deadline_blocks_more_work = self._time_deadline_exceeded()
+        halted = stopping or deadline_blocks_more_work
         if depth < self.max_depth and not halted and not decomposed_first:  # decompose-first already spent its shot
             decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
@@ -568,8 +581,9 @@ class Orchestrator:
                 self._active_stages["decompose"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
+            result = self._remember_or_recover_parent_result(result, depth)
             stopping = self._shutdown_requested()
-            timed_out = self._time_deadline_exceeded()
+            timed_out = self._time_deadline_exceeded() and not self._last_decompose_report_overrun
             halted = stopping or timed_out
 
         self.counters["failures"] += 1
@@ -600,21 +614,62 @@ class Orchestrator:
         logger.debug("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
         return None
 
-    def _attach_report_metrics(self, result: StrategyResult, report_spec: CompTaskSpec) -> StrategyResult:
-        """Evaluate the selected composition once against held-out query tensors.
+    def _attach_report_metrics(self, result: StrategyResult, task: Task, report_spec: CompTaskSpec) -> StrategyResult:
+        """Evaluate the selected support-search payload once on held-out query data."""
 
-        Direct strategy champions already attach their one-shot report through their structured or
-        flat adapter. Routed-only state has no immutable payload to re-evaluate here; distilled
-        routed winners arrive as compositions and use the same rail below.
-        """
+        if result.report_attempted or not result.has_report_candidate:
+            return result
+        composition_candidate = result.champion_comp or result.report_candidate_comp
+        if composition_candidate is not None:
+            result.report_attempted = True
+            previous_deadline = getattr(self.loop.evolver, "deadline", None)
+            previous_callback = getattr(self.loop.evolver, "deadline_exceeded", None)
+            self.loop.evolver.deadline = None
+            self.loop.evolver.deadline_exceeded = None
+            try:
+                try:
+                    reported = self.loop.assess_composition(composition_candidate.comp, report_spec, self.state, train=False)
+                except TimeoutError:
+                    return result
+                if reported.net is not None:
+                    result.report_metrics = dict(reported.metrics)
+                return result
+            finally:
+                self.loop.evolver.deadline = previous_deadline
+                self.loop.evolver.deadline_exceeded = previous_callback
 
-        if result.champion_comp is None:
+        candidate = result.champion_genome or result.report_candidate_genome
+        assert candidate is not None
+        strategies = dict(self.strategies)
+        if result.field_template is not None:
+            reporter = strategies.get("field")
+            args = (candidate, task, result.field_template)
+        else:
+            reporter = strategies.get("direct")
+            if reporter is None and result.strategy == "grammar":
+                reporter = getattr(strategies.get("grammar"), "direct", None)
+            args = (candidate, task)
+
+        evaluate_report = getattr(reporter, "evaluate_report", None)
+        if not callable(evaluate_report):
             return result
-        reported = self.loop.assess_composition(result.champion_comp.comp, report_spec, self.state, train=False)
-        if reported.net is None:
+        result.report_attempted = True
+        evolver = getattr(reporter, "evolver", None)
+        previous_deadline = getattr(evolver, "deadline", None) if evolver is not None else None
+        previous_callback = getattr(evolver, "deadline_exceeded", None) if evolver is not None else None
+        if evolver is not None:
+            evolver.deadline = None
+            evolver.deadline_exceeded = None
+        try:
+            try:
+                result.report_metrics = dict(evaluate_report(*args))
+            except TimeoutError:
+                result.report_metrics = {}
             return result
-        result.report_metrics = dict(reported.metrics)
-        return result
+        finally:
+            if evolver is not None:
+                evolver.deadline = previous_deadline
+                evolver.deadline_exceeded = previous_callback
 
     # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
 
@@ -675,8 +730,8 @@ class Orchestrator:
             self._failure_stage = "time_budget"
         recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
         if recovered is not None:
-            if self.blind_query and not recovered.report_metrics:
-                recovered = self._attach_report_metrics(recovered, comp_task_spec(task, structured_grid=self.structured_grid))
+            if self.blind_query and not self._shutdown_requested() and not recovered.report_attempted:
+                recovered = self._attach_report_metrics(recovered, task, comp_task_spec(task, structured_grid=self.structured_grid))
             attempt = self._attempt_from_result(
                 recovered,
                 task=task.meta.name,
@@ -848,11 +903,7 @@ class Orchestrator:
                 if ladder_metrics.get("handoff_count", 0.0):
                     notes.append("executable handoff prepared")
             if declined:
-                notes.append(
-                    "explicit flat substrate cannot fit; continuing with field search/composition"
-                    if name == "direct"
-                    else "resource guard skipped allocation"
-                )
+                notes.append("explicit flat substrate cannot fit; continuing with field search/composition" if name == "direct" else "resource guard skipped allocation")
             self.display.stage_result(
                 name,
                 "accepted" if self._accepts_result(outcome) else ("skipped" if declined else "continue"),
@@ -870,9 +921,12 @@ class Orchestrator:
             if remaining <= 0:
                 break
         # Metric-only diagnostics (for example an adapter-space routed score whose pathway could
-        # not be distilled) must not displace a real below-bar champion that the wall ledger can
-        # preserve. When every strategy declined, the metric remains a useful failure diagnostic.
-        best = max(results, key=lambda item: (item.has_admissible_champion, item.metric))
+        # not be distilled) must not displace a real support-selected payload that can receive the
+        # mandatory held-out report. When every strategy declined, the metric remains useful.
+        if self.blind_query:
+            best = max(results, key=lambda item: (item.has_report_candidate, item.metric))
+        else:
+            best = max(results, key=lambda item: item.metric)
         best.resource_metrics = dict(resource_metrics)
         best.strategy_metrics = dict(ladder_metrics)
         return best
@@ -947,6 +1001,8 @@ class Orchestrator:
                 result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
         finally:
             target.topology_tabu = previous_tabu
+        support_timed_out = self._time_deadline_exceeded()
+        stopping = self._shutdown_requested()
         if topology_tabu is not None:
             topology_tabu.commit()
             topology_metrics = topology_tabu.metrics()
@@ -956,14 +1012,17 @@ class Orchestrator:
             self.counters["topology_retry_exhaustions"] += int(topology_metrics["topology_retry_exhaustions"])
             self.counters["topology_exhausted_attempts"] += int(topology_metrics["topology_exhausted"])
         self._last_refine_strategy_metrics = dict(result.strategy_metrics)
-        if self.blind_query:
-            result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
+        if self.blind_query and not stopping:
+            result = self._attach_report_metrics(result, task, comp_task_spec(task, structured_grid=self.structured_grid))
+        stopping = stopping or self._shutdown_requested()
         self.counters["refine_generations"] += result.generations_used
 
         candidate = self._candidate_rank(result)
         incumbent = self._incumbent_rank(hit, entry, seed_metric=result.seed_metric)
         improves = (
             candidate is not None
+            and not support_timed_out
+            and not stopping
             # A robustness/size tie-break can sit epsilon below an at-the-bar incumbent; never shelve below the bar.
             and self._accepts_result(result)
             # Identity check FIRST: the incumbent topology retrained on this variant is NOT a new
@@ -1235,8 +1294,13 @@ class Orchestrator:
                 continue
             self.library.note_reuse(entry.key, channel="lookup")
             metric = self._metric(assessment)
-            report_assessment = self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment
-            report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else metric
+            shutdown_before_report = self.blind_query and self._shutdown_requested()
+            report_assessment = (
+                None
+                if shutdown_before_report
+                else (self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment)
+            )
+            report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else (None if self.blind_query else metric)
             combined = dict(assessment.metrics) | (dict(report_assessment.metrics) if report_assessment is not None else {})
             task_metrics = _task_metrics(combined)
             if "field_template" in entry.payload:
@@ -1253,7 +1317,7 @@ class Orchestrator:
                 support_accuracy=support_accuracy,
                 query_accuracy=query_accuracy,
                 support_status="evaluated" if support_accuracy is not None else "evaluation_unavailable",
-                query_status="evaluated" if query_accuracy is not None else "evaluation_unavailable",
+                query_status="shutdown_before_evaluation" if shutdown_before_report else ("evaluated" if query_accuracy is not None else "evaluation_unavailable"),
             )
         return None
 
@@ -1349,6 +1413,7 @@ class Orchestrator:
         return self._report(assessment) if report else self._metric(assessment)
 
     def _decompose_and_recurse(self, task: Task, spec: CompTaskSpec, depth: int, budget: int, first_metric: float) -> Solution | None:
+        self._last_decompose_report_overrun = False
         if self._total_deadline_exceeded():
             return None
         self.display.stage_started("decompose")
@@ -1383,6 +1448,7 @@ class Orchestrator:
             if self._total_deadline_exceeded():
                 return None
             solved = self.solve(subtask.task, depth + 1)
+            self._last_decompose_report_overrun = False
             if solved is None:
                 # A missing part means the wired parent cannot be completed; record WHERE it died.
                 self.counters["decompose_subtask_failed"] += 1
@@ -1403,12 +1469,16 @@ class Orchestrator:
             return None
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         result = self._remember_or_recover_parent_result(result, depth)
-        if self.blind_query:
-            result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
+        support_timed_out = self._time_deadline_exceeded()
+        report_attempted_before = result.report_attempted
+        if self.blind_query and not self._shutdown_requested():
+            result = self._attach_report_metrics(result, task, comp_task_spec(task, structured_grid=self.structured_grid))
+            report_started = not report_attempted_before and result.report_attempted
+            self._last_decompose_report_overrun = report_started and not support_timed_out and self._time_deadline_exceeded()
             _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_admissible_champion:
+            if result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
-        if self._accepts_result(result):
+        if not support_timed_out and not self._shutdown_requested() and self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=chosen_name)
             support, _query, _support_status, _query_status = self._quality_of_result(result)
             self.display.stage_result(
@@ -1450,12 +1520,23 @@ class Orchestrator:
         if depth != 0:
             return result
         incumbent = getattr(self, "_best_parent_result", None)
-        if result.has_admissible_champion:
-            if incumbent is None or result.metric > incumbent.metric:
+        result_retainable = result.has_report_candidate if self.blind_query else result.has_admissible_champion
+        if incumbent is None:
+            if result_retainable:
+                self._best_parent_result = result
+            return result
+        result_accepted = self._accepts_result(result)
+        incumbent_accepted = self._accepts_result(incumbent)
+        if result_accepted != incumbent_accepted:
+            if result_accepted:
                 self._best_parent_result = result
                 return result
             return incumbent
-        if not result.has_admissible_champion and incumbent is not None:
+        incumbent_retainable = incumbent.has_report_candidate if self.blind_query else incumbent.has_admissible_champion
+        if result_retainable and (not incumbent_retainable or result.metric > incumbent.metric):
+            self._best_parent_result = result
+            return result
+        if incumbent_retainable:
             return incumbent
         return result
 
@@ -1834,10 +1915,13 @@ class Orchestrator:
         result. The configurable policy scores continue to live in `metric`/`report_metric`.
         """
 
-        if not result.has_admissible_champion:
+        if not result.has_admissible_champion and not result.has_report_candidate:
             return None, None, "no_executable_champion", "no_executable_champion"
         support = _finite_accuracy(result.champion_metrics, "support_accuracy")
-        support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        if result.has_admissible_champion:
+            support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        else:
+            support_status = "support_verification_incomplete"
         query_metrics = result.report_metrics if self.blind_query else result.champion_metrics
         query = _finite_accuracy(query_metrics, "query_accuracy", loss_key="query_loss")
         if query is not None:
@@ -1893,7 +1977,7 @@ class Orchestrator:
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,
-            query_status=query_status if query is None and query_status is not None else observed_query_status,
+            query_status=query_status if query is None and not result.report_attempted and query_status is not None else observed_query_status,
             representation=result.representation,
         )
 

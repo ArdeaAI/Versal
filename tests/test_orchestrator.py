@@ -78,6 +78,40 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
     assert orchestrator.counters["library_hits"] == 1
 
 
+def test_lookup_shutdown_after_support_skips_blind_report(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"blind_query": True, "accept_metric": "support_accuracy", "accept_threshold": 0.95},
+    )
+    orchestrator.library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=task_io(xor_task), provenance={"accepted_metric": 1.0})
+    shutdown = False
+    calls = 0
+    assessment = AssessedComposition(
+        comp=minimal_composition([("BINARY|K", 2)], "xor", 1, InnovationTracker(_next_node_id=0), random.Random(0)),
+        metrics={"support_accuracy": 1.0, "support_loss": 0.0},
+        fitness=1.0,
+        net=None,
+    )
+
+    def assess(*_args, **_kwargs):
+        nonlocal calls, shutdown
+        calls += 1
+        if calls > 1:
+            raise AssertionError("shutdown after support must skip held-out lookup evaluation")
+        shutdown = True
+        return assessment
+
+    monkeypatch.setattr(orchestrator, "_quick_assessment", assess)
+    orchestrator._shutdown_requested_callback = lambda: shutdown
+
+    hit = orchestrator._lookup(xor_task, comp_task_spec(xor_task, include_query=False))
+
+    assert hit is not None
+    assert calls == 1
+    assert hit.query_accuracy is None
+    assert hit.query_status == "shutdown_before_evaluation"
+
+
 def test_field_library_hit_matches_across_resolution_after_full_support_check(tmp_path: Path) -> None:
     from tests.test_field import _task
     from versal.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
@@ -220,13 +254,459 @@ def test_held_out_report_cannot_replace_search_robustness(tmp_path: Path, xor_ta
     search = AssessedComposition(comp=comp, metrics={"support_accuracy": 0.8, "weight_robustness": 0.25}, fitness=0.8, net=cast(ComposedNet, object()))
     result = StrategyResult("composition", metric=0.8, generations_used=1, champion_comp=search, champion_metrics=dict(search.metrics))
     reported = AssessedComposition(comp=comp, metrics={"query_accuracy": 1.0, "query_loss": 0.0, "weight_robustness": 0.99}, fitness=1.0, net=cast(ComposedNet, object()))
-    setattr(orchestrator.loop, "assess_composition", lambda *_args, **_kwargs: reported)
+    previous_deadline = 123.0
 
-    attached = orchestrator._attach_report_metrics(result, spec)
+    def previous_callback() -> bool:
+        return True
 
+    orchestrator.loop.evolver.deadline = previous_deadline
+    orchestrator.loop.evolver.deadline_exceeded = previous_callback
+    calls = 0
+
+    def assess_report(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["train"] is False
+        assert orchestrator.loop.evolver.deadline is None
+        assert orchestrator.loop.evolver.deadline_exceeded is None
+        return reported
+
+    setattr(orchestrator.loop, "assess_composition", assess_report)
+
+    attached = orchestrator._attach_report_metrics(result, xor_task, spec)
+    attached_again = orchestrator._attach_report_metrics(result, xor_task, spec)
+
+    assert attached_again is attached is result
+    assert calls == 1
+    assert attached.report_attempted is True
     assert attached.champion_metrics["weight_robustness"] == 0.25
     assert attached.report_metrics["weight_robustness"] == 0.99
     assert attached.champion_comp is search
+    assert orchestrator.loop.evolver.deadline == previous_deadline
+    assert orchestrator.loop.evolver.deadline_exceeded is previous_callback
+
+
+def test_field_report_finalization_uses_report_only_candidate_once(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from versal.strategy import FieldStrategy
+
+    orchestrator = _orchestrator(tmp_path, table={"blind_query": True, "evolve": ["field"], "decompose": []})
+    field_strategy = dict(orchestrator.strategies)["field"]
+    assert isinstance(field_strategy, FieldStrategy)
+    candidate = solving_genome.clone()
+    template = {"version": "test"}
+    result = StrategyResult(
+        "field",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=candidate,
+        champion_metrics={"support_accuracy": 0.8},
+        field_template=template,
+    )
+    previous_deadline = 123.0
+
+    def previous_callback() -> bool:
+        return True
+
+    field_strategy.evolver.deadline = previous_deadline
+    field_strategy.evolver.deadline_exceeded = previous_callback
+    calls = 0
+
+    def evaluate_report(self, genome, task, field_template):
+        nonlocal calls
+        calls += 1
+        assert self.evolver.deadline is None
+        assert self.evolver.deadline_exceeded is None
+        assert genome is candidate and task is xor_task and field_template is template
+        return {"query_accuracy": 0.7, "query_loss": 0.3}
+
+    monkeypatch.setattr(FieldStrategy, "evaluate_report", evaluate_report)
+
+    attached = orchestrator._attach_report_metrics(result, xor_task, comp_task_spec(xor_task))
+    orchestrator._attach_report_metrics(result, xor_task, comp_task_spec(xor_task))
+
+    assert attached.report_attempted is True
+    assert attached.report_metrics == {"query_accuracy": 0.7, "query_loss": 0.3}
+    assert calls == 1
+    assert field_strategy.evolver.deadline == previous_deadline
+    assert field_strategy.evolver.deadline_exceeded is previous_callback
+    assert not orchestrator._accepts_result(attached)
+
+
+def test_grammar_report_finalization_uses_its_nested_direct_strategy(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from versal.strategy import DirectStrategy, GrammarStrategy
+
+    orchestrator = _orchestrator(tmp_path, table={"blind_query": True, "evolve": ["grammar"], "decompose": []})
+    grammar = dict(orchestrator.strategies)["grammar"]
+    assert isinstance(grammar, GrammarStrategy)
+    assert isinstance(grammar.direct, DirectStrategy)
+    candidate = solving_genome.clone()
+    result = StrategyResult(
+        "grammar",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=candidate,
+        champion_metrics={"support_accuracy": 0.8},
+    )
+    evaluated: list = []
+
+    def evaluate_report(self, genome, task):
+        assert self is grammar.direct
+        assert task is xor_task
+        evaluated.append(genome)
+        return {"query_accuracy": 0.7, "query_loss": 0.3}
+
+    monkeypatch.setattr(DirectStrategy, "evaluate_report", evaluate_report)
+
+    orchestrator._attach_report_metrics(result, xor_task, comp_task_spec(xor_task))
+    orchestrator._attach_report_metrics(result, xor_task, comp_task_spec(xor_task))
+
+    assert evaluated == [candidate]
+    assert result.report_attempted is True
+    assert result.report_metrics["query_accuracy"] == 0.7
+
+
+def test_best_loser_prefers_highest_support_reportable_payload(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "blind_query": True,
+            "search_metric": "support_accuracy",
+            "accept_metric": "support_accuracy",
+            "accept_threshold": 0.95,
+            "decompose": [],
+        },
+    )
+    low = solving_genome.clone()
+    high = solving_genome.clone()
+
+    def diagnostic(*_args, **_kwargs):
+        return StrategyResult("diagnostic", metric=0.99, generations_used=1, champion_metrics={"support_accuracy": 0.99})
+
+    def low_reportable(*_args, **_kwargs):
+        return StrategyResult(
+            "low",
+            metric=0.4,
+            generations_used=1,
+            report_candidate_genome=low,
+            champion_metrics={"support_accuracy": 0.4},
+        )
+
+    def high_reportable(*_args, **_kwargs):
+        return StrategyResult(
+            "high",
+            metric=0.8,
+            generations_used=1,
+            report_candidate_genome=high,
+            champion_metrics={"support_accuracy": 0.8},
+        )
+
+    orchestrator.strategies = [("diagnostic", diagnostic), ("low", low_reportable), ("high", high_reportable)]
+    orchestrator.evolve_shares = {name: 1.0 for name, _strategy in orchestrator.strategies}
+
+    result = orchestrator._evolve(xor_task, comp_task_spec(xor_task, include_query=False), budget=3)
+
+    assert result.strategy == "high"
+    assert result.report_candidate_genome is high
+    assert result.metric == 0.8
+
+
+def test_non_blind_best_loser_preserves_highest_metric_routed_payload(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.95, "decompose": []})
+
+    def routed(*_args, **_kwargs):
+        return StrategyResult(
+            "routed",
+            metric=0.8,
+            generations_used=1,
+            champion_routed=object(),
+            champion_metrics={"support_accuracy": 0.8, "query_accuracy": 0.8},
+        )
+
+    def module(*_args, **_kwargs):
+        return StrategyResult(
+            "direct",
+            metric=0.7,
+            generations_used=1,
+            champion_genome=solving_genome,
+            champion_metrics={"support_accuracy": 0.7, "query_accuracy": 0.7},
+        )
+
+    orchestrator.strategies = [("routed", routed), ("direct", module)]
+    orchestrator.evolve_shares = {name: 1.0 for name, _strategy in orchestrator.strategies}
+
+    result = orchestrator._evolve(xor_task, comp_task_spec(xor_task), budget=2)
+
+    assert result.strategy == "routed"
+    assert result.metric == 0.8
+
+
+def test_non_blind_parent_recovery_preserves_stronger_routed_payload(tmp_path: Path, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"accept_threshold": 0.95})
+    routed = StrategyResult(
+        "routed",
+        metric=0.8,
+        generations_used=1,
+        champion_routed=object(),
+        champion_metrics={"support_accuracy": 0.8, "query_accuracy": 0.8},
+    )
+    module = StrategyResult(
+        "direct",
+        metric=0.7,
+        generations_used=1,
+        champion_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.7, "query_accuracy": 0.7},
+    )
+
+    orchestrator._remember_or_recover_parent_result(routed, depth=0)
+
+    assert orchestrator._remember_or_recover_parent_result(module, depth=0) is routed
+    assert orchestrator._best_parent_result is routed
+
+
+def test_parent_recovery_retains_the_strongest_reportable_payload(tmp_path: Path, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"blind_query": True, "accept_metric": "support_accuracy", "accept_threshold": 0.95})
+    first = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+    )
+    weaker = StrategyResult(
+        "direct",
+        metric=0.7,
+        generations_used=1,
+        report_candidate_genome=solving_genome.clone(),
+        champion_metrics={"support_accuracy": 0.7},
+    )
+
+    assert orchestrator._remember_or_recover_parent_result(first, depth=0) is first
+    assert orchestrator._remember_or_recover_parent_result(weaker, depth=0) is first
+
+
+def test_accepted_parent_is_not_masked_by_a_stronger_report_only_incumbent(tmp_path: Path, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"accept_metric": "support_accuracy", "accept_threshold": 0.95})
+    report_only = StrategyResult(
+        "direct",
+        metric=0.99,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.99},
+    )
+    accepted = StrategyResult(
+        "direct",
+        metric=0.95,
+        generations_used=1,
+        champion_genome=solving_genome.clone(),
+        champion_metrics={"support_accuracy": 0.95},
+    )
+
+    orchestrator._remember_or_recover_parent_result(report_only, depth=0)
+
+    assert orchestrator._remember_or_recover_parent_result(accepted, depth=0) is accepted
+    assert orchestrator._best_parent_result is accepted
+
+
+def test_failed_decomposition_records_the_strongest_retained_parent_report(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "blind_query": True,
+            "max_depth": 1,
+            "accept_metric": "support_accuracy",
+            "accept_threshold": 0.95,
+            "decompose": ["output_slices"],
+        },
+    )
+    original = StrategyResult(
+        "direct",
+        metric=0.4,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.4},
+        report_metrics={"query_accuracy": 0.3, "query_loss": 0.7},
+        report_attempted=True,
+    )
+    stronger_recomposition = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=2,
+        report_candidate_genome=solving_genome.clone(),
+        champion_metrics={"support_accuracy": 0.8},
+        report_metrics={"query_accuracy": 0.7, "query_loss": 0.3},
+        report_attempted=True,
+    )
+
+    setattr(orchestrator, "_evolve", lambda *_args, **_kwargs: original)
+    setattr(orchestrator, "_wants_decompose_first", lambda *_args, **_kwargs: False)
+
+    def failed_recomposition(*_args, **_kwargs):
+        orchestrator._best_parent_result = stronger_recomposition
+        return None
+
+    setattr(orchestrator, "_decompose_and_recurse", failed_recomposition)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.metric == 0.8
+    assert attempt.support_accuracy == 0.8
+    assert attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
+
+
+def test_timed_out_recomposition_is_reported_but_not_accepted(tmp_path: Path, decomposable_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "blind_query": True,
+            "accept_metric": "support_accuracy",
+            "accept_threshold": 0.95,
+            "decompose": ["output_slices"],
+        },
+    )
+    orchestrator._decomposition_leaf_count = 1
+    orchestrator._solve_deadline = math.inf
+    result = StrategyResult(
+        "direct",
+        metric=1.0,
+        generations_used=1,
+        champion_genome=solving_genome,
+        champion_metrics={"support_accuracy": 1.0},
+        report_metrics={"query_accuracy": 0.7, "query_loss": 0.3},
+        report_attempted=True,
+    )
+
+    setattr(orchestrator, "_subtasks_promising", lambda *_args, **_kwargs: True)
+    setattr(orchestrator, "solve", lambda *_args, **_kwargs: object())
+    setattr(orchestrator, "_port_wired_skeleton", lambda *_args, **_kwargs: None)
+
+    def timed_out_recomposition(*_args, **_kwargs) -> StrategyResult:
+        orchestrator._solve_deadline = 0.0
+        return result
+
+    setattr(orchestrator, "_evolve", timed_out_recomposition)
+    setattr(orchestrator, "_admit_result", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("timed-out support result must not be admitted")))
+
+    assert orchestrator._decompose_and_recurse(decomposable_task, comp_task_spec(decomposable_task, include_query=False), 0, 2, 0.0) is None
+    assert orchestrator.counters["accepts"] == 0
+
+
+def test_recomposition_report_overrun_is_distinguished_from_support_timeout(tmp_path: Path, decomposable_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "blind_query": True,
+            "accept_metric": "support_accuracy",
+            "accept_threshold": 0.95,
+            "decompose": ["output_slices"],
+        },
+    )
+    orchestrator._decomposition_leaf_count = 1
+    orchestrator._solve_deadline = math.inf
+    result = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+    )
+
+    setattr(orchestrator, "_subtasks_promising", lambda *_args, **_kwargs: True)
+    setattr(orchestrator, "solve", lambda *_args, **_kwargs: object())
+    setattr(orchestrator, "_port_wired_skeleton", lambda *_args, **_kwargs: None)
+    setattr(orchestrator, "_evolve", lambda *_args, **_kwargs: result)
+
+    def report_after_deadline(candidate: StrategyResult, *_args, **_kwargs) -> StrategyResult:
+        candidate.report_attempted = True
+        candidate.report_metrics = {"query_accuracy": 0.7, "query_loss": 0.3}
+        orchestrator._solve_deadline = 0.0
+        return candidate
+
+    setattr(orchestrator, "_attach_report_metrics", report_after_deadline)
+
+    assert orchestrator._decompose_and_recurse(decomposable_task, comp_task_spec(decomposable_task, include_query=False), 0, 2, 0.0) is None
+    assert getattr(orchestrator, "_last_decompose_report_overrun", False) is True
+
+
+def test_decompose_first_report_overrun_skips_fallback_without_time_budget_failure(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"blind_query": True, "max_depth": 1, "decompose_first_above": 1, "accept_metric": "support_accuracy", "accept_threshold": 0.95},
+    )
+    retained = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+        report_metrics={"query_accuracy": 0.7, "query_loss": 0.3},
+        report_attempted=True,
+    )
+    setattr(orchestrator, "_wants_decompose_first", lambda *_args, **_kwargs: True)
+
+    def report_overrun(*_args, **_kwargs):
+        orchestrator._best_parent_result = retained
+        setattr(orchestrator, "_last_decompose_report_overrun", True)
+        orchestrator._solve_deadline = 0.0
+        return None
+
+    setattr(orchestrator, "_decompose_and_recurse", report_overrun)
+    setattr(orchestrator, "_evolve", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("expired report must not start a fallback population")))
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert attempt.metric == 0.8
+    assert attempt.query_accuracy == 0.7
+    assert attempt.failure_stage != "time_budget"
+    assert orchestrator.counters.get("time_budget_hits", 0) == 0
+
+
+def test_missing_reporter_does_not_claim_an_evaluation_attempt(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"blind_query": True})
+    orchestrator.strategies = []
+    result = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+    )
+
+    orchestrator._attach_report_metrics(result, xor_task, comp_task_spec(xor_task))
+
+    assert result.report_attempted is False
+    assert result.report_metrics == {}
+
+
+def test_report_only_candidate_exposes_query_without_becoming_acceptable(tmp_path: Path, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "blind_query": True,
+            "accept_metric": "support_accuracy",
+            "search_metric": "support_accuracy",
+            "report_metric": "query_accuracy",
+        },
+    )
+    result = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        report_candidate_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+        report_metrics={"query_accuracy": 0.7, "query_loss": 0.3},
+        report_attempted=True,
+    )
+
+    attempt = orchestrator._attempt_from_result(result, task="xor", depth=0, outcome="failed")
+
+    assert attempt.support_accuracy == 0.8
+    assert attempt.support_status == "support_verification_incomplete"
+    assert attempt.query_accuracy == 0.7
+    assert attempt.query_status == "evaluated"
+    assert not orchestrator._accepts_result(result)
 
 
 def test_passing_metrics_without_an_executable_payload_are_never_accepted() -> None:
@@ -620,6 +1100,48 @@ def test_refine_below_accept_threshold_never_admits(tmp_path: Path, xor_task: Ta
     assert orchestrator.attempts[-1].outcome == "library_hit"
     assert orchestrator.counters["refine_no_gain"] == 1 and orchestrator.counters["refine_improvements"] == 0
     assert len(orchestrator.library) == 1  # nothing new shelved
+
+
+@pytest.mark.parametrize("stop_reason", ["timeout", "shutdown"])
+def test_refine_stopped_support_candidate_never_admits(
+    stop_reason: str,
+    tmp_path: Path,
+    xor_task: Task,
+    solving_genome,
+    linear_genome,
+) -> None:
+    orchestrator = _orchestrator(tmp_path, table=_refine_table())
+    old_key = orchestrator.library.add(
+        entry_type=MODULE,
+        payload=genome_to_dict(solving_genome),
+        io=task_io(xor_task),
+        provenance={"accepted_metric": 1.0, "weight_robustness": 0.5},
+    )
+    shutdown = False
+    orchestrator._shutdown_requested_callback = lambda: shutdown
+
+    def stopped_strategy(*_args, **_kwargs) -> StrategyResult:
+        nonlocal shutdown
+        if stop_reason == "timeout":
+            orchestrator._solve_deadline = 0.0
+        else:
+            shutdown = True
+        return StrategyResult(
+            strategy="direct",
+            metric=1.1,
+            generations_used=1,
+            champion_genome=linear_genome,
+            champion_metrics={"query_accuracy": 1.1, "weight_robustness": 0.9},
+        )
+
+    orchestrator.strategies = [("direct", stopped_strategy)]
+    setattr(orchestrator, "_admit_result", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stopped refinement must not admit")))
+
+    solution = orchestrator.solve(xor_task)
+
+    assert solution is not None and solution.key == old_key
+    assert orchestrator.attempts[-1].outcome == "library_hit"
+    assert orchestrator.counters["refine_improvements"] == 0
 
 
 def test_refine_depth_guard_skips_subsolve_hits(tmp_path: Path, xor_task: Task, solving_genome) -> None:
