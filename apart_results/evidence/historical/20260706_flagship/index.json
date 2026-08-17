@@ -1,0 +1,1154 @@
+[
+  {
+    "key": "c2_314ca8a92c06",
+    "entry_type": "composition",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,H,W",
+          "width": 784
+        }
+      ],
+      "output": {
+        "signature": "CATEGORICAL|",
+        "width": 10
+      }
+    },
+    "accepted_metric": 0.8999999761581421,
+    "weight_robustness": 0.15000000596046448,
+    "retired": false,
+    "dependency": true,
+    "behavior": [
+      "m0",
+      "L2"
+    ],
+    "stats": {
+      "use_count": 390,
+      "max_attributed_fitness": 3.009999378626445
+    }
+  },
+  {
+    "key": "c3_27b594e917a4",
+    "entry_type": "composition",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "CATEGORICAL|",
+        "width": 2
+      }
+    },
+    "accepted_metric": 0.875,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": true,
+    "behavior": [
+      "m2",
+      "L3"
+    ],
+    "stats": {
+      "use_count": 2240,
+      "max_attributed_fitness": 3.059924116229433
+    }
+  },
+  {
+    "key": "m1_06b3a330bfae",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 2567,
+      "max_attributed_fitness": 3.0695736991315017,
+      "refine_attempts": 4,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_14dcd13be98f",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 1137,
+      "max_attributed_fitness": 3.059996292791984
+    }
+  },
+  {
+    "key": "m1_3a2cf9a695d5",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4654822031355754,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 52,
+      "max_attributed_fitness": 2.9935478711223675,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_3f2863437620",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 0.9375,
+    "weight_robustness": -0.0437774087643741,
+    "retired": true,
+    "dependency": true,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 2,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_4bbd45626ecf",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 0.9666666388511658,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_5179a3008ebc",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.38461539149284363,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "rec",
+      "single",
+      "prod",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 1364,
+      "max_attributed_fitness": 3.0698180691479546
+    }
+  },
+  {
+    "key": "m1_53a00e40b01e",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "rec",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_6302b451a103",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6153846383094788,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 172,
+      "max_attributed_fitness": 3.009995346541084,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 1
+    }
+  },
+  {
+    "key": "m1_6a0a68f432e4",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 0.9833333492279053,
+    "weight_robustness": 0.0,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_7105703a2be3",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "refine",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 402,
+      "max_attributed_fitness": 3.0099938328276763
+    }
+  },
+  {
+    "key": "m1_7eed0b268cdc",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.4615384638309479,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "rec",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 2477,
+      "max_attributed_fitness": 3.069916043493953,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_84b5bf81e099",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.3611261670188317,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 618,
+      "max_attributed_fitness": 3.0099697380425603,
+      "refine_attempts": 2,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m1_a5c685023fb0",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 0.9666666388511658,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "rec",
+      "single",
+      "prod",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_b7be08a2d341",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 5,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_c0418087156c",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.009763107439263383,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_d4a2846d2872",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 24
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 3
+      }
+    },
+    "accepted_metric": 0.9666666388511658,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0
+    }
+  },
+  {
+    "key": "m1_d81d237af2bd",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "rec",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 2,
+      "refine_failures_since_gain": 2
+    }
+  },
+  {
+    "key": "m1_f30c76fc1e1e",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "CONTINUOUS|C,T",
+          "width": 32
+        }
+      ],
+      "output": {
+        "signature": "CONTINUOUS|C",
+        "width": 4
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.0,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 0,
+      "max_attributed_fitness": 0.0,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m1_fe48fd38672f",
+    "entry_type": "module",
+    "level": 1,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 2
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "flat"
+    ],
+    "stats": {
+      "use_count": 128,
+      "max_attributed_fitness": 2.9942104467977297,
+      "refine_attempts": 2,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m2_360778e66079",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "ANY",
+          "width": 4
+        }
+      ],
+      "output": {
+        "signature": "ANY",
+        "width": 2
+      }
+    },
+    "accepted_metric": 0.8385416865348816,
+    "weight_robustness": 0.5,
+    "retired": false,
+    "dependency": true,
+    "behavior": [],
+    "stats": {
+      "use_count": 3944,
+      "max_attributed_fitness": 3.069987764616873
+    }
+  },
+  {
+    "key": "m2_530861205fe1",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5032748547230921,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1820,
+      "max_attributed_fitness": 3.059998724477112
+    }
+  },
+  {
+    "key": "m2_6ef86eebe245",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6153846383094788,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "refine",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 342,
+      "max_attributed_fitness": 2.969999106685904,
+      "refine_attempts": 4,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m2_735c90b083c7",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6764606862395779,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1563,
+      "max_attributed_fitness": 3.0599972522982886,
+      "refine_attempts": 7,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m2_92bf82fe5777",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5534817301434595,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 780,
+      "max_attributed_fitness": 3.00999998956919,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m2_9d9cea9ba4e0",
+    "entry_type": "module",
+    "level": 2,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.43335848713548736,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "prod",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 2006,
+      "max_attributed_fitness": 3.069940140263725
+    }
+  },
+  {
+    "key": "m3_3fccb3745b33",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.43230628807896027,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "refine",
+      "prod",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1989,
+      "max_attributed_fitness": 3.05991380810252,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m3_71fc816ccda2",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.41399738721303614,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 480,
+      "max_attributed_fitness": 3.0099995157135386,
+      "refine_attempts": 1,
+      "refine_failures_since_gain": 0
+    }
+  },
+  {
+    "key": "m3_9c498107bcc7",
+    "entry_type": "module",
+    "level": 3,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.20264723254015138,
+    "retired": true,
+    "dependency": false,
+    "behavior": [
+      "h0",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1357,
+      "max_attributed_fitness": 3.019936348272908
+    }
+  },
+  {
+    "key": "m4_461299b7bc4e",
+    "entry_type": "module",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5497038008702894,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h2",
+      "ff",
+      "single",
+      "prod",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 2026,
+      "max_attributed_fitness": 3.0663968679882694,
+      "refine_attempts": 2,
+      "refine_failures_since_gain": 2
+    }
+  },
+  {
+    "key": "m4_503f42e44a20",
+    "entry_type": "module",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5324085412680657,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1455,
+      "max_attributed_fitness": 3.05999749965223,
+      "refine_attempts": 4,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m4_7baa1b9ca6fa",
+    "entry_type": "module",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6047637783688623,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h4",
+      "ff",
+      "single",
+      "prod",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 107,
+      "max_attributed_fitness": 3.009999566379135
+    }
+  },
+  {
+    "key": "m4_ad1f69e52c94",
+    "entry_type": "module",
+    "level": 4,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5534817301434595,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h2",
+      "ff",
+      "single",
+      "prod",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 2437,
+      "max_attributed_fitness": 3.0599999880790723,
+      "refine_attempts": 5,
+      "refine_failures_since_gain": 3
+    }
+  },
+  {
+    "key": "m5_011646edf343",
+    "entry_type": "module",
+    "level": 5,
+    "io": {
+      "inputs": [
+        {
+          "signature": "BINARY|C",
+          "width": 8
+        }
+      ],
+      "output": {
+        "signature": "BINARY|C",
+        "width": 1
+      }
+    },
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.6153846383094788,
+    "retired": false,
+    "dependency": false,
+    "behavior": [
+      "h2",
+      "ff",
+      "single",
+      "sum",
+      "macro"
+    ],
+    "stats": {
+      "use_count": 1410,
+      "max_attributed_fitness": 3.0599494527315687,
+      "refine_attempts": 3,
+      "refine_failures_since_gain": 3
+    }
+  }
+]

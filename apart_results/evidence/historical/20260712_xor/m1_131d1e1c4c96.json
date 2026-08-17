@@ -1,0 +1,240 @@
+{
+  "key": "m1_131d1e1c4c96",
+  "entry_type": "module",
+  "level": 1,
+  "io": {
+    "inputs": [
+      {
+        "signature": "BINARY|C",
+        "width": 2
+      }
+    ],
+    "output": {
+      "signature": "BINARY|C",
+      "width": 1
+    }
+  },
+  "payload": {
+    "nodes": [
+      {
+        "id": 0,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 1,
+        "kind": "input",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 2,
+        "kind": "bias",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 3,
+        "kind": "output",
+        "activation": "identity",
+        "coordinate": null,
+        "aggregation": "sum"
+      },
+      {
+        "id": 4,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": [
+          -1.0
+        ],
+        "aggregation": "sum"
+      },
+      {
+        "id": 5,
+        "kind": "hidden",
+        "activation": "relu",
+        "coordinate": [
+          -0.33333333333333337
+        ],
+        "aggregation": "sum"
+      },
+      {
+        "id": 6,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": [
+          0.33333333333333326
+        ],
+        "aggregation": "sum"
+      },
+      {
+        "id": 7,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": [
+          1.0
+        ],
+        "aggregation": "sum"
+      },
+      {
+        "id": 19,
+        "kind": "hidden",
+        "activation": "tanh",
+        "coordinate": null,
+        "aggregation": "product"
+      }
+    ],
+    "connections": [
+      {
+        "in": 0,
+        "out": 6,
+        "weight": 2.5820562839508057,
+        "enabled": true,
+        "innovation": 6,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 6,
+        "weight": 3.481726884841919,
+        "enabled": true,
+        "innovation": 14,
+        "recurrent": false
+      },
+      {
+        "in": 6,
+        "out": 3,
+        "weight": 2.737457036972046,
+        "enabled": true,
+        "innovation": 51,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 4,
+        "weight": -0.8413828015327454,
+        "enabled": true,
+        "innovation": 20,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 5,
+        "weight": 3.137548958420666e-07,
+        "enabled": true,
+        "innovation": 21,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 6,
+        "weight": -0.9968920350074768,
+        "enabled": true,
+        "innovation": 22,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 7,
+        "weight": -1.1198265552520752,
+        "enabled": true,
+        "innovation": 23,
+        "recurrent": false
+      },
+      {
+        "in": 2,
+        "out": 3,
+        "weight": -0.6366643905639648,
+        "enabled": true,
+        "innovation": 19,
+        "recurrent": false
+      },
+      {
+        "in": 0,
+        "out": 19,
+        "weight": -1.7491073608398438,
+        "enabled": true,
+        "innovation": 130,
+        "recurrent": false
+      },
+      {
+        "in": 7,
+        "out": 19,
+        "weight": 2.3099021911621094,
+        "enabled": true,
+        "innovation": 131,
+        "recurrent": false
+      },
+      {
+        "in": 1,
+        "out": 19,
+        "weight": -2.5885062217712402,
+        "enabled": true,
+        "innovation": 132,
+        "recurrent": false
+      },
+      {
+        "in": 4,
+        "out": 19,
+        "weight": -1.1442241668701172,
+        "enabled": true,
+        "innovation": 133,
+        "recurrent": false
+      },
+      {
+        "in": 19,
+        "out": 3,
+        "weight": 3.5634562969207764,
+        "enabled": true,
+        "innovation": 134,
+        "recurrent": false
+      }
+    ],
+    "macros": [],
+    "refine_steps": 1,
+    "operator_rates": {
+      "add_rich_node": 0.12033587068130511,
+      "add_deep_node": 0.11950494770336928,
+      "add_connection": 0.11898494182999222,
+      "toggle_connection": 0.05177496547840437,
+      "mutate_activation": 0.07045983579447244,
+      "mutate_aggregation": 0.0487776411482992,
+      "add_recurrent_connection": 0.04270729173842943,
+      "add_macro_node": 0.041116321861528915,
+      "tweak_refine_steps": 0.05573210453875881,
+      "add_local_node": 0.09352230831307892,
+      "add_local_connection": 0.09825857602069353,
+      "add_shared_motif": 0.04929810874200761,
+      "untie_motif_weights": 0.021041592652831387,
+      "remove_connection": 0.04922411951523178,
+      "remove_hidden_node": 0.051423298365584486,
+      "prune_and_regrow": 0.09325907090690588
+    }
+  },
+  "weights_frozen": true,
+  "provenance": {
+    "task": "xor",
+    "rung": 1,
+    "depth": 0,
+    "strategy": "direct",
+    "accepted_metric": 1.0,
+    "weight_robustness": 0.5,
+    "behavior": [
+      "h1",
+      "ff",
+      "single",
+      "prod",
+      "flat"
+    ]
+  },
+  "stats": {
+    "use_count": 250,
+    "max_attributed_fitness": 3.0964004208408875,
+    "refine_attempts": 1,
+    "refine_failures_since_gain": 0
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-08-17T07:14:44.423649+00:00",
+  "code": {
+    "git_commit": "043e1e253d2345515ae70ee15b55c012b7e2bfc7",
+    "git_dirty": false
+  },
+  "config": {
+    "path": "configs/canary.toml",
+    "sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d",
+    "effective_sha256": "7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6"
+  },
+  "library_start": {
+    "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/library_canary_clean_seed0",
+    "entry_count": 0,
+    "keys": [],
+    "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "file_count": 0,
+    "bytes": 0
+  },
+  "task_pool": {
+    "unique_references": 34,
+    "scheduled_attempts": 36,
+    "revisit_slots": 2
+  }
+}

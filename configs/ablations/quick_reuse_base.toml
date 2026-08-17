@@ -1,0 +1,18 @@
+extends = "../canary.toml"
+
+[run]
+experiment = "paper_quick_reuse"
+clearml = false
+clearml_capture_streams = false
+
+[schedule]
+kind = "interleave_rungs"
+rungs = [6, 9, 10, 12, 15]
+tasks_per_rung = 2
+require_all_rungs = true
+shuffle = true
+
+[orchestrator]
+tasks = 15
+max_task_seconds = 120
+max_total_task_seconds = 120

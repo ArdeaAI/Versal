@@ -1,0 +1,266 @@
+{
+  "schema_version": 2,
+  "manuscripts": [
+    {
+      "id": "apart-draft",
+      "artifact": {
+        "path": "ai/for_apart/draft.md",
+        "sha256": "66663bd68217c2248f5fe0c83f449c95ac18c4e45392be7522fc0cbaa5c6d505",
+        "role": "manuscript"
+      }
+    },
+    {
+      "id": "apart-pdf",
+      "artifact": {
+        "path": "output/pdf/versal_digital_minds_sprint.pdf",
+        "sha256": "f8fe39e84c302273dc8a72221b42747e0520531ba13c01eb1b9beabf798b7d81",
+        "role": "manuscript"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "id": "icarus-curriculum",
+      "section": "Related Work; Table 1",
+      "summary": "The native-text overview of the 18-rung Icarus curriculum used in the paper.",
+      "evidence": [
+        {
+          "path": "ai/for_apart/icarus_rungs.md",
+          "sha256": "c786b2c71f58d117381416583e135a0fc9bc3bb0ee0c54915b9fc7ffb14949e1",
+          "role": "transcript"
+        }
+      ]
+    },
+    {
+      "id": "clean-canary",
+      "section": "Abstract; Methods 3.4; Results 4.1-4.2; Conclusion",
+      "summary": "The completed cold run's provenance, held-out coverage, cross-rung metrics, deadlines, generations, timing, outcomes, and final library state.",
+      "evidence": [
+        {
+          "path": "results/20260817_031349_orchestrated/run_summary.json",
+          "sha256": "deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43",
+          "role": "summary"
+        },
+        {
+          "path": "results/20260817_031349_orchestrated/run_manifest.json",
+          "sha256": "dd78eade854d5bbe935079d7f6a66ff6c0744f0e3643a59b8b73c2ce1a98389b",
+          "role": "summary"
+        },
+        {
+          "path": "results/20260817_031349_orchestrated/config.effective.json",
+          "sha256": "7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6",
+          "role": "config"
+        },
+        {
+          "path": "results/20260817_031349_orchestrated/task_pool.json",
+          "sha256": "9fd250d93c05b1747ae78d540717bc30c9d5278da9dad103e7c879eef48ade72",
+          "role": "summary"
+        },
+        {
+          "path": "library_canary_clean_seed0/index.json",
+          "sha256": "11b1d630705157f063a7096decfa73f5ae60ccacc3d0980924895dc5bf519143",
+          "role": "library"
+        },
+        {
+          "path": "library_canary_clean_seed0/entries/c3_1b6bf364c0a7.json",
+          "sha256": "0ce75a351880d7a3214bbe4badfcabbd5fd80efef5788f2308d85951dc770203",
+          "role": "library"
+        }
+      ]
+    },
+    {
+      "id": "cosmic-same-resolution-reuse",
+      "section": "Results 4.2",
+      "summary": "The Cosmic field's admission and later same-resolution cross-task lookup, including direct held-out attribution and cost caveat.",
+      "evidence": [
+        {
+          "path": "results/20260817_031349_orchestrated/run_summary.json",
+          "sha256": "deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43",
+          "role": "summary"
+        },
+        {
+          "path": "library_canary_clean_seed0/entries/m1_3c8730a6e281.json",
+          "sha256": "a951e4906219f9aea928c374d3ab529ea715906a585755865e1de2c5962119ad",
+          "role": "library"
+        }
+      ]
+    },
+    {
+      "id": "historical-persistence",
+      "section": "Results 4.3",
+      "summary": "The older 400-encounter run's memory-mediated outcomes and retained five-level hierarchy.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/index.json",
+          "sha256": "b63e85150402d1e0b02d1015916fc82939ab0d13d14201827200ce81a60f6ea6",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/entries/m5_011646edf343.json",
+          "sha256": "4df81f8b18feb4e6e25b55d1886a9f779642728c9065287d5af3c42291caa560",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/entries/m4_ad1f69e52c94.json",
+          "sha256": "f615887ecb11d3372cae5a1dc40eb4fcd199923ad712b68cdfcffeca5eb858b3",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/entries/m3_9c498107bcc7.json",
+          "sha256": "098668c6a25943ba760f7731af08a15cde19baeaa77d87eb17cf4a7e89cef398",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/entries/m2_360778e66079.json",
+          "sha256": "232573cf8664503d99ab7989a1d69720670aa5a5dbd073fa7a956582266a88b2",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/library/entries/m1_84b5bf81e099.json",
+          "sha256": "4637dd77a93c595e95c38efd2410c9e22cb2cae15c4027eab8eb443ff9818b98",
+          "role": "library"
+        }
+      ]
+    },
+    {
+      "id": "historical-xor-compression",
+      "section": "Results 4.3",
+      "summary": "The fixed-XOR run's perfect evaluation rail, refinement sequence, and final recorded five-node/four-edge topology.",
+      "evidence": [
+        {
+          "path": "ai/archive/20260816_02_hackathon/results/20260816_185653_orchestrated/run_summary.json",
+          "sha256": "3f4071a5e649b1488781bd61643f3f5f03e320ab718b1d7a13aaed0c4564b0e7",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260816_02_hackathon/results/20260816_185653_orchestrated/task_0025/net.png",
+          "sha256": "0cddb7108692bf6664f533ff41008419cfe6464eb1ac18f67d1615071ac415c2",
+          "role": "render"
+        },
+        {
+          "path": "ai/archive/20260712_full_preflight/library/entries/m1_131d1e1c4c96.json",
+          "sha256": "9b9cb47592d3127b41c78e52d64441be0fd7e8abf48835f9c555deab3d96c2a4",
+          "role": "library"
+        },
+        {
+          "path": "ai/archive/20260715_canary/library/entries/m1_131d1e1c4c96.json",
+          "sha256": "486c63a9684515a511b6386bc66b4d3fdfc7b4bfb70c37026637d069b988e118",
+          "role": "library"
+        },
+        {
+          "path": "library_canary_clean_seed0/entries/m1_131d1e1c4c96.json",
+          "sha256": "e625b6143dcca6d94d27417e9dd08c327ed79a110ff6ccd6ce3f3e808f144f34",
+          "role": "library"
+        }
+      ]
+    }
+  ],
+  "figures": [
+    {
+      "id": "system-lifecycle",
+      "section": "Methods 3.2; Figure 1",
+      "summary": "The current support-only search, admission, blind held-out reporting, and persistent-memory lifecycle.",
+      "evidence": [
+        {
+          "path": "ai/for_apart/make_system_figures.py",
+          "sha256": "14d38ee49d604c31d2091e4fc195e2ebaf8bb0d301d5a620f9b647f5fcc659f2",
+          "role": "script"
+        },
+        {
+          "path": "results/20260817_031349_orchestrated/config.effective.json",
+          "sha256": "7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6",
+          "role": "config"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "ai/for_apart/figures/system_lifecycle.pdf",
+          "sha256": "e9e56467a2ea9ad5881a536812e38f27bfcea7edef3d3237e6c7af35a01efdb7",
+          "role": "render"
+        }
+      ]
+    },
+    {
+      "id": "structural-overmind",
+      "section": "Methods 3.3; Figure 2",
+      "summary": "A deterministic cold structural rendering of 12 routable experts from the final clean library, with no trained gate or observed traffic.",
+      "evidence": [
+        {
+          "path": "ai/for_apart/make_system_figures.py",
+          "sha256": "14d38ee49d604c31d2091e4fc195e2ebaf8bb0d301d5a620f9b647f5fcc659f2",
+          "role": "script"
+        },
+        {
+          "path": "library_canary_clean_seed0/index.json",
+          "sha256": "11b1d630705157f063a7096decfa73f5ae60ccacc3d0980924895dc5bf519143",
+          "role": "library"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "ai/for_apart/figures/overmind_structural.png",
+          "sha256": "3540986fffcdac17101f8085c68b7c3122251c3cfeeedaddcea3e0bbc2ee696e",
+          "role": "render"
+        }
+      ]
+    },
+    {
+      "id": "clean-canary-performance",
+      "section": "Results 4.1; Figure 3",
+      "summary": "Task-appropriate support and held-out performance across 18 rung means, with ARC exact accuracy, deadline counts, and total task-seconds.",
+      "evidence": [
+        {
+          "path": "ai/for_apart/make_evidence_figures.py",
+          "sha256": "fb622ae0d6c9bd048c71ab9be5ce4d8f1bc4682e061de6ec152ea7a731d04d83",
+          "role": "script"
+        },
+        {
+          "path": "results/20260817_031349_orchestrated/run_summary.json",
+          "sha256": "deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "ai/for_apart/figures/clean_canary.pdf",
+          "sha256": "6932d70dcdead87cc043556590a8a2eddc364fa5e2cc9d2046cd947958fcd699",
+          "role": "render"
+        }
+      ]
+    },
+    {
+      "id": "historical-persistence-xor",
+      "section": "Results 4.3; Figure 4",
+      "summary": "Historical cumulative reuse and hierarchy alongside fixed-task XOR refinement and compression.",
+      "evidence": [
+        {
+          "path": "ai/for_apart/make_evidence_figures.py",
+          "sha256": "fb622ae0d6c9bd048c71ab9be5ce4d8f1bc4682e061de6ec152ea7a731d04d83",
+          "role": "script"
+        },
+        {
+          "path": "ai/archive/20260706_flagship/results/run_summary.json",
+          "sha256": "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
+          "role": "summary"
+        },
+        {
+          "path": "ai/archive/20260816_02_hackathon/results/20260816_185653_orchestrated/run_summary.json",
+          "sha256": "3f4071a5e649b1488781bd61643f3f5f03e320ab718b1d7a13aaed0c4564b0e7",
+          "role": "summary"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "ai/for_apart/figures/persistence_xor.pdf",
+          "sha256": "5b66c73141de1c398eb95f0dd5792fcc3c9778b087fa0791069f35a2d0001917",
+          "role": "render"
+        }
+      ]
+    }
+  ]
+}

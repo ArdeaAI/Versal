@@ -730,7 +730,7 @@ class RouterService:
         if expired_edges:
             metrics["router_edges_expired"] = float(expired_edges)
         self.last_lifecycle_metrics = metrics
-        # The portrait visualizes adapters, gate mass, firing steps, and transitions—not merely
+        # The portrait visualizes adapters, gate mass, firing steps, and transitions, not merely
         # vertex membership. Refresh at this task boundary even when no lifecycle event occurred;
         # the snapshot signature below suppresses a truly unchanged redraw.
         self.render_overmind()

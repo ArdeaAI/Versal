@@ -1,0 +1,416 @@
+{
+  "archive": {},
+  "campaign": {},
+  "clearml_capture_streams": false,
+  "clearml_run": true,
+  "compute": "auto",
+  "config_effective_sha256": "49ec59fcb22b076a2df6b30bf326fdba3abffc15b05f46e071d5178af2c8686e",
+  "config_path": "configs/canary.toml",
+  "config_sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d",
+  "config_sources": [
+    {
+      "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/configs/canary.toml",
+      "sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d"
+    }
+  ],
+  "dataset": "Ardea/Icarus-dataset",
+  "dataset_revision": "412029ed1b86072a08f47102959d3ebdc9dee766",
+  "evolution": {
+    "composition": {
+      "catalog_width_tolerance": -1,
+      "crossover": {
+        "kind": "comp_neat",
+        "rate": 0.3
+      },
+      "elitism": 2,
+      "glue_rank": 8,
+      "glue_rank_threshold": 4096,
+      "glue_storage": "f32",
+      "max_initial_glue_values": 0,
+      "max_inline_depth": 8,
+      "mutation": {
+        "add_comp_edge_prob": 0.15,
+        "add_module_node_prob": 0.3,
+        "operators": [
+          "add_module_node",
+          "switch_ref",
+          "add_comp_edge",
+          "toggle_comp_edge",
+          "perturb_glue"
+        ],
+        "perturb_glue_prob": 0.6,
+        "perturb_glue_sigma": 0.3,
+        "switch_ref_prob": 0.12,
+        "toggle_comp_edge_prob": 0.05
+      },
+      "pop_size": 48,
+      "selection": {
+        "kind": "tournament",
+        "tournament_size": 2
+      },
+      "version": 1
+    },
+    "crossover": {
+      "kind": "neat",
+      "rate": 0.2
+    },
+    "elitism": 1,
+    "evaluate": {
+      "batched_samples": "auto",
+      "kind": "hybrid",
+      "samples": [
+        -2.0,
+        -1.0,
+        -0.5,
+        0.5,
+        1.0,
+        2.0
+      ]
+    },
+    "init": {
+      "density": 0.3,
+      "generator_hidden": 3,
+      "hidden": 4,
+      "kind": "cppn",
+      "weight_scale": 1.0
+    },
+    "loop": "hierarchical",
+    "modules": {
+      "absorb_top_k": 2,
+      "advance_every": 3,
+      "attribution": "max",
+      "decay": 0.95,
+      "elitism": 1,
+      "in_ports": 4,
+      "offspring_discount": 0.9,
+      "out_ports": 2,
+      "pop_size": 64,
+      "seed_fraction": 0.25,
+      "writeback": "champion"
+    },
+    "mutation": {
+      "add_connection_prob": 0.12,
+      "add_deep_node_fan_in": 4,
+      "add_deep_node_fan_out": 2,
+      "add_deep_node_prob": 0.12,
+      "add_local_connection_prob": 0.1,
+      "add_local_connection_radius": 1.5,
+      "add_local_node_fan_in": 4,
+      "add_local_node_prob": 0.1,
+      "add_macro_node_max_outputs": 16,
+      "add_macro_node_prob": 0.05,
+      "add_recurrent_connection_prob": 0.04,
+      "add_rich_node_fan_in": 4,
+      "add_rich_node_prob": 0.12,
+      "add_shared_motif_copies": 2,
+      "add_shared_motif_prob": 0.05,
+      "add_shared_motif_tied": true,
+      "mutate_activation_prob": 0.06,
+      "mutate_aggregation_max_fan_in": 4,
+      "mutate_aggregation_prob": 0.05,
+      "operators": [
+        "add_rich_node",
+        "add_deep_node",
+        "add_connection",
+        "toggle_connection",
+        "mutate_activation",
+        "mutate_aggregation",
+        "add_recurrent_connection",
+        "add_macro_node",
+        "tweak_refine_steps",
+        "add_local_node",
+        "add_local_connection",
+        "add_shared_motif",
+        "untie_motif_weights",
+        "remove_connection",
+        "remove_hidden_node",
+        "prune_and_regrow"
+      ],
+      "prune_and_regrow_fraction": 0.05,
+      "prune_and_regrow_prob": 0.1,
+      "remove_connection_prob": 0.05,
+      "remove_hidden_node_prob": 0.05,
+      "self_adaptive": true,
+      "self_adaptive_learning_rate": 0.1,
+      "self_adaptive_max": 1.0,
+      "self_adaptive_min": 0.001,
+      "toggle_connection_prob": 0.05,
+      "tweak_refine_steps_max_steps": 6,
+      "tweak_refine_steps_prob": 0.06,
+      "untie_motif_weights_prob": 0.02
+    },
+    "novelty": {
+      "archive_cap": 256,
+      "k": 15,
+      "probe_rows": 64
+    },
+    "pop_size": 64,
+    "selection": {
+      "kind": "nsga2",
+      "parsimony_epsilon": 0.01
+    },
+    "speciation": {
+      "c_disjoint": 1.0,
+      "c_excess": 1.0,
+      "c_weight": 0.5,
+      "kind": "neat",
+      "min_threshold": 0.3,
+      "target_species": 6,
+      "threshold": 1.5,
+      "threshold_adjust": 0.3
+    },
+    "train": {
+      "kind": "gradient",
+      "lr": 0.03,
+      "steps": 40,
+      "weight_decay": 0.0002,
+      "writeback": true
+    }
+  },
+  "experiment_name": "orchestrated_overmind_canary",
+  "experiment_type": "custom",
+  "fitness": {
+    "components": [
+      "bounded_negative_support_loss",
+      "support_accuracy",
+      "weight_robustness",
+      "hidden_penalty",
+      "complexity_penalty"
+    ],
+    "objectives": [
+      "support_accuracy",
+      "novelty",
+      "weight_robustness",
+      "connection_cost"
+    ],
+    "w_bounded_negative_support_loss": 2.0,
+    "w_complexity_penalty": 0.01,
+    "w_hidden_penalty": 0.05,
+    "w_support_accuracy": 1.0,
+    "w_weight_robustness": 0.5
+  },
+  "generations": 1000,
+  "hyperparameters": {
+    "crossover_kind": "neat",
+    "elitism": 1,
+    "fitness_components": "bounded_negative_support_loss,support_accuracy,weight_robustness,hidden_penalty,complexity_penalty",
+    "generations": 1000,
+    "min_fixed_query_samples": 32,
+    "mutation_operators": "add_rich_node,add_deep_node,add_connection,toggle_connection,mutate_activation,mutate_aggregation,add_recurrent_connection,add_macro_node,tweak_refine_steps,add_local_node,add_local_connection,add_shared_motif,untie_motif_weights,remove_connection,remove_hidden_node,prune_and_regrow",
+    "n_samples": 128,
+    "pop_size": 64,
+    "rung": 1,
+    "seed": 0,
+    "selection_kind": "nsga2",
+    "train_kind": "gradient"
+  },
+  "library": {
+    "admission": "archive",
+    "gc": true,
+    "max_per_signature": 12,
+    "min_metric": 0.9,
+    "min_robustness": 0.0,
+    "per_niche_cap": 2
+  },
+  "log_level": "INFO",
+  "machine_env": "MonadMetal",
+  "min_fixed_query_samples": 32,
+  "ml_lib": "torch",
+  "n_samples": 128,
+  "orchestrator": {
+    "accept_metric": "support_task_appropriate",
+    "accept_threshold": 0.95,
+    "blind_query": true,
+    "budgets": {
+      "depth0": 400,
+      "depth1": 360,
+      "depth2": 320,
+      "depth3": 240,
+      "depth4": 160,
+      "depth5": 80,
+      "depth6": 40,
+      "depth7": 20,
+      "depth8": 10
+    },
+    "cross_validation": {
+      "enabled": true,
+      "max_folds": 5,
+      "min_folds": 2,
+      "pass_fraction": 0.5,
+      "reserve_fraction": 0.15,
+      "reserve_max_seconds": 60,
+      "reserve_min_seconds": 5
+    },
+    "decompose": [
+      "output_slices",
+      "input_subsets",
+      "time_windows",
+      "spatial_patches"
+    ],
+    "decompose_first_above": 2000000,
+    "decompose_leaf_cap": 64,
+    "decompose_probe_generations": 6,
+    "decompose_probe_seconds": 30,
+    "decompose_solvability_floor": 0.6,
+    "direct": {
+      "assess_workers": "auto",
+      "elitism": 2,
+      "max_flat_outputs": 4096,
+      "max_init_genes": 2000000,
+      "pop_size": 64,
+      "structured_grid": true,
+      "train": {
+        "compute_policy_path": "results/compute_policy.json",
+        "kind": "gradient_scheduled",
+        "lr": 0.03,
+        "steps": 160,
+        "weight_decay": 0.0002,
+        "writeback": true
+      }
+    },
+    "evolve": [
+      "routed",
+      "grammar",
+      "field",
+      "direct",
+      "composition"
+    ],
+    "evolve_budget": {
+      "composition": 0.15,
+      "direct": 0.3,
+      "field": 0.25,
+      "grammar": 0.15,
+      "routed": 0.15
+    },
+    "field": {
+      "assess_workers": 0,
+      "audit_sites": 16384,
+      "elitism": 2,
+      "evaluate": {
+        "kind": "standard"
+      },
+      "pop_size": 64,
+      "train": {
+        "kind": "gradient_scheduled",
+        "lr": 0.01,
+        "steps": 20,
+        "weight_decay": 0.0001,
+        "writeback": true
+      },
+      "train_sites": 4096,
+      "verify_chunk_size": 32768,
+      "verify_top_k": 5
+    },
+    "floor": 0.35,
+    "grammar": {
+      "candidates_per_production": 3,
+      "composition_sizes": [
+        2,
+        3,
+        4
+      ],
+      "max_productions": 12,
+      "min_lineage_support": 2,
+      "module_sizes": [
+        3,
+        4
+      ],
+      "mutation_steps": 2,
+      "per_entry_cap": 5000
+    },
+    "input_subsets_n_subsets": 2,
+    "library_dir": "library_canary_clean_seed0",
+    "max_depth": 8,
+    "max_task_seconds": 400,
+    "max_total_task_seconds": 600,
+    "output_slices_max_output_features": 1024,
+    "output_slices_n_groups": 2,
+    "quick_eval_top_k": 5,
+    "refine": {
+      "budget_k": 24,
+      "decay": 0.5,
+      "deduplicate_topologies": true,
+      "depth_max": 0,
+      "metric_epsilon": 0.005,
+      "min_generations": 4,
+      "mode": "always",
+      "retire_superseded": true,
+      "robustness_epsilon": 0.01,
+      "stall_generations": 8,
+      "topology_retry_limit": 8
+    },
+    "report_metric": "query_task_appropriate",
+    "routed": {
+      "adapter_rank": 4,
+      "d_model": 64,
+      "distill": true,
+      "distill_max_nodes": 6,
+      "distill_usage_floor": 0.1,
+      "edge_bias": true,
+      "exclude_temporal": true,
+      "generation_cost": 10,
+      "halting": true,
+      "include_compositions": true,
+      "lifecycle": {
+        "activity_floor": 0.01,
+        "enabled": true,
+        "library_patience_tasks": 48,
+        "route_patience_tasks": 24,
+        "traffic_decay": 0.95
+      },
+      "load_balance_weight": 0.01,
+      "lr": 0.003,
+      "max_steps": 4,
+      "persist": true,
+      "persist_strict": false,
+      "ponder_cost": 0.001,
+      "ponder_epsilon": 0.01,
+      "replay_every": 4,
+      "replay_tasks": 8,
+      "top_k": 2,
+      "train_steps": 200,
+      "weight_decay": 0.0001,
+      "zero_shot_accept": true
+    },
+    "search_metric": "support_accuracy",
+    "spatial_patches_n_patches": 2,
+    "stall_epsilon": 0.005,
+    "stall_generations": 28,
+    "tasks": 36,
+    "time_windows_n_windows": 2,
+    "wall": {
+      "ledger": true,
+      "min_gain_over_baseline": 0.0,
+      "min_metric": 0.45,
+      "seed_top_k": 1
+    }
+  },
+  "output_uri": false,
+  "project_name": "versal",
+  "render_async": true,
+  "repo": "https://github.com/ArdeaAI/versal.git",
+  "resources": {},
+  "rung": 1,
+  "schedule": {
+    "kind": "interleave_rungs",
+    "require_all_rungs": true,
+    "rungs": "all",
+    "shuffle": true,
+    "tasks_per_rung": 2
+  },
+  "seed": 0,
+  "substrate": {
+    "available_activations": [
+      "tanh",
+      "relu",
+      "sigmoid",
+      "identity",
+      "sin",
+      "gaussian"
+    ],
+    "default_activation": "tanh",
+    "recurrent": true
+  },
+  "support_fraction": 0.8,
+  "tf32": false
+}
