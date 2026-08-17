@@ -62,6 +62,17 @@ decompose_probe_generations = 6
 decompose_probe_seconds = 30
 decompose_leaf_cap = 64
 
+  # A support-perfect payload is a provisional solution until it can relearn from reduced support.
+  # The omitted support examples are the only validation labels; the real query remains blind.
+  [orchestrator.cross_validation]
+  enabled = true
+  max_folds = 5
+  min_folds = 2
+  pass_fraction = 0.5
+  reserve_fraction = 0.15
+  reserve_min_seconds = 5
+  reserve_max_seconds = 60
+
   # Deeper subproblems receive progressively smaller evolutionary searches.
   [orchestrator.budgets]
   depth0 = 240

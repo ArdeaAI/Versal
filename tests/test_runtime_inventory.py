@@ -71,10 +71,10 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
 
     brute = Config(Config.PROJECT_ROOT / "configs" / "brute.toml").current
     assert len(brute["schedule"]["rungs"]) == 1 and 1 <= brute["schedule"]["rungs"][0] <= 18  # intentionally retargetable
-    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 2000
+    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 200
     assert brute["n_samples"] == 400
-    assert brute["orchestrator"]["budgets"]["depth0"] == 2000
-    assert brute["orchestrator"]["max_total_task_seconds"] == 7200
+    assert brute["orchestrator"]["budgets"]["depth0"] == 400
+    assert brute["orchestrator"]["max_total_task_seconds"] == 600
 
     lattice = Config(Config.PROJECT_ROOT / "configs" / "canary-lattice.toml").current
     assert lattice["machine_env"] == "LocalLatticeCUDA"

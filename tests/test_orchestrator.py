@@ -78,6 +78,59 @@ def test_library_hit_short_circuits_evolution(tmp_path: Path, xor_task: Task, so
     assert orchestrator.counters["library_hits"] == 1
 
 
+def test_stepping_stone_is_never_promoted_to_lookup_solution(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"accept_metric": "support_accuracy"})
+    orchestrator.library.add(
+        entry_type=MODULE,
+        payload=genome_to_dict(solving_genome),
+        io=task_io(xor_task),
+        provenance={"accepted_metric": 1.0, "stepping_stone": True, "validation_status": "failed"},
+    )
+
+    assert orchestrator._lookup(xor_task, comp_task_spec(xor_task)) is None
+
+
+def test_cross_validation_failure_blocks_admission_but_keeps_report_candidate(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "accept_metric": "support_accuracy",
+            "cross_validation": {"enabled": True, "min_folds": 2, "max_folds": 5, "pass_fraction": 0.5},
+        },
+    )
+    result = StrategyResult(
+        "direct",
+        metric=1.0,
+        generations_used=1,
+        champion_genome=solving_genome,
+        champion_metrics={"support_accuracy": 1.0},
+    )
+    setattr(
+        orchestrator,
+        "_fold_evaluator",
+        lambda _result: (lambda _fold, _seed, _deadline: {"query_accuracy": 0.0, "query_loss": 1.0}),
+    )
+
+    validated = orchestrator._cross_validate_result(result, xor_task)
+
+    assert validated.validation_status == "failed"
+    assert validated.validation_metrics["cv_folds_passed"] == 0.0
+    assert validated.has_report_candidate
+    assert not orchestrator._accepts_result(validated)
+
+
+def test_direct_fold_validation_trains_in_isolation_and_scores_omitted_support(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    orchestrator = _orchestrator(tmp_path, table={"evolve": ["direct"]})
+    fold = Task(xor_task.meta, xor_task.support[:-1], [xor_task.support[-1]])
+    original_weights = [connection.weight for connection in solving_genome.connections]
+
+    metrics = orchestrator._evaluate_genome_fold(solving_genome, fold, seed=17, deadline=None)
+
+    assert math.isfinite(metrics["query_accuracy"])
+    assert math.isfinite(metrics["query_loss"])
+    assert [connection.weight for connection in solving_genome.connections] == original_weights
+
+
 def test_lookup_shutdown_after_support_skips_blind_report(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
     orchestrator = _orchestrator(
         tmp_path,

@@ -18,18 +18,21 @@ reference them, so library entries never dangle across runs.
 """
 
 import math
+import random
 import time
 from array import array
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable
 
+from versal.cross_validation import CrossValidationConfig, SupportCrossValidator, fresh_composition_glue, fresh_genome_weights
 from versal.dataset.icarus import Level0Encoder, Task, encode_task
 from versal.decompose import Subtask, build_decomposers
 from versal.evaluation import fit_query_target, without_query
 from versal.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, GlueValues, IndexRun, PortMap, comp_from_dict, comp_to_dict
-from versal.evolution.genome import Genome, genome_from_dict, genome_to_dict
-from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
+from versal.evolution.evolver import EvolverState
+from versal.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict
+from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState, assess_composition_pure
 from versal.evolution.train import _writeback
 from versal.library import (
     COMPOSITION,
@@ -119,6 +122,8 @@ class Attempt:
     report_metric: float | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
     strategy_metrics: dict[str, float] = field(default_factory=dict)
+    validation_status: str = "not_run"
+    validation_metrics: dict[str, float] = field(default_factory=dict)
     # Best non-parent observation encountered while solving this task. It is explicitly separate
     # from the literal parent accuracy rails: a router score or solved recursive child is evidence
     # about search progress, not an executable answer to the parent task.
@@ -162,6 +167,9 @@ class Attempt:
             data["task_metrics"] = self.task_metrics
         if self.strategy_metrics:
             data["strategy_metrics"] = self.strategy_metrics
+        if self.validation_status != "not_run" or self.validation_metrics:
+            data["validation_status"] = self.validation_status
+            data["validation_metrics"] = self.validation_metrics
         if self.diagnostic_observation:
             data["diagnostic_observation"] = self.diagnostic_observation
         if self.support_status != "legacy_missing" or self.query_status != "legacy_missing" or self.support_accuracy is not None or self.query_accuracy is not None:
@@ -198,6 +206,8 @@ class Attempt:
             report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
             task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
             strategy_metrics={str(key): float(value) for key, value in data.get("strategy_metrics", {}).items()},
+            validation_status=str(data.get("validation_status", "not_run")),
+            validation_metrics={str(key): float(value) for key, value in data.get("validation_metrics", {}).items()},
             diagnostic_observation=dict(data.get("diagnostic_observation", {})),
             support_accuracy=float(data["support_accuracy"]) if data.get("support_accuracy") is not None else None,
             query_accuracy=float(data["query_accuracy"]) if data.get("query_accuracy") is not None else None,
@@ -218,7 +228,19 @@ def _sample_metrics_of(result: StrategyResult) -> dict[str, float]:
     return {key: float(result.champion_metrics[key]) for key in _SAMPLE_METRIC_KEYS if key in result.champion_metrics}
 
 
-_TASK_METRIC_SUFFIXES = ("_exact", "_task_exact", "_shape_accuracy", "_baseline_accuracy", "_gain_over_baseline", "_coverage", "_covered_accuracy")
+_TASK_METRIC_SUFFIXES = (
+    "_exact",
+    "_task_exact",
+    "_shape_accuracy",
+    "_baseline_accuracy",
+    "_gain_over_baseline",
+    "_coverage",
+    "_covered_accuracy",
+    "_correct_cells",
+    "_valid_cells",
+    "_exact_examples",
+    "_total_examples",
+)
 
 
 def _task_metrics(metrics: dict[str, float]) -> dict[str, float]:
@@ -325,6 +347,8 @@ class Orchestrator:
         self.blind_query = bool(table.get("blind_query", False))
         self.structured_grid = bool(table.get("direct", {}).get("structured_grid", False))
         self.accept_threshold = float(table.get("accept_threshold", 0.95))
+        self.cross_validation_config = CrossValidationConfig.from_table(table.get("cross_validation"), seed=int(config.get("run", {}).get("seed", 0)))
+        self.cross_validator = SupportCrossValidator(self.cross_validation_config, accept_threshold=self.accept_threshold)
         self.floor = float(table.get("floor", 0.55))
         self.stall_generations = int(table.get("stall_generations", 15))
         self.stall_epsilon = float(table.get("stall_epsilon", 0.005))
@@ -463,7 +487,12 @@ class Orchestrator:
         # Per-solve wall-clock forensics, save/restored so recursive sub-solves time themselves
         # without clobbering the parent's ledger. The deadline rides the same tuple: each depth
         # gets a fresh budget, but a sub-solve only starts while its parent still has time.
-        previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None), getattr(self, "_solve_deadline", None))
+        previous_timing = (
+            getattr(self, "_solve_started", None),
+            getattr(self, "_active_stages", None),
+            getattr(self, "_solve_deadline", None),
+            getattr(self, "_task_deadline", None),
+        )
         previous_total_deadline = getattr(self, "_total_task_deadline", None)
         previous_display_depth = getattr(self, "_display_depth", 0)
         now = time.perf_counter()
@@ -475,12 +504,15 @@ class Orchestrator:
         local_deadline = (now + self.max_task_seconds) if self.max_task_seconds > 0 else None
         total_deadline = getattr(self, "_total_task_deadline", None)
         deadlines = [deadline for deadline in (local_deadline, total_deadline) if deadline is not None]
-        self._solve_deadline = min(deadlines) if deadlines else None
-        BOARD.clock(max(0.0, self._solve_deadline - now) if self._solve_deadline is not None else None)
+        self._task_deadline = min(deadlines) if deadlines else None
+        available = max(0.0, self._task_deadline - now) if self._task_deadline is not None else None
+        reserve = self.cross_validation_config.reserve_seconds(available)
+        self._solve_deadline = self._task_deadline - reserve if self._task_deadline is not None else None
+        BOARD.clock(available)
         try:
             return self._solve_timed(task, depth)
         finally:
-            self._solve_started, self._active_stages, self._solve_deadline = previous_timing
+            self._solve_started, self._active_stages, self._solve_deadline, self._task_deadline = previous_timing
             self._display_depth = previous_display_depth
             if depth == 0:
                 self._total_task_deadline = previous_total_deadline
@@ -538,7 +570,7 @@ class Orchestrator:
                 return solution
             if self._deadline_exceeded():
                 result = self._remember_or_recover_parent_result(StrategyResult("decompose", metric=0.0, generations_used=0), depth)
-                support_timed_out = self._time_deadline_exceeded() and not self._last_decompose_report_overrun
+                support_timed_out = self._support_timed_out(result) and not self._last_decompose_report_overrun
             # Fall through to the ordinary ladder: a scale-safe init (factored/sparse) rides the
             # same config, so the flat attempt below stays affordable even at init-wall widths.
 
@@ -548,7 +580,7 @@ class Orchestrator:
                 self.counters["wall_seeded_attempts"] += 1
             result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
             result = self._remember_or_recover_parent_result(result, depth)
-            support_timed_out = self._time_deadline_exceeded()
+            support_timed_out = self._support_timed_out(result)
         assert result is not None and support_timed_out is not None
         report_result = self._report_result_for(result, depth)
         if self.blind_query and not self._shutdown_requested():
@@ -573,7 +605,7 @@ class Orchestrator:
         # overrun blocks new decomposition work, but it must not relabel completed support search
         # as a timeout. A later decomposition can still establish a genuine support timeout below.
         timed_out = support_timed_out
-        deadline_blocks_more_work = self._time_deadline_exceeded()
+        deadline_blocks_more_work = self._deadline_exceeded()
         halted = stopping or deadline_blocks_more_work
         if depth < self.max_depth and not halted and not decomposed_first:  # decompose-first already spent its shot
             decompose_started = time.perf_counter()
@@ -586,7 +618,7 @@ class Orchestrator:
                 return solution
             result = self._remember_or_recover_parent_result(result, depth)
             stopping = self._shutdown_requested()
-            timed_out = self._time_deadline_exceeded() and not self._last_decompose_report_overrun
+            timed_out = self._support_timed_out(result) and not self._last_decompose_report_overrun
             halted = stopping or timed_out
 
         self.counters["failures"] += 1
@@ -690,6 +722,110 @@ class Orchestrator:
                 evolver.deadline = previous_deadline
                 evolver.deadline_exceeded = previous_callback
 
+    def _cross_validate_result(self, result: StrategyResult, task: Task) -> StrategyResult:
+        """Attach support-fold evidence to a provisional executable solution exactly once."""
+
+        if not self.cross_validation_config.enabled or result.validation_status != "not_run":
+            return result
+        if not result.has_admissible_champion or not self._accepts_metrics(result.champion_metrics):
+            return result
+        now = time.perf_counter()
+        task_deadline = getattr(self, "_task_deadline", None)
+        bounded_deadline = now + self.cross_validation_config.reserve_max_seconds
+        deadline = min(task_deadline, bounded_deadline) if task_deadline is not None else bounded_deadline
+        self.display.stage_started("cross_validation")
+        validation = self.cross_validator.run(task, self._fold_evaluator(result), deadline=deadline)
+        result.validation_status = validation.status
+        result.validation_metrics = validation.metrics()
+        stages = getattr(self, "_active_stages", None)
+        if stages is not None:
+            stages["cross_validation"] = round(stages.get("cross_validation", 0.0) + validation.seconds, 3)
+        if validation.folds_completed:
+            detail = f"{validation.folds_passed}/{validation.folds_completed} support folds passed"
+        elif validation.status == "not_applicable":
+            detail = "fewer than two usable support folds"
+        else:
+            detail = "no fold completed before validation became unavailable"
+        outcome = "accepted" if validation.admits else ("unavailable" if validation.status == "inconclusive" else "continue")
+        self.display.stage_result("cross_validation", outcome, f"{validation.status} · {detail}", seconds=validation.seconds, depth=getattr(self, "_display_depth", 0))
+        return result
+
+    def _fold_evaluator(self, result: StrategyResult) -> Callable[[Task, int, float | None], dict[str, float]]:
+        if result.champion_comp is not None:
+            comp = result.champion_comp.comp
+            return lambda fold, seed, deadline: self._evaluate_composition_fold(comp, fold, seed, deadline)
+        if result.champion_genome is None:
+            return lambda _fold, _seed, _deadline: {}
+        genome = result.champion_genome
+        if result.field_template is not None:
+            field_template = result.field_template
+            return lambda fold, seed, deadline: self._evaluate_field_fold(genome, field_template, fold, seed, deadline)
+        return lambda fold, seed, deadline: self._evaluate_genome_fold(genome, fold, seed, deadline)
+
+    def _evaluate_genome_fold(self, genome: Genome, task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        strategy: Any = dict(self.strategies).get("direct")
+        if strategy is None:
+            grammar = dict(self.strategies).get("grammar")
+            strategy = getattr(grammar, "direct", None)
+        if strategy is None:
+            return {}
+        evolver = strategy.evolver
+        fresh = fresh_genome_weights(genome, seed)
+        adapter = strategy._adapter(task, include_query=True)
+        state = EvolverState([], InnovationTracker.from_genomes([fresh]), random.Random(seed))
+        previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
+        evolver.deadline = deadline
+        evolver.deadline_exceeded = (lambda: deadline is not None and time.perf_counter() >= deadline)
+        try:
+            assessed = evolver.assess(fresh, adapter, state)
+            return {} if assessed.module is None else dict(assessed.metrics)
+        finally:
+            evolver.deadline, evolver.deadline_exceeded = previous_deadline, previous_callback
+
+    def _evaluate_field_fold(self, genome: Genome, field_template: dict[str, Any], task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        strategy: Any = dict(self.strategies).get("field")
+        if strategy is None:
+            return {}
+        from versal.field import FieldAdapter, FieldContract, deterministic_sites, encode_sites, evaluate_field_module, valid_sites
+
+        contract = FieldContract.from_dict(field_template)
+        sites = valid_sites(task.support)
+        selected = deterministic_sites(sites, strategy.train_sites, salt=f"cv:{seed}:{contract.identity}")
+        encoded = encode_sites(task, selected, contract, chunk_size=strategy.verify_chunk_size, deadline=deadline)
+        adapter = FieldAdapter(encoded, encoded, contract, max_inline_depth=strategy.evolver.max_inline_depth, library=self.library)
+        fresh = fresh_genome_weights(genome, seed)
+        state = EvolverState([], InnovationTracker.from_genomes([fresh]), random.Random(seed))
+        evolver = strategy.evolver
+        previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
+        evolver.deadline = deadline
+        evolver.deadline_exceeded = (lambda: deadline is not None and time.perf_counter() >= deadline)
+        try:
+            assessed = evolver.assess(fresh, adapter, state)
+            if assessed.module is None:
+                return {}
+            return evaluate_field_module(assessed.module, task, contract, split="query", chunk_size=strategy.verify_chunk_size, deadline=deadline)
+        finally:
+            evolver.deadline, evolver.deadline_exceeded = previous_deadline, previous_callback
+
+    def _evaluate_composition_fold(self, comp: CompositionGenome, task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        spec = comp_task_spec(task, structured_grid=self.structured_grid)
+        fresh = fresh_composition_glue(comp, seed, dense_scale=self.loop.glue_scale)
+        champions = {species_id: fresh_genome_weights(genome, seed ^ species_id) for species_id, genome in self.state.species_champions.items()}
+        assessed = assess_composition_pure(
+            fresh,
+            spec,
+            champions,
+            self.library,
+            self.loop.max_inline_depth,
+            train=True,
+            train_op=self.loop.evolver.train_op,
+            evaluate_op=self.loop.evolver.evaluate_op,
+            fitness=self.loop.evolver.fitness,
+            rng=random.Random(seed),
+            deadline=deadline,
+        )
+        return dict(assessed.metrics)
+
     # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
 
     def _shutdown_requested(self) -> bool:
@@ -697,11 +833,29 @@ class Orchestrator:
         return bool(callback is not None and callback())
 
     def _time_deadline_exceeded(self) -> bool:
+        """Whether the support-search cutoff has expired (legacy/public timeout meaning)."""
+
         deadline = getattr(self, "_solve_deadline", None)
         return deadline is not None and time.perf_counter() > deadline
 
+    def _search_deadline_exceeded(self) -> bool:
+        return self._time_deadline_exceeded()
+
+    def _task_allowance_exceeded(self) -> bool:
+        deadline = getattr(self, "_task_deadline", None)
+        return deadline is not None and time.perf_counter() > deadline
+
+    def _support_timed_out(self, result: StrategyResult | None = None) -> bool:
+        """Allow a completed reserved-time validation to cross the earlier search cutoff."""
+
+        if self._task_allowance_exceeded():
+            return True
+        if not self._time_deadline_exceeded():
+            return False
+        return result is None or result.validation_status not in {"passed", "not_applicable"}
+
     def _deadline_exceeded(self) -> bool:
-        return self._shutdown_requested() or self._time_deadline_exceeded()
+        return self._shutdown_requested() or self._search_deadline_exceeded()
 
     def _total_deadline_exceeded(self) -> bool:
         deadline = getattr(self, "_total_task_deadline", None)
@@ -887,6 +1041,7 @@ class Orchestrator:
             else:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=handoff_seeds if name == "composition" else None)
             stage_elapsed = time.perf_counter() - stage_started
+            outcome = self._cross_validate_result(outcome, task)
             stages = getattr(self, "_active_stages", None)
             if stages is not None:
                 stages[name] = round(stages.get(name, 0.0) + stage_elapsed, 3)
@@ -1028,7 +1183,8 @@ class Orchestrator:
                 result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
         finally:
             target.topology_tabu = previous_tabu
-        support_timed_out = self._time_deadline_exceeded()
+        result = self._cross_validate_result(result, task)
+        support_timed_out = self._support_timed_out(result)
         stopping = self._shutdown_requested()
         if topology_tabu is not None:
             topology_tabu.commit()
@@ -1314,6 +1470,10 @@ class Orchestrator:
         candidates.extend(entry for entry in exact if entry.key not in seen)
         candidates = candidates[: self.quick_eval_top_k]
         for entry in candidates:
+            # Stones are reusable search material, not verified task solutions.  In particular a
+            # support-perfect stone that failed CV must never turn into a zero-cost lookup hit.
+            if entry.provenance.get("stepping_stone"):
+                continue
             if self._total_deadline_exceeded():
                 return None
             assessment = self._quick_assessment(entry, task, spec)
@@ -1496,7 +1656,7 @@ class Orchestrator:
             return None
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         result = self._remember_or_recover_parent_result(result, depth)
-        support_timed_out = self._time_deadline_exceeded()
+        support_timed_out = self._support_timed_out(result)
         report_result = self._report_result_for(result, depth)
         report_attempted_before = report_result.report_attempted
         if self.blind_query and not self._shutdown_requested():
@@ -1733,7 +1893,7 @@ class Orchestrator:
                 self.counters["routed_solved"] += 1
                 if result.champion_metrics.get("routed_zero_shot"):
                     self.counters["routed_zero_shot"] += 1
-            return self._admit(result.champion_comp, task, spec, depth, decompose_op)
+            return self._admit(result.champion_comp, task, spec, depth, decompose_op, validation_result=result)
         if result.champion_genome is not None:
             return self._admit_direct_module(result, task, spec, depth)
         raise ValueError(f"strategy {result.strategy!r} produced no admissible champion")
@@ -1751,6 +1911,7 @@ class Orchestrator:
             "accepted_metric": result.metric,
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
             "behavior": _genome_behavior(result.champion_genome),
+            **self._validation_provenance(result),
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
@@ -1775,7 +1936,16 @@ class Orchestrator:
             dependency=depth > 0 or self._stepping_stone,
         )
 
-    def _admit(self, best: AssessedComposition, task: Task, spec: CompTaskSpec, depth: int, decompose_op: str | None) -> str | None:
+    def _admit(
+        self,
+        best: AssessedComposition,
+        task: Task,
+        spec: CompTaskSpec,
+        depth: int,
+        decompose_op: str | None,
+        *,
+        validation_result: StrategyResult,
+    ) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
         entries carrying the exact trained weights that scored; the composition references those."""
         metric = self._metric(best)
@@ -1825,6 +1995,7 @@ class Orchestrator:
             "accepted_metric": metric,
             "weight_robustness": best.metrics.get("weight_robustness", 0.0),
             "behavior": _comp_behavior(detached, level),
+            **self._validation_provenance(validation_result),
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
@@ -1833,6 +2004,12 @@ class Orchestrator:
         return self._gated_add(
             entry_type=COMPOSITION, payload=comp_to_dict(detached), io=self._io_of(task, spec), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
         )
+
+    @staticmethod
+    def _validation_provenance(result: StrategyResult) -> dict[str, Any]:
+        if result.validation_status == "not_run" and not result.validation_metrics:
+            return {}
+        return {"validation_status": result.validation_status, **result.validation_metrics}
 
     # --- skeleton wiring ------------------------------------------------------------------------------
 
@@ -1962,7 +2139,11 @@ class Orchestrator:
         # A score is not a solution unless the strategy can hand admission an executable payload.
         # This defense is intentionally strategy-agnostic: declined guards, empty grammars, and
         # undistillable router wins all use metric-only StrategyResults to continue the ladder.
-        return result.has_admissible_champion and self._accepts_metrics(result.champion_metrics)
+        if not result.has_admissible_champion or not self._accepts_metrics(result.champion_metrics):
+            return False
+        if not getattr(self, "cross_validation_config", CrossValidationConfig()).enabled:
+            return True
+        return result.validation_status in {"passed", "not_applicable"}
 
     def _report(self, item: Any) -> float:
         return self._report_value(item.metrics) or 0.0
@@ -2047,6 +2228,8 @@ class Orchestrator:
             size_metrics=size_metrics,
             resource_metrics=dict(result.resource_metrics),
             strategy_metrics=dict(result.strategy_metrics),
+            validation_status=result.validation_status,
+            validation_metrics=dict(result.validation_metrics),
             report_metric=None if suppress_query else self._result_report_value(quality_result),
             task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,

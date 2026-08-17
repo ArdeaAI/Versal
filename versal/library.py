@@ -408,6 +408,8 @@ class ModuleLibrary:
             "io": io,
             "accepted_metric": float(provenance.get("accepted_metric", 0.0)),
             "weight_robustness": float(provenance.get("weight_robustness", 0.0)),
+            "validation_status": provenance.get("validation_status", "legacy_unverified"),
+            "cv_pass_fraction": float(provenance.get("cv_pass_fraction", 0.0)),
             "retired": False,
             "dependency": bool(provenance.get("dependency", False)),
             "behavior": list(provenance.get("behavior", [])),  # QD niche descriptor (archive policy)
@@ -426,9 +428,12 @@ class ModuleLibrary:
         summary = self._index[key]
         summary["accepted_metric"] = max(float(summary.get("accepted_metric", 0.0)), float(provenance.get("accepted_metric", 0.0)))
         summary["weight_robustness"] = max(float(summary.get("weight_robustness", 0.0)), float(provenance.get("weight_robustness", 0.0)))
+        if provenance.get("validation_status") == "passed":
+            summary["validation_status"] = "passed"
+            summary["cv_pass_fraction"] = max(float(summary.get("cv_pass_fraction", 0.0)), float(provenance.get("cv_pass_fraction", 0.0)))
         entry = self.load(key)
         history = entry.provenance.setdefault("readmissions", [])
-        history.append({k: provenance.get(k) for k in ("task", "rung", "depth", "accepted_metric", "weight_robustness")})
+        history.append({k: provenance.get(k) for k in ("task", "rung", "depth", "accepted_metric", "weight_robustness", "validation_status", "cv_pass_fraction")})
         del history[:-10]  # cap file growth
         (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
         self._write_index()

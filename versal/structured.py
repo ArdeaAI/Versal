@@ -127,12 +127,28 @@ def _support_grid_fields(task: Task) -> tuple[list[Field], list[Field]] | None:
     outputs = [target for _field, target in task.support]
     if not inputs or not outputs:
         return None
-    spatial = {Axis.HEIGHT, Axis.WIDTH}
-    if any(field.data.ndim != 2 or set(field.axes) != spatial for field in inputs + outputs):
-        return None
-    if any(field.value_type is not ValueType.CATEGORICAL for field in inputs + outputs):
+    if any(not _is_grid_field(field) for field in inputs + outputs):
         return None
     return inputs, outputs
+
+
+def _is_grid_field(field: Field) -> bool:
+    """Accept H/W grids with only singleton auxiliary axes.
+
+    Icarus publishes ARC as ``C x H x W`` with ``C == 1``.  Treating that channel as a semantic
+    dimension disabled structured evaluation even though it carries no information.  Non-singleton
+    auxiliary axes remain ambiguous and deliberately stay on the ordinary encoder path.
+    """
+
+    if field.value_type is not ValueType.CATEGORICAL or len(field.axes) != field.data.ndim:
+        return False
+    if Axis.HEIGHT not in field.axes or Axis.WIDTH not in field.axes:
+        return False
+    return all(axis in {Axis.HEIGHT, Axis.WIDTH} or int(field.data.shape[index]) == 1 for index, axis in enumerate(field.axes))
+
+
+def _spatial_shape(field: Field) -> tuple[int, int]:
+    return int(field.data.shape[field.axes.index(Axis.HEIGHT)]), int(field.data.shape[field.axes.index(Axis.WIDTH)])
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +210,10 @@ def _as_hw(field: Field) -> tuple[torch.Tensor, torch.Tensor | None]:
     width_axis = field.axes.index(Axis.WIDTH)
     data = field.data.movedim((height_axis, width_axis), (0, 1))
     mask = None if field.mask is None else field.mask.movedim((height_axis, width_axis), (0, 1))
+    if data.ndim > 2:
+        data = data.reshape(data.shape[0], data.shape[1])
+        if mask is not None:
+            mask = mask.reshape(mask.shape[0], mask.shape[1])
     return data, mask
 
 
@@ -245,9 +265,8 @@ def encode_structured_grid(task: Task, encoder: Level0Encoder, *, include_query:
     support_outputs = tuple(_real_shape(field) for field in support_output_fields)
     query_inputs = tuple(_real_shape(field) for field, _target in task.query) if include_query else ()
     query_output_fields = [target for _field, target in task.query] if include_query else []
-    if include_query and any(
-        field.data.ndim != 2 or set(field.axes) != {Axis.HEIGHT, Axis.WIDTH} or field.value_type is not ValueType.CATEGORICAL for field in query_output_fields
-    ):
+    query_input_fields = [field for field, _target in task.query] if include_query else []
+    if include_query and any(not _is_grid_field(field) for field in query_input_fields + query_output_fields):
         return None
     query_outputs = tuple(_real_shape(field) for field in query_output_fields)
     # ARC's public 30x30 domain bound permits support-derived identity/scale rules to extrapolate;
@@ -256,12 +275,12 @@ def encode_structured_grid(task: Task, encoder: Level0Encoder, *, include_query:
     max_height = max(30, *(shape[0] for shape in observed_shapes))
     max_width = max(30, *(shape[1] for shape in observed_shapes))
     input_canvas = (
-        max(shape[0] for shape in support_inputs),
-        max(shape[1] for shape in support_inputs),
+        max(_spatial_shape(field)[0] for field in support_input_fields),
+        max(_spatial_shape(field)[1] for field in support_input_fields),
     )
     output_canvas = (
-        max(shape[0] for shape in support_outputs),
-        max(shape[1] for shape in support_outputs),
+        max(_spatial_shape(field)[0] for field in support_output_fields),
+        max(_spatial_shape(field)[1] for field in support_output_fields),
     )
     input_descriptor = _descriptor(support_input_fields[0])
     output_descriptor = _descriptor(support_output_fields[0])
@@ -270,7 +289,6 @@ def encode_structured_grid(task: Task, encoder: Level0Encoder, *, include_query:
     query_input = query_target = None
     query_input_coverage: tuple[float, ...] = ()
     if include_query and task.query:
-        query_input_fields = [field for field, _target in task.query]
         query_input, query_input_coverage = _encode_inputs(query_input_fields, input_canvas, input_descriptor)
         query_target = _encode_targets(query_output_fields, output_canvas, output_descriptor)
     return StructuredGridEncoded(
@@ -374,6 +392,10 @@ def _structured_split(
     raw = as_logits(module(x), descriptor, target_positions(target))
     accuracy, loss = split_metrics_from_raw(raw, target, mask, descriptor, encoder)
     predictions = encoder.decode(raw, descriptor)
+    correct = predictions == target.to(torch.long)
+    valid = torch.ones_like(correct, dtype=torch.bool) if mask is None else ~mask
+    correct_valid_cells = int((correct & valid).sum())
+    valid_cells = int(sum(output_cells))
     covered_cell_exact = _example_exact(predictions, target, mask)
     predicted_shapes = tuple(encoded.shape_program.predict(shape) for shape in input_shapes)
     shape_correct = torch.tensor(
@@ -414,6 +436,10 @@ def _structured_split(
         f"{split}_shape_accuracy": float(shape_correct.float().mean()) if len(shape_correct) else 0.0,
         f"{split}_exact": float(exact.float().mean()),
         f"{split}_task_exact": float(bool(exact.numel()) and bool(exact.all())),
+        f"{split}_correct_cells": float(correct_valid_cells),
+        f"{split}_valid_cells": float(valid_cells),
+        f"{split}_exact_examples": float(exact.sum()),
+        f"{split}_total_examples": float(exact.numel()),
         **baselines,
         f"{split}_gain_over_baseline": full_accuracy - baselines[f"{split}_baseline_accuracy"],
     }

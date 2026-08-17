@@ -1,7 +1,7 @@
 extends = "canary.toml"
 
 # Deep capability test for one task family. Change only `rungs` to retarget it; the shared library
-# lets repeated assaults compound. Twenty two-hour tasks cap the run at about 40 hours.
+# lets repeated assaults compound. Two hundred ten-minute tasks cap the run at about 33 hours.
 
 [run]
 experiment = "orchestrated_overmind_brute"

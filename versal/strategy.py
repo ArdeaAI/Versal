@@ -99,6 +99,10 @@ class StrategyResult:
     # admission, refinement, robustness ranking, or the next task's search state.
     report_metrics: dict[str, float] = field(default_factory=dict)
     report_attempted: bool = False
+    # Support-only admission evidence. Search strategies stop on the ordinary support gate; the
+    # orchestrator fills these fields before deciding whether the payload is a verified solution.
+    validation_status: str = "not_run"
+    validation_metrics: dict[str, float] = field(default_factory=dict)
     # A routed winner is a RECORD (versal.routing.RoutedSolution), not an admissible payload: the
     # executable state lives in the persisted router. Typed Any to keep strategy free of a routing import.
     champion_routed: Any | None = None
