@@ -7,7 +7,7 @@ from versal.dataset.icarus import Axis, Field, Level0Encoder, Task, TaskKind, Ta
 from versal.evaluation import input_width, output_features
 from versal.evolution.evolver import Evolver, TaskAdapter
 from versal.evolution.loop import CompTaskSpec
-from versal.orchestrator import Orchestrator
+from versal.orchestrator import Orchestrator, comp_task_spec
 from versal.strategy import DirectStrategy, StrategyResult, StrategyRuntime
 from versal.structured import ShapeRule, encode_structured_grid, evaluate_structured_grid, fit_shape_program
 
@@ -25,6 +25,13 @@ def _field(height: int, width: int, value: int = 0) -> Field:
 
 def _grid(values: list[list[int]]) -> Field:
     return Field(torch.tensor(values, dtype=torch.long), (Axis.HEIGHT, Axis.WIDTH), ValueType.CATEGORICAL, 3, None, None)
+
+
+def _padded_channel_grid(*, height: int = 2, width: int = 3, canvas: int = 4) -> Field:
+    data = torch.zeros((1, canvas, canvas), dtype=torch.long)
+    mask = torch.ones_like(data, dtype=torch.bool)
+    mask[:, :height, :width] = False
+    return Field(data, (Axis.CHANNEL, Axis.HEIGHT, Axis.WIDTH), ValueType.CATEGORICAL, 3, None, mask)
 
 
 def _swap_shape_task(*, query_output: tuple[int, int] = (4, 2)) -> Task:
@@ -66,6 +73,28 @@ def test_structured_grid_reports_exact_shape_cells_and_baselines() -> None:
     assert metrics["query_shape_accuracy"] == 1.0
     assert metrics["query_baseline_accuracy"] == 1.0
     assert metrics["query_gain_over_baseline"] == 0.0
+
+
+def test_singleton_channel_grid_preserves_padded_width_and_reports_denominators() -> None:
+    field = _padded_channel_grid()
+    task = Task(TaskMeta(18, TaskKind.MAP, "arc.padded", fixed_split=True), [(field, field)], [(field, field)])
+    encoder = Level0Encoder(16)
+    encoded = encode_structured_grid(task, encoder)
+
+    assert encoded is not None
+    assert encoded.support_input[0].shape == (1, 16)
+    assert encoded.support_target[0].shape == (1, 16)
+    spec = comp_task_spec(task, structured_grid=True)
+    assert spec.n_inputs == 16
+    assert spec.output_width == 48
+    assert spec.encoded.support_input[0].shape == (1, 16)
+    metrics = evaluate_structured_grid(_ZeroGrid(output_features(encoded)), encoded, encoder)
+    assert metrics["support_task_exact"] == 1.0
+    assert metrics["query_task_exact"] == 1.0
+    assert metrics["query_correct_cells"] == 6.0
+    assert metrics["query_valid_cells"] == 6.0
+    assert metrics["query_exact_examples"] == 1.0
+    assert metrics["query_total_examples"] == 1.0
 
 
 def test_exact_grid_rejects_correct_cells_at_wrong_predicted_shape() -> None:
@@ -150,7 +179,9 @@ def test_direct_structured_adapter_preserves_head_width_and_blinds_query() -> No
 def test_direct_width_guard_counts_categorical_logits() -> None:
     strategy = DirectStrategy(evolver=cast(Evolver, None), max_flat_outputs=20)
     result = strategy(_swap_shape_task(), cast(CompTaskSpec, None), cast(StrategyRuntime, None), budget=1)
-    assert result.champion_metrics["declined_flat_width"] == 36.0  # 4x3 support canvas, three classes
+    assert result.strategy_metrics["direct_flat_outputs"] == 36.0  # 4x3 support canvas, three classes
+    assert result.strategy_metrics["direct_max_flat_outputs"] == 20.0
+    assert result.skip_reason == "36 flattened outputs exceed the 20 safety limit"
 
 
 def test_task_appropriate_metric_prefers_exact_only_when_present() -> None:

@@ -93,7 +93,7 @@ def _render_chain() -> dict[str, LibraryEntry]:
     return chain
 
 
-# --- spec builders ---------------------------------------------------------------------------------
+# spec builders
 
 
 def test_genome_spec_basic(solving_genome: Genome) -> None:
@@ -365,7 +365,25 @@ def test_shared_datashader_edge_chunks_include_every_scene_edge(monkeypatch) -> 
     assert np.count_nonzero(image[:, :, 3]) > 0
 
 
-# --- png renders -----------------------------------------------------------------------------------
+def test_datashader_edge_layer_caps_overlap_at_declared_opacity() -> None:
+    import numpy as np
+
+    from versal.rendering import RenderSpec, SpecEdge, _rasterized_spec_edges
+
+    repeated = SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_entry"], alpha=0.6, role="routing-entry")
+    image, rendered = _rasterized_spec_edges(
+        RenderSpec(edges=[repeated] * 100),
+        pixel_width=64,
+        pixel_height=48,
+        x_range=(-0.1, 1.1),
+        y_range=(-0.1, 1.1),
+    )
+
+    assert rendered == 100
+    assert int(np.max(image[:, :, 3])) <= round(0.6 * 255)
+
+
+# png renders
 
 
 def test_render_network_writes_png(tmp_path: Path, solving_genome: Genome) -> None:
@@ -463,7 +481,7 @@ def test_density_renderer_is_not_used_by_task_gallery_nested_or_overmind_paths(m
     ],
 )
 def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels) -> None:
-    from versal.rendering import _density_layout
+    from versal.rendering_density import _density_layout
 
     entry = _spatial_entry("spatial", descriptors)
     first = _density_layout(entry)
@@ -486,7 +504,7 @@ def test_density_semantic_layouts_are_deterministic(descriptors, expected_panels
     ],
 )
 def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coordinate, reason) -> None:
-    from versal.rendering import _density_layout
+    from versal.rendering_density import _density_layout
 
     entry = _spatial_entry("fallback", [("CONTINUOUS|C,H,W", (1, 2, 2))])
     entry.io["inputs"][0]["signature"] = signature
@@ -501,7 +519,7 @@ def test_density_malformed_or_nonspatial_inputs_use_packed_grid(signature, coord
 
 
 def test_density_duplicate_coordinates_use_packed_grid() -> None:
-    from versal.rendering import _density_layout
+    from versal.rendering_density import _density_layout
 
     entry = _spatial_entry("duplicate", [("CONTINUOUS|C,H,W", (1, 2, 2))])
     entry.payload["nodes"][1]["coordinate"] = entry.payload["nodes"][0]["coordinate"]
@@ -511,56 +529,12 @@ def test_density_duplicate_coordinates_use_packed_grid() -> None:
     assert "duplicate coordinates" in (layout.fallback_reason or "")
 
 
-def test_density_rasterizes_every_edge_category_and_counts_all_enabled() -> None:
-    import datashader as ds
-    import numpy as np
-    import pandas as pd
-
-    from versal.rendering import _density_layout, _macro_implied_payload_edges, _rasterized_edge_layers
-
-    entry = _spatial_entry("layers", [("CONTINUOUS|C,H,W", (1, 2, 2))])
-    hidden_id = next(node["id"] for node in entry.payload["nodes"] if node["kind"] == "hidden")
-    entry.payload["macros"] = [{"ref": "library:m1_inner", "inputs": [2], "outputs": [hidden_id], "innovation": 9}]
-    layout = _density_layout(entry)
-    canvas = ds.Canvas(plot_width=64, plot_height=48, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
-    layers, enabled, rendered = _rasterized_edge_layers(
-        canvas,
-        layout.positions,
-        entry.payload["connections"],
-        _macro_implied_payload_edges(entry.payload),
-        ds,
-        pd,
-        np,
-    )
-
-    assert enabled == rendered == 5
-    assert all(layers[name] is not None for name in ("positive", "negative", "recurrent", "macro"))
-    assert all(float(np.asarray(layers[name].data).sum()) > 0 for name in layers)
-
-
-def test_density_edge_chunk_boundary_includes_every_enabled_edge() -> None:
-    import datashader as ds
-    import numpy as np
-    import pandas as pd
-
-    import versal.rendering as rendering
-
-    positions = {0: (0.1, 0.1), 1: (0.9, 0.9)}
-    connection = {"in": 0, "out": 1, "weight": 1.0, "enabled": True, "recurrent": False}
-    connections = [connection] * (rendering._DENSITY_EDGE_CHUNK + 1)
-    canvas = ds.Canvas(plot_width=16, plot_height=16, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
-    layers, enabled, rendered = rendering._rasterized_edge_layers(canvas, positions, connections, [], ds, pd, np)
-
-    assert enabled == rendered == rendering._DENSITY_EDGE_CHUNK + 1
-    assert layers["positive"] is not None
-
-
 def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch, tmp_path: Path) -> None:
     import matplotlib.image as mpimg
     import numpy as np
     from matplotlib.axes import Axes
 
-    from versal.rendering import _render_large_module_density
+    from versal.rendering_density import _render_large_module_density
 
     entry = _spatial_entry("portrait", [("CONTINUOUS|E,C,H,W", (4, 1, 3, 4))])
     labels: list[str] = []
@@ -578,11 +552,11 @@ def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch,
     first_pixels = mpimg.imread(first_path)
     second_pixels = mpimg.imread(second_path)
 
-    assert first.canvas_width == 2400 and first.canvas_height == 1600
+    assert first.canvas_width == 4800 and first.canvas_height == 3200
     assert first.enabled_edge_count == first.rendered_edge_count == 5
     assert first.isolated_input_count == 46
     assert first.semantic_layout_mode == "semantic-spatial"
-    assert first_pixels.shape[:2] == (1600, 2400)
+    assert first_pixels.shape[:2] == (3200, 4800)
     assert first_pixels.std() > 0.01
     assert np.array_equal(first_pixels, second_pixels)
     assert "potential influence flow" in labels
@@ -657,7 +631,7 @@ def test_composition_spec_without_library_uses_opaque_boxes() -> None:
     assert len(spec.containers) == 1 and spec.containers[0].opaque
 
 
-# --- overmind flow grid ----------------------------------------------------------------------------
+# overmind flow grid
 
 
 def _grid_view(count: int):
@@ -748,6 +722,7 @@ def test_overmind_fresh_library_draws_uniform_feeds() -> None:
     exit_edges = [edge for edge in spec.edges if edge.color == THEME["edge_exit"]]
     assert len(entry_edges) == 3 and len(exit_edges) == 3
     assert all(edge.width == 0.8 for edge in entry_edges + exit_edges)  # uniform thin: the flow story on day one
+    assert all(edge.alpha == 0.6 for edge in entry_edges + exit_edges)
     anchors = {(node.x, node.y) for node in spec.nodes if node.color == THEME["node_anchor"]}
     assert {(edge.x1, edge.y1) for edge in entry_edges} == anchors
 
@@ -818,6 +793,26 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     for expected in expected_labels + ("network input anchor", "nested-network flow"):
         assert expected in labels
     assert "built from (structural ref)" not in labels
+    feed_swatches = [edge for edge in keyed.edges if edge.role == "legend" and edge.color in {THEME["edge_entry"], THEME["edge_exit"]}]
+    assert len(feed_swatches) == 2 and all(edge.alpha == 0.6 for edge in feed_swatches)
+
+
+def test_pruned_adaptive_legend_only_shows_present_symbols_and_moves_below_narrow_grid() -> None:
+    from versal.rendering import build_overmind_spec
+
+    full = build_overmind_spec(_grid_view(1), legend=True)
+    adaptive = build_overmind_spec(_grid_view(1), legend=True, legend_mode="adaptive")
+    labels = {text.text for text in adaptive.texts}
+
+    assert "input feed (step-0 gate mass)" in labels
+    assert "output feed (final-step gate mass)" in labels
+    assert "retired or unexpanded network" in labels
+    assert "macro implied wiring" not in labels
+    assert "recurrent (time-delayed)" not in labels
+    assert adaptive.width < full.width
+    expert = next(box for box in adaptive.containers if box.depth == 1 and box.label == "v0")
+    legend_panel = next(box for box in adaptive.containers if box.depth == 0)
+    assert legend_panel.y1 < expert.y0
 
 
 def test_cold_overmind_labels_routing_potential_not_observed_traffic() -> None:
@@ -858,6 +853,51 @@ def test_render_spec_png_preserves_aspect(tmp_path: Path) -> None:
     assert image.shape[0] > image.shape[1]  # a tall spec renders taller than wide, not a padded square
 
 
+def test_default_render_size_is_double_density_and_memory_bounded() -> None:
+    from versal.rendering import _MAX_RENDER_PIXELS, _RENDER_DPI, RenderSpec, _render_figure_size
+
+    square_width, square_height = _render_figure_size(RenderSpec(width=4.0, height=4.0), _RENDER_DPI)
+    assert (round(square_width * _RENDER_DPI), round(square_height * _RENDER_DPI)) == (1200, 1200)
+
+    huge_width, huge_height = _render_figure_size(RenderSpec(width=100.0, height=100.0), _RENDER_DPI)
+    assert huge_width * huge_height * _RENDER_DPI * _RENDER_DPI == pytest.approx(_MAX_RENDER_PIXELS)
+
+
+def test_draw_spec_orders_exact_alpha_feeds_beneath_network_and_routing(monkeypatch) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    import versal.rendering as rendering
+
+    calls: list[tuple[list[str], list[float], float]] = []
+
+    def capture(_axis, edges, *, directional, zorder=2.2):
+        del directional
+        calls.append(([edge.role for edge in edges], [edge.alpha for edge in edges], zorder))
+
+    monkeypatch.setattr(rendering, "_draw_classic_edges", capture)
+    spec = rendering.RenderSpec(
+        edges=[
+            rendering.SpecEdge(0, 0, 1, 1, 1, THEME["edge_positive"], alpha=0.4, role="forward-positive"),
+            rendering.SpecEdge(0, 1, 1, 0, 1, THEME["edge_entry"], alpha=0.6, role="routing-entry"),
+            rendering.SpecEdge(1, 0, 0, 1, 1, THEME["edge_pathway"], alpha=0.7, role="routing-observed"),
+        ],
+        width=1,
+        height=1,
+    )
+    figure, axis = plt.subplots()
+    rendering.draw_spec(axis, spec)
+    plt.close(figure)
+
+    assert calls == [
+        (["routing-entry"], [0.6], 1.8),
+        (["forward-positive"], [0.4], 2.2),
+        (["routing-observed"], [0.7], 2.4),
+    ]
+
+
 def test_render_spec_png_preserves_destination_when_save_fails(monkeypatch, tmp_path: Path) -> None:
     from matplotlib.figure import Figure
 
@@ -890,8 +930,13 @@ def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
         raise ImportError("Datashader unavailable")
 
     monkeypatch.setattr(rendering, "_rasterized_spec_edges", fail)
+    monkeypatch.setattr(rendering, "_EXPLICIT_EDGE_LIMIT", 0)
+    monkeypatch.setattr(rendering, "_MAX_STRAIGHT_EDGES", 1)
     spec = rendering.RenderSpec(
-        edges=[rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"])],
+        edges=[
+            rendering.SpecEdge(0.0, 0.0, 1.0, 1.0, 1.0, THEME["edge_positive"]),
+            rendering.SpecEdge(0.0, 1.0, 1.0, 0.0, 1.0, THEME["edge_negative"]),
+        ],
         width=1.0,
         height=1.0,
         flow_label="potential influence flow · test",
@@ -900,7 +945,7 @@ def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
     rendering.draw_spec(axis, spec)
 
     assert any("classic fallback" in text.get_text() for text in axis.texts)
-    assert axis.patches  # explicit directional edge remains visible
+    assert axis.collections  # classic line collection remains visible
     plt.close(figure)
 
 

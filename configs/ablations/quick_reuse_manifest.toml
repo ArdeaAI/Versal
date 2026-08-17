@@ -1,0 +1,26 @@
+version = 1
+
+[suite]
+name = "paper_quick_reuse"
+description = "Three-cycle matched probe of cross-task memory and exact revisits."
+baseline = "full_memory"
+results_root = "results/ablations/quick_reuse_20260817"
+
+[seeds]
+p0 = [0, 1, 2]
+
+[[arms]]
+name = "full_memory"
+priority = "P0"
+config = "quick_reuse_base.toml"
+lever = "persistent library, router, and shared module state"
+claim = "cross-task retention and search-cost amortization"
+measure = "cycle-specific wall time, generations, accepted/query metrics, hits/refinement"
+
+[[arms]]
+name = "no_cross_task_memory"
+priority = "P0"
+config = "quick_reuse_no_memory.toml"
+lever = "fresh frozen starting state for every task"
+claim = "no-memory matched control"
+measure = "cycle-specific wall time, generations, accepted/query metrics"

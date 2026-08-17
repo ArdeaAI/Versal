@@ -1,0 +1,37 @@
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage{xurl}
+\usepackage{etoolbox}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdfauthor={J. R. M. Gardner},
+  pdftitle={Versal: Versatile Evolution of Reusable Structure for Adaptive Learning}
+}
+
+\titleformat{\section}
+  {\needspace{3\baselineskip}\fontsize{12}{13.2}\selectfont\bfseries}
+  {}{0pt}{}
+\titleformat{\subsection}
+  {\needspace{2.5\baselineskip}\fontsize{10}{11.2}\selectfont\bfseries}
+  {}{0pt}{}
+\titlespacing*{\section}{0pt}{8pt}{3pt}
+\titlespacing*{\subsection}{0pt}{6pt}{2pt}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{2.5pt plus 0.5pt minus 0.3pt}
+\setlength{\emergencystretch}{2em}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.93}
+\setlist{nosep,leftmargin=1.5em,topsep=2pt}
+\setlist[enumerate]{label=\arabic*.}
+
+\AtBeginEnvironment{longtable}{\fontsize{7.15}{8.0}\selectfont\setlength{\LTpre}{3pt}\setlength{\LTpost}{3pt}}
+
+\AtBeginDocument{\fontsize{9.15}{10.45}\selectfont}

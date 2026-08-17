@@ -155,13 +155,10 @@ def factored(
     v_scale = weight_scale / math.sqrt(rank)
     connections: list[ConnectionGene] = []
     for source in [*input_ids, bias_id]:
-        for latent in latent_ids:
-            connections.append(ConnectionGene(source, latent, rng.gauss(0.0, u_scale), True, source * total + latent))
+        connections.extend(ConnectionGene(source, latent, rng.gauss(0.0, u_scale), True, source * total + latent) for latent in latent_ids)
     for latent in latent_ids:
-        for target in output_ids:
-            connections.append(ConnectionGene(latent, target, rng.gauss(0.0, v_scale), True, latent * total + target))
-    for target in output_ids:
-        connections.append(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target))
+        connections.extend(ConnectionGene(latent, target, rng.gauss(0.0, v_scale), True, latent * total + target) for target in output_ids)
+    connections.extend(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target) for target in output_ids)
     return Genome(nodes=nodes, connections=connections)
 
 
@@ -206,8 +203,7 @@ def sparse(
         source = input_ids[flat // n_outputs]
         target = output_ids[flat % n_outputs]
         connections.append(ConnectionGene(source, target, rng.gauss(0.0, edge_scale), True, source * total + target))
-    for target in output_ids:
-        connections.append(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target))
+    connections.extend(ConnectionGene(bias_id, target, rng.gauss(0.0, weight_scale), True, bias_id * total + target) for target in output_ids)
     return Genome(nodes=nodes, connections=connections)
 
 
@@ -295,10 +291,9 @@ def cppn_seed(
 
     emit(input_ids, _index_continuum(n_inputs), hidden_ids, hidden_coordinates)
     emit(hidden_ids, hidden_coordinates, output_ids, _index_continuum(n_outputs))
-    for hidden_id in hidden_ids:  # free bias genes; the generator patterns receptive fields, not offsets
-        connections.append(ConnectionGene(bias_id, hidden_id, rng.gauss(0.0, weight_scale), True, bias_id * total + hidden_id))
-    for output_id in output_ids:
-        connections.append(ConnectionGene(bias_id, output_id, rng.gauss(0.0, weight_scale), True, bias_id * total + output_id))
+    # Bias genes are free; the generator patterns receptive fields rather than offsets.
+    connections.extend(ConnectionGene(bias_id, hidden_id, rng.gauss(0.0, weight_scale), True, bias_id * total + hidden_id) for hidden_id in hidden_ids)
+    connections.extend(ConnectionGene(bias_id, output_id, rng.gauss(0.0, weight_scale), True, bias_id * total + output_id) for output_id in output_ids)
     return Genome(nodes=nodes, connections=connections)
 
 

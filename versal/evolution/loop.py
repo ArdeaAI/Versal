@@ -296,7 +296,7 @@ class HierarchicalLoop:
             concurrent_trainers=concurrent_trainers,
         )
 
-    # --- state ------------------------------------------------------------------------------------
+    # state
 
     def fresh_state(self, rng: random.Random) -> HierarchicalState:
         # Seed minimal genomes first so the tracker baseline is well-defined, then graft library
@@ -333,7 +333,7 @@ class HierarchicalLoop:
             state.species_champion_index[plan.species_id] = champion
             state.species_champions[plan.species_id] = state.modules[champion].genome
 
-    # --- ref plumbing -------------------------------------------------------------------------------
+    # ref plumbing
 
     def ref_catalog(self, state: HierarchicalState, spec: CompTaskSpec | None = None) -> list[RefSpec]:
         catalog = [RefSpec(f"live:{species_id}", self.in_ports, self.out_ports) for species_id in sorted(state.species_champions)]
@@ -376,7 +376,7 @@ class HierarchicalLoop:
                 state.repaired_refs += 1
         return comp if child is None else child
 
-    # --- assessment ---------------------------------------------------------------------------------
+    # assessment
 
     def assess_composition(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
         """Public assessment seam: the orchestrator's strategies verify champions through it
@@ -430,7 +430,7 @@ class HierarchicalLoop:
             return pool.map(worker, comps, chunksize=chunksize)
         return [self._assess(comp, spec, state, train=train) for comp in comps]
 
-    # --- attribution and writeback --------------------------------------------------------------------
+    # attribution and writeback
 
     def _attribute(self, assessed: list[AssessedComposition], state: HierarchicalState) -> None:
         per_ref: dict[str, list[float]] = {}
@@ -533,7 +533,7 @@ class HierarchicalLoop:
         except CompositionAssemblyError as error:
             logger.debug("pooled champion could not be reconstructed: %s", error)
 
-    # --- reproduction -----------------------------------------------------------------------------------
+    # reproduction
 
     def _module_context(self, state: HierarchicalState) -> MutationContext:
         return MutationContext(
@@ -674,7 +674,7 @@ class HierarchicalLoop:
             self.topology_tabu.commit()  # durable only after every selected child was assessed
         return assessed_elites + carried + assessed_children
 
-    # --- the per-task drive ---------------------------------------------------------------------------
+    # the per-task drive
 
     def run_task(
         self,
@@ -757,7 +757,7 @@ class _CompositionEvalAdapter:
         return evaluate(module, self.encoded, self.encoder)
 
 
-# --- state serialization ------------------------------------------------------------------------------
+# state serialization
 
 
 def state_to_dict(state: HierarchicalState) -> dict[str, Any]:
@@ -791,7 +791,7 @@ def state_from_dict(data: dict[str, Any], rng: random.Random) -> HierarchicalSta
     )
 
 
-# --- factory ---------------------------------------------------------------------------------------------
+# factory
 
 
 def build_hierarchical(config: dict[str, Any]) -> HierarchicalLoop:

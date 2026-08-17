@@ -87,6 +87,96 @@ def test_report_preserves_missing_vs_zero_and_future_wrapper(tmp_path: Path) -> 
     assert "N/A" not in (run / "rung_summary.csv").read_text().splitlines()[1]  # rung aggregate has a valid zero
 
 
+def test_report_separates_selected_and_held_out_paths_and_revisits(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    tasks = [
+        {
+            "rung": 1,
+            "task": "a",
+            "task_occurrence": 1,
+            "is_repeat": False,
+            "outcome": "evolved",
+            "strategy": "direct",
+            "representation": "explicit_flat/cppn",
+            "report_strategy": "routed",
+            "report_representation": "routed",
+            "support_accuracy": 1.0,
+            "support_status": "evaluated",
+            "query_accuracy": 0.5,
+            "query_status": "evaluated",
+            "new_library_keys": ["m1"],
+            "library_size": 1,
+            "strategy_metrics": {"router_score": 1.0, "distilled_score": 0.0, "distillation_gap": 1.0},
+        },
+        {
+            "rung": 1,
+            "task": "a",
+            "task_occurrence": 2,
+            "is_repeat": True,
+            "outcome": "library_hit",
+            "strategy": "direct",
+            "report_strategy": "routed",
+            "support_accuracy": 1.0,
+            "support_status": "evaluated",
+            "query_accuracy": 1.0,
+            "query_status": "evaluated",
+            "new_library_keys": [],
+            "library_size": 1,
+        },
+        {
+            "rung": 2,
+            "task": "b",
+            "task_occurrence": 1,
+            "is_repeat": False,
+            "outcome": "evolved",
+            "strategy": "field",
+            "report_strategy": "field",
+            "support_accuracy": 1.0,
+            "support_status": "evaluated",
+            "query_accuracy": 0.0,
+            "query_status": "evaluated",
+            "new_library_keys": ["m2"],
+            "library_size": 2,
+        },
+    ]
+    (run / "run_summary.json").write_text(
+        json.dumps(
+            {
+                "tasks": tasks,
+                "tasks_attempted": 3,
+                "tasks_to_run": 3,
+                "library_size": 2,
+                "rungs": [1, 2],
+                "task_pool": {"entries": 2, "unique_references": 2, "scheduled_attempts": 3, "revisit_slots": 1},
+                "counters": {"routed_solved": 0, "routed_undistillable": 1},
+            }
+        )
+    )
+    (run / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "code": {"git_commit": "a" * 40, "git_dirty": False},
+                "library_start": {"entry_count": 0, "content_sha256": "b" * 64},
+            }
+        )
+    )
+
+    report = write_run_report(run)
+
+    assert report["run"]["unique_tasks_attempted"] == 2 and report["run"]["repeated_attempts"] == 1
+    assert report["quality"]["held_out_accuracy_mean"] == 0.5
+    assert report["quality"]["first_occurrence"]["held_out_accuracy_mean"] == 0.25
+    assert report["strategies"]["selected_task_usage"] == {"direct": 2, "field": 1}
+    assert report["strategies"]["held_out_task_usage"] == {"field": 1, "routed": 2}
+    assert report["behavior"]["routed_attempt_count"] == 1
+    assert report["behavior"]["routed_undistillable_count"] == 1
+    assert report["storage"]["library_start_entries"] == 0
+    markdown = (run / "run_report.md").read_text()
+    assert "Selected/admission paths" in markdown and "Held-out evaluated paths" in markdown
+
+
 def test_fixed_port_map_gathers_scatters_and_round_trips() -> None:
     comp = CompositionGenome(
         nodes={

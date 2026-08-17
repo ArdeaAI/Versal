@@ -54,6 +54,7 @@ RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "<run_dir>/config.toml.sha256", "access": "write", "condition": "source config snapshot digest"},
     {"path": "<run_dir>/config.effective.json", "access": "read-write", "condition": "CLI-adjusted effective config written on a new run and loaded by implicit --resume"},
     {"path": "<run_dir>/config.effective.json.sha256", "access": "write", "condition": "effective config snapshot digest"},
+    {"path": "<run_dir>/run_manifest.json", "access": "read-write", "condition": "immutable starting code, library, config, and task-pool identity; loaded unchanged on resume"},
     {"path": "<run_dir>/frozen_library/", "access": "write", "condition": "[library] fresh_per_task freezes the starting state for the no-memory control"},
     {"path": "<run_dir>/run_summary.json", "access": "read-write", "condition": "prior rows load on resume; refreshed at startup, task boundaries, crash, and completion"},
     {"path": "<run_dir>/task_pool.json", "access": "read-write", "condition": "pinned streamed task references written after discovery and reused on resume"},

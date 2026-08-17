@@ -179,9 +179,7 @@ def gradient_refine(
     map contractive: the DT-L finding that makes deep unrolls train stably and gives fixed-point
     convergence a meaning. 0.0 (the default) is off, byte-identical."""
     if not hasattr(module, "refine_trace"):
-        return gradient(
-            genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates, deadline=deadline
-        )
+        return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates, deadline=deadline)
     parameters = _trainable_parameters(module)
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module

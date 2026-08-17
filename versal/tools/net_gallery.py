@@ -3,6 +3,8 @@
     uv run render                                  # one <key>.png per entry -> library/images/
     uv run render --images renders/ --gallery      # custom dir, plus a single contact-sheet PNG
     uv run render --overmind                       # also (re)render the routed model
+    uv run render --results-run results/<run>      # also refresh historical task PNGs
+    uv run render --results-run results/<run> --results-only
     uv run render --config configs/preflight.toml --metadata-overmind --images /tmp/versal-overmind-preview
     uv run render --config configs/preflight.toml --overmind-only --cold-overmind --images /tmp/versal-overmind-preview
 
@@ -72,6 +74,70 @@ def render_all_entries(
             row.update(status="OK", path=str(path))
         except Exception as error:
             row.update(status=f"FAIL:{type(error).__name__}", path="")
+        rows.append(row)
+    return rows
+
+
+def refresh_results_run(
+    library: ModuleLibrary,
+    run_directory: Path,
+    *,
+    max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
+) -> list[dict[str, str]]:
+    """Rebuild task network/speciation PNGs from durable JSON plus current library payloads.
+
+    Each artifact is independent: malformed or missing source data leaves its previous PNG intact
+    and records a failure row instead of aborting the rest of the run refresh.
+    """
+    import json
+
+    from versal import rendering, results
+    from versal.evolution.composition import comp_from_dict
+    from versal.evolution.genome import genome_from_dict
+    from versal.library import COMPOSITION, MODULE
+
+    rows: list[dict[str, str]] = []
+    for directory in sorted(run_directory.glob("task_*")):
+        if not directory.is_dir():
+            continue
+        row = {"task": directory.name, "net": "SKIP", "speciation": "SKIP"}
+        task_cursor = directory.name.removeprefix("task_")
+        try:
+            stats = json.loads((directory / "stats.json").read_text())
+            task_cursor = str(stats.get("task_cursor", task_cursor))
+            key = str(stats["library"]["net_key"])
+            entry = library.load(key)
+            title = f"orchestrated task {task_cursor}: {entry.entry_type} {entry.key}"
+            if entry.entry_type == MODULE:
+                rendering.render_network(
+                    directory,
+                    genome_from_dict(entry.payload),
+                    title=title,
+                    library=library,
+                    max_inline_depth=max_inline_depth,
+                )
+            elif entry.entry_type == COMPOSITION:
+                rendering.render_composition_network(
+                    directory,
+                    comp_from_dict(entry.payload),
+                    title=title,
+                    library=library,
+                    max_inline_depth=max_inline_depth,
+                )
+            else:
+                raise ValueError(f"unknown library entry type {entry.entry_type!r}")
+            row["net"] = "OK"
+        except Exception as error:
+            row["net"] = f"FAIL:{type(error).__name__}"
+
+        try:
+            checkpoint = json.loads((directory / "checkpoint.json").read_text())
+            raw_history = checkpoint["loop_state"]["module_species_history"]
+            history = [{int(species_id): int(count) for species_id, count in snapshot.items()} for snapshot in raw_history]
+            results.render_speciation(directory, history, title=f"module species through task {task_cursor}")
+            row["speciation"] = "OK"
+        except Exception as error:
+            row["speciation"] = f"FAIL:{type(error).__name__}"
         rows.append(row)
     return rows
 
@@ -182,6 +248,8 @@ def main() -> None:
     parser.add_argument("--metadata-overmind", action="store_true", help="render only both overmind portraits from router metadata, without loading router_state.pt")
     parser.add_argument("--cold-overmind", action="store_true", help="ignore persisted router state and render the current library with an untrained router")
     parser.add_argument("--config", default=None, help="run config that selects the default library and shapes a cold overmind portrait")
+    parser.add_argument("--results-run", type=Path, default=None, help="also refresh task net/speciation PNGs under this historical run directory")
+    parser.add_argument("--results-only", action="store_true", help="refresh only --results-run task PNGs; skip library entry, gallery, and overmind renders")
     parser.add_argument("--columns", type=int, default=16, help="gallery columns")
     parser.add_argument("--include-retired", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--include-dependencies", action=argparse.BooleanOptionalAction, default=True)
@@ -196,6 +264,10 @@ def main() -> None:
         parser.error("--cold-overmind requires --overmind or --overmind-only")
     if args.overmind_only and args.gallery is not None:
         parser.error("--overmind-only cannot be combined with --gallery")
+    if args.results_only and args.results_run is None:
+        parser.error("--results-only requires --results-run")
+    if args.results_only and (args.overmind or args.gallery is not None):
+        parser.error("--results-only cannot be combined with overmind or gallery rendering")
 
     library_root, runtime = resolve_library_root(args.library, args.config)
     max_inline_depth = configured_max_inline_depth(runtime or {})
@@ -207,7 +279,7 @@ def main() -> None:
     images_dir = Path(args.images) if args.images else library_root / "images"
     rows = (
         []
-        if args.overmind_only
+        if args.overmind_only or args.results_only
         else render_all_entries(
             library,
             images_dir,
@@ -288,6 +360,8 @@ def main() -> None:
             else:
                 console.print(f"[yellow]no router state at {router_dir}[/yellow] and no routable entries in the library (nothing to portrait)")
 
+    result_rows = refresh_results_run(library, args.results_run, **_depth_kwargs(max_inline_depth)) if args.results_run is not None else []
+
     from rich.table import Table
 
     table = Table(title=f"render: {library_root} ({len(library)} entries) -> {images_dir}{gallery_note}")
@@ -297,6 +371,14 @@ def main() -> None:
     for row in rows:
         table.add_row(*(str(row.get(column, "")) for column in columns))
     console.print(table)
+    if result_rows:
+        result_table = Table(title=f"historical render refresh: {args.results_run}")
+        result_columns = ["task", "net", "speciation"]
+        for column in result_columns:
+            result_table.add_column(column)
+        for row in result_rows:
+            result_table.add_row(*(row[column] for column in result_columns))
+        console.print(result_table)
 
 
 if __name__ == "__main__":

@@ -22,11 +22,13 @@ STAGES: dict[str, tuple[str, str]] = {
     "refine": ("Refine", "improve a retrieved solution without regression"),
     "routed": ("Route experts", "combine frozen experts and distill an executable pathway"),
     "grammar": ("Apply grammar", "synthesize from independently recurring structures"),
-    "direct": ("Evolve network", "grow and train a task-specific topology"),
+    "field": ("Evolve spatial field", "grow and train a compact network shared across spatial sites"),
+    "direct": ("Evolve dense network", "grow and train a task-specific flattened topology"),
     "composition": ("Compose modules", "wire reusable modules with trainable glue"),
+    "cross_validation": ("Validate support folds", "test whether a fresh fit predicts omitted support examples"),
     "decompose": ("Decompose", "split the task into valid subtasks and solve them recursively"),
     "decompose_first": ("Decompose first", "split an oversized task before attempting a flat network"),
-    "query": ("Held-out query", "score the support-selected executable champion once"),
+    "query": ("Held-out query", "score the best support-reportable executable candidate once"),
     "persist": ("Persist result", "retain a solution or useful stepping stone for later tasks"),
     "time_budget": ("Deadline", "stop work cleanly when the task allowance is exhausted"),
     "shutdown": ("Graceful stop", "finish the current safe step and persist the run"),
@@ -59,6 +61,19 @@ def _accuracy(value: float | None, status: str, style: str) -> Text:
         return Text(f"{value:.4f}", style=style)
     reason = STATUS_REASONS.get(status, status.replace("_", " "))
     return Text(f"N/A — {reason}", style="bold yellow")
+
+
+def _accuracy_with_counts(value: float | None, status: str, style: str, metrics: dict[str, float], split: str) -> Text:
+    rendered = _accuracy(value, status, style)
+    valid_cells = metrics.get(f"{split}_valid_cells")
+    correct_cells = metrics.get(f"{split}_correct_cells")
+    total_examples = metrics.get(f"{split}_total_examples")
+    exact_examples = metrics.get(f"{split}_exact_examples")
+    if value is not None and valid_cells is not None and correct_cells is not None:
+        rendered.append(f" — {int(correct_cells)}/{int(valid_cells)} valid cells", style="dim")
+    if value is not None and total_examples is not None and exact_examples is not None:
+        rendered.append(f" · {int(exact_examples)}/{int(total_examples)} exact grids", style="dim")
+    return rendered
 
 
 class RuntimeDisplay:
@@ -171,6 +186,8 @@ class RuntimeDisplay:
             reason = f"required subtask failed: {failure_stage.removeprefix('subtask:')}"
         elif getattr(attempt, "support_status", None) == "no_executable_champion":
             reason = "no strategy produced an executable champion"
+        elif getattr(attempt, "validation_status", None) in {"failed", "inconclusive"}:
+            reason = f"best executable champion did not clear support-fold validation ({attempt.validation_status})"
         else:
             reason = "best executable champion remained below the acceptance threshold"
 
@@ -180,13 +197,31 @@ class RuntimeDisplay:
         outcome_style = "bold green" if solved else "bold red"
         grid.add_row("Outcome", Text(f"{outcome} — {reason}", style=outcome_style))
         grid.add_row(
-            Text("BEST SUPPORT ACCURACY", style="bold bright_cyan"),
-            _accuracy(getattr(attempt, "support_accuracy", None), getattr(attempt, "support_status", "legacy_missing"), "bold bright_cyan"),
+            Text("BEST REPORTABLE SUPPORT ACCURACY", style="bold bright_cyan"),
+            _accuracy_with_counts(
+                getattr(attempt, "support_accuracy", None),
+                getattr(attempt, "support_status", "legacy_missing"),
+                "bold bright_cyan",
+                getattr(attempt, "task_metrics", None) or {},
+                "support",
+            ),
         )
         grid.add_row(
             Text("HELD-OUT QUERY ACCURACY", style="bold bright_magenta"),
-            _accuracy(getattr(attempt, "query_accuracy", None), getattr(attempt, "query_status", "legacy_missing"), "bold bright_magenta"),
+            _accuracy_with_counts(
+                getattr(attempt, "query_accuracy", None),
+                getattr(attempt, "query_status", "legacy_missing"),
+                "bold bright_magenta",
+                getattr(attempt, "task_metrics", None) or {},
+                "query",
+            ),
         )
+        validation_status = getattr(attempt, "validation_status", "not_run")
+        if validation_status != "not_run":
+            validation_metrics = getattr(attempt, "validation_metrics", None) or {}
+            passed = int(validation_metrics.get("cv_folds_passed", 0.0))
+            completed = int(validation_metrics.get("cv_folds_completed", 0.0))
+            grid.add_row("Selected-path support folds", f"{validation_status} · {passed}/{completed} folds passed")
         diagnostic = getattr(attempt, "diagnostic_observation", None) or {}
         if diagnostic and getattr(attempt, "support_accuracy", None) is None:
             diagnostic_label = "subtask" if diagnostic.get("executable") else "router"
@@ -200,6 +235,12 @@ class RuntimeDisplay:
             grid.add_row("Stopped during", "task deadline" if strategy == "time_budget" else "graceful shutdown")
         else:
             grid.add_row("Selected path", f"{STAGES.get(strategy, (strategy, ''))[0]} · {getattr(attempt, 'generations', 0)} generations")
+        report_strategy = getattr(attempt, "report_strategy", None)
+        if report_strategy is not None:
+            report_label = STAGES.get(report_strategy, (str(report_strategy).replace("_", " ").title(), ""))[0]
+            report_representation = getattr(attempt, "report_representation", None)
+            representation_detail = f" · {report_representation}" if report_representation and report_representation != report_strategy else ""
+            grid.add_row("Held-out evaluated path", f"{report_label}{representation_detail}")
         if solved and new_library_keys:
             persistence = f"saved {len(new_library_keys)} new entr{'y' if len(new_library_keys) == 1 else 'ies'}"
         elif not solved and getattr(attempt, "library_key", None):
@@ -207,7 +248,13 @@ class RuntimeDisplay:
         elif solved:
             persistence = "solved for this run; no new library entry"
         else:
-            persistence = "nothing retained"
+            strategy_metrics = getattr(attempt, "strategy_metrics", None) or {}
+            if report_strategy == "routed" and "distilled_score" in strategy_metrics and strategy_metrics.get("distilled_score", 0.0) < strategy_metrics.get("router_score", 0.0):
+                persistence = "nothing retained — live router candidate did not distill"
+            elif failure_stage == "time_budget":
+                persistence = "nothing retained — no persistable candidate completed verification"
+            else:
+                persistence = "nothing retained — no candidate cleared retention policy"
         grid.add_row("Persistence", f"{persistence} · library size {library_size}")
         strategy_metrics = getattr(attempt, "strategy_metrics", None) or {}
         expired = int(strategy_metrics.get("router_vertices_expired", 0.0))
@@ -235,7 +282,7 @@ class RuntimeDisplay:
     def task_interrupted(self, name: str, error: BaseException, *, support_accuracy: float | None, active_stage: str | None, elapsed: float) -> None:
         grid = Table.grid(padding=(0, 2))
         grid.add_row("Active stage", active_stage or "task setup")
-        grid.add_row(Text("BEST SUPPORT ACCURACY", style="bold bright_cyan"), _accuracy(support_accuracy, "task_crashed", "bold bright_cyan"))
+        grid.add_row(Text("BEST REPORTABLE SUPPORT ACCURACY", style="bold bright_cyan"), _accuracy(support_accuracy, "task_crashed", "bold bright_cyan"))
         grid.add_row(Text("HELD-OUT QUERY ACCURACY", style="bold bright_magenta"), _accuracy(None, "task_crashed", "bold bright_magenta"))
         grid.add_row("Interruption", f"{type(error).__name__}: {error}")
         grid.add_row("Elapsed", _duration(elapsed))

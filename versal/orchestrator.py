@@ -1,34 +1,24 @@
-"""The orchestrator: the policy layer that decides HOW each task gets solved.
+"""Task policy: reuse, evolve, decompose recursively, then record the outcome.
 
-Escalation ladder per task:
-
-1. LOOKUP: query the library by structural I/O signature, quick-evaluate the top candidates, and
-   accept without spending a single generation when an admitted solution already clears the bar.
-   This is what makes a solved task STAY solved (the anti-forgetting property).
-2. EVOLVE: run the hierarchical loop (compositions over library entries + the live module pool)
-   under a depth-scaled generation budget with stall detection.
-3. DECOMPOSE: on a stall, split the task into subtasks (registered DECOMPOSE operators yielding
-   fully valid Tasks) and RECURSE on each. Accepted sub-solutions become frozen library entries;
-   the parent then re-evolves seeded with a PortSpec-wired composition over them.
-4. Give up gracefully: record the attempt and move on. Every decision lands in the attempts ledger.
-
-Admission detaches solutions from run-local state: live module refs are snapshotted as frozen
-MODULE entries (with the exact trained weights that scored) and the composition is rewritten to
-reference them, so library entries never dangle across runs.
+Admission freezes run-local module references and rewrites compositions to durable library keys.
 """
 
 import math
+import random
 import time
 from array import array
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, Callable
 
+from versal.cross_validation import CrossValidationConfig, SupportCrossValidator, fresh_composition_glue, fresh_genome_weights
 from versal.dataset.icarus import Level0Encoder, Task, encode_task
 from versal.decompose import Subtask, build_decomposers
 from versal.evaluation import fit_query_target, without_query
 from versal.evolution.composition import BIAS_REF, CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, GlueValues, IndexRun, PortMap, comp_from_dict, comp_to_dict
-from versal.evolution.genome import Genome, genome_from_dict, genome_to_dict
-from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
+from versal.evolution.evolver import EvolverState
+from versal.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict
+from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState, assess_composition_pure
 from versal.evolution.train import _writeback
 from versal.library import (
     COMPOSITION,
@@ -42,6 +32,7 @@ from versal.library import (
     structural_fingerprint,
     task_io,
 )
+from versal.orchestrator_types import Attempt, RefinementRank, Solution, StallDetector, attempts_from_dicts, attempts_to_dicts, refinement_improves
 from versal.strategy import StrategyResult, StrategyRuntime, build_strategies
 from versal.substrate import decode_module, decode_recurrent
 from versal.temporal import temporal_adapter
@@ -50,6 +41,18 @@ from versal.utils.logging import Logger
 from versal.utils.resources import format_bytes
 from versal.utils.runtime_display import NULL_DISPLAY
 from versal.utils.status import BOARD
+
+__all__ = [
+    "Attempt",
+    "Orchestrator",
+    "RefinementRank",
+    "Solution",
+    "StallDetector",
+    "attempts_from_dicts",
+    "attempts_to_dicts",
+    "comp_task_spec",
+    "refinement_improves",
+]
 
 logger = Logger.get_logger()
 
@@ -86,126 +89,6 @@ def comp_task_spec(task: Task, *, include_query: bool = True, structured_grid: b
     )
 
 
-@dataclass
-class Attempt:
-    """One row of the policy ledger: what the orchestrator tried and how it ended."""
-
-    task: str
-    depth: int
-    outcome: str  # "library_hit" | "refined" | "evolved" | "decomposed" | "failed"
-    metric: float
-    generations: int
-    library_key: str | None = None
-    decompose_op: str | None = None
-    strategy: str | None = None  # which evolve strategy produced the winner (or the best loser)
-    failure_stage: str | None = None  # for failed decomposed tasks: "subtask:<name>" | "parent_re_evolve"
-    refine_generations: int = 0  # learn-mode generations spent refining a library hit (bounded extra compute)
-    # Wall-clock forensics: where this solve actually SPENT its time, so a wedged stage shows up
-    # in run_summary.json instead of requiring a live `sample` of the process (the 2026-07-05
-    # 8-hour CIFAR mutation wedge was invisible in every record).
-    seconds: float = 0.0
-    stage_seconds: dict[str, float] = field(default_factory=dict)
-    # Champion weight-sample diagnostics (the G0 structure-vs-weights readout): present only when
-    # the evaluate op emitted them (hybrid / weight_samples), so standard-eval summaries and old
-    # checkpoints stay byte-identical.
-    sample_metrics: dict[str, float] = field(default_factory=dict)
-    # Champion/population genome size (the bloat readout): task cost tracks genome size, so growth
-    # must show in the record, not only through `seconds` (the diag_g2 free-growth blowup was
-    # invisible until the wall-clock had already exploded). Empty on cheap library hits.
-    size_metrics: dict[str, float] = field(default_factory=dict)
-    resource_metrics: dict[str, float] = field(default_factory=dict)
-    # Optional held-out report, emitted only by the blind-query protocol after candidate selection.
-    report_metric: float | None = None
-    task_metrics: dict[str, float] = field(default_factory=dict)
-    strategy_metrics: dict[str, float] = field(default_factory=dict)
-    # Best non-parent observation encountered while solving this task. It is explicitly separate
-    # from the literal parent accuracy rails: a router score or solved recursive child is evidence
-    # about search progress, not an executable answer to the parent task.
-    diagnostic_observation: dict[str, Any] = field(default_factory=dict)
-    # Literal quality observations. `metric` and `report_metric` remain the configurable policy
-    # scores; these fields always mean sample-level accuracy and never silently substitute one for
-    # the other. Statuses make a real 0.0 distinguishable from an evaluation that never happened.
-    support_accuracy: float | None = None
-    query_accuracy: float | None = None
-    support_status: str = "legacy_missing"
-    query_status: str = "legacy_missing"
-    representation: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "task": self.task,
-            "depth": self.depth,
-            "outcome": self.outcome,
-            "metric": self.metric,
-            "generations": self.generations,
-            "library_key": self.library_key,
-            "decompose_op": self.decompose_op,
-            "strategy": self.strategy,
-            "failure_stage": self.failure_stage,
-        }
-        if self.refine_generations:  # only when refinement ran, so live-mode summaries stay byte-identical
-            data["refine_generations"] = self.refine_generations
-        if self.seconds:
-            data["seconds"] = self.seconds
-        if self.stage_seconds:
-            data["stage_seconds"] = self.stage_seconds
-        if self.sample_metrics:
-            data["sample_metrics"] = self.sample_metrics
-        if self.size_metrics:
-            data["size_metrics"] = self.size_metrics
-        if self.resource_metrics:
-            data["resource_metrics"] = self.resource_metrics
-        if self.report_metric is not None:
-            data["report_metric"] = self.report_metric
-        if self.task_metrics:
-            data["task_metrics"] = self.task_metrics
-        if self.strategy_metrics:
-            data["strategy_metrics"] = self.strategy_metrics
-        if self.diagnostic_observation:
-            data["diagnostic_observation"] = self.diagnostic_observation
-        if self.support_status != "legacy_missing" or self.query_status != "legacy_missing" or self.support_accuracy is not None or self.query_accuracy is not None:
-            data.update(
-                {
-                    "support_accuracy": self.support_accuracy,
-                    "query_accuracy": self.query_accuracy,
-                    "support_status": self.support_status,
-                    "query_status": self.query_status,
-                }
-            )
-        if self.representation is not None:
-            data["representation"] = self.representation
-        return data
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Attempt":
-        return cls(
-            task=data["task"],
-            depth=int(data["depth"]),
-            outcome=data["outcome"],
-            metric=float(data["metric"]),
-            generations=int(data["generations"]),
-            library_key=data.get("library_key"),
-            decompose_op=data.get("decompose_op"),
-            strategy=data.get("strategy"),
-            failure_stage=data.get("failure_stage"),
-            refine_generations=int(data.get("refine_generations", 0)),
-            seconds=float(data.get("seconds", 0.0)),
-            stage_seconds=dict(data.get("stage_seconds", {})),
-            sample_metrics=dict(data.get("sample_metrics", {})),
-            size_metrics=dict(data.get("size_metrics", {})),
-            resource_metrics=dict(data.get("resource_metrics", {})),
-            report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
-            task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
-            strategy_metrics={str(key): float(value) for key, value in data.get("strategy_metrics", {}).items()},
-            diagnostic_observation=dict(data.get("diagnostic_observation", {})),
-            support_accuracy=float(data["support_accuracy"]) if data.get("support_accuracy") is not None else None,
-            query_accuracy=float(data["query_accuracy"]) if data.get("query_accuracy") is not None else None,
-            support_status=str(data.get("support_status", "legacy_missing")),
-            query_status=str(data.get("query_status", "legacy_missing")),
-            representation=str(data["representation"]) if data.get("representation") is not None else None,
-        )
-
-
 _SAMPLE_METRIC_KEYS = ("mean_sample_accuracy", "max_sample_accuracy", "best_sample_weight", "weight_robustness")
 
 
@@ -217,7 +100,19 @@ def _sample_metrics_of(result: StrategyResult) -> dict[str, float]:
     return {key: float(result.champion_metrics[key]) for key in _SAMPLE_METRIC_KEYS if key in result.champion_metrics}
 
 
-_TASK_METRIC_SUFFIXES = ("_exact", "_task_exact", "_shape_accuracy", "_baseline_accuracy", "_gain_over_baseline", "_coverage", "_covered_accuracy")
+_TASK_METRIC_SUFFIXES = (
+    "_exact",
+    "_task_exact",
+    "_shape_accuracy",
+    "_baseline_accuracy",
+    "_gain_over_baseline",
+    "_coverage",
+    "_covered_accuracy",
+    "_correct_cells",
+    "_valid_cells",
+    "_exact_examples",
+    "_total_examples",
+)
 
 
 def _task_metrics(metrics: dict[str, float]) -> dict[str, float]:
@@ -225,7 +120,7 @@ def _task_metrics(metrics: dict[str, float]) -> dict[str, float]:
 
 
 def _task_metrics_of(result: StrategyResult) -> dict[str, float]:
-    return _task_metrics(dict(result.champion_metrics) | dict(result.report_metrics))
+    return _task_metrics(dict(result.champion_metrics) | dict(result.report_candidate_metrics) | dict(result.report_metrics))
 
 
 def _finite_accuracy(metrics: dict[str, float], key: str, *, loss_key: str | None = None) -> float | None:
@@ -235,76 +130,6 @@ def _finite_accuracy(metrics: dict[str, float], key: str, *, loss_key: str | Non
         return None
     value = metrics.get(key)
     return float(value) if value is not None and math.isfinite(float(value)) else None
-
-
-@dataclass(frozen=True)
-class Solution:
-    key: str | None  # None when the task was SOLVED but the admission gate declined to shelve it
-    entry_type: str
-    metric: float
-    report_metric: float | None = None
-    task_metrics: dict[str, float] = field(default_factory=dict)
-    support_accuracy: float | None = None
-    query_accuracy: float | None = None
-    support_status: str = "legacy_missing"
-    query_status: str = "legacy_missing"
-
-
-@dataclass(frozen=True)
-class RefinementRank:
-    """The lexicographic standing of one topology in a refine-on-hit comparison."""
-
-    metric: float
-    robustness: float
-    complexity: int
-    entry_type: str
-
-
-def refinement_improves(candidate: RefinementRank, incumbent: RefinementRank, *, metric_epsilon: float, robustness_epsilon: float) -> bool:
-    """Prefer simpler executable structure inside a non-regressing accuracy band.
-
-    Expanded complexity makes modules and compositions comparable. Pareto selection still explores
-    novelty and robustness; this final gate deterministically chooses whether to replace a known-good
-    solution and never treats an equal candidate as an improvement.
-    """
-    if not (math.isfinite(candidate.metric) and math.isfinite(candidate.robustness)):
-        return False
-    if candidate.metric > incumbent.metric + metric_epsilon:
-        return True
-    if candidate.metric < incumbent.metric - metric_epsilon:
-        return False
-    if candidate.complexity < incumbent.complexity:
-        return True
-    if candidate.complexity > incumbent.complexity:
-        return False
-    return candidate.robustness > incumbent.robustness + robustness_epsilon
-
-
-@dataclass
-class StallDetector:
-    """Stops an evolve phase that has flatlined (no best-fitness gain) or is hopeless (below the
-    floor metric at half budget). One instance per evolve phase; it is stateful."""
-
-    stall_generations: int
-    stall_epsilon: float
-    floor: float
-    budget: int
-    metric_of: Callable[[Any], float]
-    best_fitness: float = -math.inf
-    since_improvement: int = 0
-    stalled: bool = False
-
-    def __call__(self, generation: int, best: Any) -> bool:
-        if best.fitness > self.best_fitness + self.stall_epsilon:
-            self.best_fitness = best.fitness
-            self.since_improvement = 0
-        else:
-            self.since_improvement += 1
-        if self.since_improvement >= self.stall_generations:
-            self.stalled = True
-        if generation >= self.budget // 2 and self.metric_of(best) < self.floor:
-            self.stalled = True
-        return self.stalled
 
 
 class Orchestrator:
@@ -324,6 +149,8 @@ class Orchestrator:
         self.blind_query = bool(table.get("blind_query", False))
         self.structured_grid = bool(table.get("direct", {}).get("structured_grid", False))
         self.accept_threshold = float(table.get("accept_threshold", 0.95))
+        self.cross_validation_config = CrossValidationConfig.from_table(table.get("cross_validation"), seed=int(config.get("run", {}).get("seed", 0)))
+        self.cross_validator = SupportCrossValidator(self.cross_validation_config, accept_threshold=self.accept_threshold)
         self.floor = float(table.get("floor", 0.55))
         self.stall_generations = int(table.get("stall_generations", 15))
         self.stall_epsilon = float(table.get("stall_epsilon", 0.005))
@@ -377,20 +204,13 @@ class Orchestrator:
         self.refine_deduplicate_topologies = bool(refine.get("deduplicate_topologies", False))
         self.refine_topology_retry_limit = max(0, int(refine.get("topology_retry_limit", 8)))
         self.config_fingerprint = str(config.get("config_effective_sha256", config.get("config_sha256", "unversioned")))
-        # WALL LEDGER ([orchestrator.wall]): a depth-0 failure shelves its best champion as a
-        # below-bar stepping stone, and later attempts on that signature warm-start from it, so
-        # assaults on a hard task family (the two_spirals wall) accumulate instead of restarting.
-        # ledger = false (the default) is byte-identical to before.
+        # The wall ledger retains below-threshold stepping stones for later warm starts.
         wall = table.get("wall", {}) or {}
         self.wall_ledger = bool(wall.get("ledger", False))
         self.wall_min_metric = float(wall.get("min_metric", 0.45))
         self.wall_min_gain_over_baseline = float(wall.get("min_gain_over_baseline", -math.inf))
         self.wall_seed_top_k = int(wall.get("seed_top_k", 1))
-        # PER-ATTEMPT WALL-CLOCK BUDGET ([orchestrator] max_task_seconds): with a free-growth config
-        # nothing bounds per-generation cost, so an attempt can silently eat hours (task 2 of the
-        # 2026-07-05 diag_g2 run: 3532s). Past the deadline the running stage finishes its current
-        # generation, later ladder stages are skipped, and the attempt fails with its best champion
-        # (the wall ledger still shelves it). 0 (the default) is off and byte-identical.
+        # Deadlines are checked between generations and ladder stages, not inside a generation.
         self.max_task_seconds = float(table.get("max_task_seconds", 0.0))
         # Cumulative budget for the whole top-level solve, including recursive subtasks.  This is
         # distinct from max_task_seconds, which remains a per-depth attempt budget.
@@ -447,6 +267,10 @@ class Orchestrator:
             self.counters.update({"total_time_budget_hits": 0})
         if self.loop.resource_policy.mode == "adaptive":
             self.counters.update({"resource_declines": 0, "direct_resource_declines": 0, "composition_resource_declines": 0, "decomposition_resource_declines": 0})
+        direct_table = table.get("direct", {}) or {}
+        fixed_direct_guards = (direct_table.get("max_flat_outputs", 0), direct_table.get("max_init_genes", 0))
+        if any(value != "adaptive" and int(value) > 0 for value in fixed_direct_guards):
+            self.counters["direct_guard_declines"] = 0
         if self.decompose_first_above == "adaptive" or int(self.decompose_first_above) > 0:  # registered only when the policy is on
             self.counters.update({"decompose_first": 0})
         self._failure_stage: str | None = None
@@ -454,14 +278,20 @@ class Orchestrator:
         self._refined_from: str | None = None  # lineage provenance for the admission inside a refine
         self._stepping_stone = False  # marks the admission inside a wall-ledger shelving
         self._last_refine_strategy_metrics: dict[str, float] = {}
+        self._last_decompose_report_overrun = False
 
-    # --- public API ---------------------------------------------------------------------------------
+    # public API
 
     def solve(self, task: Task, depth: int = 0) -> Solution | None:
         # Per-solve wall-clock forensics, save/restored so recursive sub-solves time themselves
         # without clobbering the parent's ledger. The deadline rides the same tuple: each depth
         # gets a fresh budget, but a sub-solve only starts while its parent still has time.
-        previous_timing = (getattr(self, "_solve_started", None), getattr(self, "_active_stages", None), getattr(self, "_solve_deadline", None))
+        previous_timing = (
+            getattr(self, "_solve_started", None),
+            getattr(self, "_active_stages", None),
+            getattr(self, "_solve_deadline", None),
+            getattr(self, "_task_deadline", None),
+        )
         previous_total_deadline = getattr(self, "_total_task_deadline", None)
         previous_display_depth = getattr(self, "_display_depth", 0)
         now = time.perf_counter()
@@ -473,12 +303,15 @@ class Orchestrator:
         local_deadline = (now + self.max_task_seconds) if self.max_task_seconds > 0 else None
         total_deadline = getattr(self, "_total_task_deadline", None)
         deadlines = [deadline for deadline in (local_deadline, total_deadline) if deadline is not None]
-        self._solve_deadline = min(deadlines) if deadlines else None
-        BOARD.clock(max(0.0, self._solve_deadline - now) if self._solve_deadline is not None else None)
+        self._task_deadline = min(deadlines) if deadlines else None
+        available = max(0.0, self._task_deadline - now) if self._task_deadline is not None else None
+        reserve = self.cross_validation_config.reserve_seconds(available)
+        self._solve_deadline = self._task_deadline - reserve if self._task_deadline is not None else None
+        BOARD.clock(available)
         try:
             return self._solve_timed(task, depth)
         finally:
-            self._solve_started, self._active_stages, self._solve_deadline = previous_timing
+            self._solve_started, self._active_stages, self._solve_deadline, self._task_deadline = previous_timing
             self._display_depth = previous_display_depth
             if depth == 0:
                 self._total_task_deadline = previous_total_deadline
@@ -489,6 +322,8 @@ class Orchestrator:
             self._failure_op = None
             self._best_diagnostic_observation: dict[str, Any] | None = None
             self._best_parent_result: StrategyResult | None = None
+            self._best_parent_report_result: StrategyResult | None = None
+            self._best_parent_field_result: StrategyResult | None = None
             self._decomposition_leaf_count = 1
         if self._shutdown_requested():
             return self._record_shutdown(task, depth)
@@ -521,6 +356,8 @@ class Orchestrator:
         self.loop.absorb_new_entries(self.state)  # fresh library knowledge enters the module pool
 
         budget = self._budget(depth)
+        result: StrategyResult | None = None
+        support_timed_out: bool | None = None
         decomposed_first = False
         if self._wants_decompose_first(task, spec) and depth < self.max_depth and not self._deadline_exceeded():
             decomposed_first = True
@@ -531,20 +368,28 @@ class Orchestrator:
                 self._active_stages["decompose_first"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
+            if self._deadline_exceeded():
+                result = self._remember_or_recover_parent_result(StrategyResult("decompose", metric=0.0, generations_used=0), depth)
+                support_timed_out = self._support_timed_out(result) and not self._last_decompose_report_overrun
             # Fall through to the ordinary ladder: a scale-safe init (factored/sparse) rides the
             # same config, so the flat attempt below stays affordable even at init-wall widths.
 
-        stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
-        if stone_modules or stone_comps:
-            self.counters["wall_seeded_attempts"] += 1
-        result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
-        result = self._remember_or_recover_parent_result(result, depth)
+        if result is None:
+            stone_modules, stone_comps = self._wall_stone_seeds(task, spec) if self.wall_ledger and depth == 0 else ([], [])
+            if stone_modules or stone_comps:
+                self.counters["wall_seeded_attempts"] += 1
+            result = self._evolve(task, spec, budget, seed_comps=stone_comps or None, seed_entries=stone_modules or None)
+            result = self._remember_or_recover_parent_result(result, depth)
+            support_timed_out = self._support_timed_out(result)
+        assert result is not None and support_timed_out is not None
+        report_result = self._report_result_for(result, depth)
         if self.blind_query and not self._shutdown_requested():
-            result = self._attach_report_metrics(result, report_spec)
-            _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_admissible_champion:
+            report_result = self._attach_report_metrics(report_result, task, report_spec)
+            _support, query, _support_status, query_status = self._quality_of_result(report_result)
+            if report_result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
-        if self._accepts_result(result):
+        stopping = self._shutdown_requested()
+        if not support_timed_out and not stopping and self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=None)
             self.display.stage_result(
                 "persist",
@@ -553,12 +398,15 @@ class Orchestrator:
                 depth=depth,
             )
             self.counters["accepts"] += 1
-            self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key))
-            return self._solution_from_result(result, key)
+            self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key, report_result=report_result))
+            return self._solution_from_result(result, key, report_result=report_result)
 
-        stopping = self._shutdown_requested()
-        timed_out = self._time_deadline_exceeded()
-        halted = stopping or timed_out
+        # The held-out pass is intentionally allowed to overrun the support deadline. Such an
+        # overrun blocks new decomposition work, but it must not relabel completed support search
+        # as a timeout. A later decomposition can still establish a genuine support timeout below.
+        timed_out = support_timed_out
+        deadline_blocks_more_work = self._deadline_exceeded()
+        halted = stopping or deadline_blocks_more_work
         if depth < self.max_depth and not halted and not decomposed_first:  # decompose-first already spent its shot
             decompose_started = time.perf_counter()
             solution = self._decompose_and_recurse(task, spec, depth, budget, first_metric=result.metric)
@@ -568,8 +416,9 @@ class Orchestrator:
                 self._active_stages["decompose"] = round(time.perf_counter() - decompose_started, 3)
             if solution is not None:
                 return solution
+            result = self._remember_or_recover_parent_result(result, depth)
             stopping = self._shutdown_requested()
-            timed_out = self._time_deadline_exceeded()
+            timed_out = self._support_timed_out(result) and not self._last_decompose_report_overrun
             halted = stopping or timed_out
 
         self.counters["failures"] += 1
@@ -582,9 +431,16 @@ class Orchestrator:
                 self._failure_stage = "time_budget"
         elif stopping and depth == 0:
             self._failure_stage = "shutdown_requested"
-        stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
-        if stone_key is not None:
-            self.display.stage_result("persist", "saved", "below-threshold stepping stone retained for a later attempt", depth=depth)
+        stone_keys = self._admit_failure_stepping_stones(result, task, spec) if self.wall_ledger and depth == 0 else []
+        stone_key = stone_keys[0] if stone_keys else None
+        if stone_keys:
+            detail = "below-threshold stepping stone retained for a later attempt"
+            if len(stone_keys) > 1:
+                detail = f"{len(stone_keys)} representation-specific stepping stones retained for later attempts"
+            self.display.stage_result("persist", "saved", detail, depth=depth)
+        report_result = self._report_result_for(result, depth)
+        if self.blind_query and not stopping:
+            report_result = self._attach_report_metrics(report_result, task, report_spec)
         self._record(
             self._attempt_from_result(
                 result,
@@ -595,39 +451,215 @@ class Orchestrator:
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
                 query_status="time_limit_before_evaluation" if timed_out else ("shutdown_before_evaluation" if stopping else None),
+                report_result=report_result,
+                suppress_query=stopping,
             )
         )
         logger.debug("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
         return None
 
-    def _attach_report_metrics(self, result: StrategyResult, report_spec: CompTaskSpec) -> StrategyResult:
-        """Evaluate the selected composition once against held-out query tensors.
+    def _attach_report_metrics(self, result: StrategyResult, task: Task, report_spec: CompTaskSpec) -> StrategyResult:
+        """Evaluate the selected support-search payload once on held-out query data."""
 
-        Direct strategy champions already attach their one-shot report through their structured or
-        flat adapter. Routed-only state has no immutable payload to re-evaluate here; distilled
-        routed winners arrive as compositions and use the same rail below.
-        """
+        if result.report_attempted or not result.has_report_candidate:
+            return result
+        if result.report_candidate_routed is not None:
+            reporter = dict(self.strategies).get("routed")
+            evaluate_report = getattr(reporter, "evaluate_report", None)
+            if not callable(evaluate_report):
+                return result
+            result.report_attempted = True
+            try:
+                result.report_metrics = dict(evaluate_report(result.report_candidate_routed, task, report_spec, self.library))
+            except TimeoutError:
+                result.report_metrics = {}
+            return result
+        composition_candidate = result.champion_comp or result.report_candidate_comp
+        if composition_candidate is not None:
+            result.report_attempted = True
+            previous_deadline = getattr(self.loop.evolver, "deadline", None)
+            previous_callback = getattr(self.loop.evolver, "deadline_exceeded", None)
+            self.loop.evolver.deadline = None
+            self.loop.evolver.deadline_exceeded = None
+            try:
+                try:
+                    reported = self.loop.assess_composition(composition_candidate.comp, report_spec, self.state, train=False)
+                except TimeoutError:
+                    return result
+                if reported.net is not None:
+                    result.report_metrics = dict(reported.metrics)
+                return result
+            finally:
+                self.loop.evolver.deadline = previous_deadline
+                self.loop.evolver.deadline_exceeded = previous_callback
 
-        if result.champion_comp is None:
+        candidate = result.champion_genome or result.report_candidate_genome
+        assert candidate is not None
+        strategies = dict(self.strategies)
+        if result.field_template is not None:
+            reporter = strategies.get("field")
+            args = (candidate, task, result.field_template)
+        else:
+            reporter = strategies.get("direct")
+            if reporter is None and result.strategy == "grammar":
+                reporter = getattr(strategies.get("grammar"), "direct", None)
+            args = (candidate, task)
+
+        evaluate_report = getattr(reporter, "evaluate_report", None)
+        if not callable(evaluate_report):
             return result
-        reported = self.loop.assess_composition(result.champion_comp.comp, report_spec, self.state, train=False)
-        if reported.net is None:
+        result.report_attempted = True
+        evolver = getattr(reporter, "evolver", None)
+        previous_deadline = getattr(evolver, "deadline", None) if evolver is not None else None
+        previous_callback = getattr(evolver, "deadline_exceeded", None) if evolver is not None else None
+        if evolver is not None:
+            evolver.deadline = None
+            evolver.deadline_exceeded = None
+        try:
+            try:
+                result.report_metrics = dict(evaluate_report(*args))
+            except TimeoutError:
+                result.report_metrics = {}
             return result
-        result.report_metrics = dict(reported.metrics)
+        finally:
+            if evolver is not None:
+                evolver.deadline = previous_deadline
+                evolver.deadline_exceeded = previous_callback
+
+    def _cross_validate_result(self, result: StrategyResult, task: Task) -> StrategyResult:
+        """Attach support-fold evidence to a provisional executable solution exactly once."""
+
+        if not self.cross_validation_config.enabled or result.validation_status != "not_run":
+            return result
+        if not result.has_admissible_champion or not self._accepts_metrics(result.champion_metrics):
+            return result
+        now = time.perf_counter()
+        task_deadline = getattr(self, "_task_deadline", None)
+        bounded_deadline = now + self.cross_validation_config.reserve_max_seconds
+        deadline = min(task_deadline, bounded_deadline) if task_deadline is not None else bounded_deadline
+        self.display.stage_started("cross_validation")
+        validation = self.cross_validator.run(task, self._fold_evaluator(result), deadline=deadline)
+        result.validation_status = validation.status
+        result.validation_metrics = validation.metrics()
+        stages = getattr(self, "_active_stages", None)
+        if stages is not None:
+            stages["cross_validation"] = round(stages.get("cross_validation", 0.0) + validation.seconds, 3)
+        if validation.folds_completed:
+            detail = f"{validation.folds_passed}/{validation.folds_completed} support folds passed"
+        elif validation.status == "not_applicable":
+            detail = "fewer than two usable support folds"
+        else:
+            detail = "no fold completed before validation became unavailable"
+        outcome = "accepted" if validation.admits else ("unavailable" if validation.status == "inconclusive" else "continue")
+        self.display.stage_result("cross_validation", outcome, f"{validation.status} · {detail}", seconds=validation.seconds, depth=getattr(self, "_display_depth", 0))
         return result
 
-    # --- the evolve step: a config-ordered strategy ladder with budget carry --------------------------
+    def _fold_evaluator(self, result: StrategyResult) -> Callable[[Task, int, float | None], dict[str, float]]:
+        if result.champion_comp is not None:
+            comp = result.champion_comp.comp
+            return lambda fold, seed, deadline: self._evaluate_composition_fold(comp, fold, seed, deadline)
+        if result.champion_genome is None:
+            return lambda _fold, _seed, _deadline: {}
+        genome = result.champion_genome
+        if result.field_template is not None:
+            field_template = result.field_template
+            return lambda fold, seed, deadline: self._evaluate_field_fold(genome, field_template, fold, seed, deadline)
+        return lambda fold, seed, deadline: self._evaluate_genome_fold(genome, fold, seed, deadline)
+
+    def _evaluate_genome_fold(self, genome: Genome, task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        strategy: Any = dict(self.strategies).get("direct")
+        if strategy is None:
+            grammar = dict(self.strategies).get("grammar")
+            strategy = getattr(grammar, "direct", None)
+        if strategy is None:
+            return {}
+        evolver = strategy.evolver
+        fresh = fresh_genome_weights(genome, seed)
+        adapter = strategy._adapter(task, include_query=True)
+        state = EvolverState([], InnovationTracker.from_genomes([fresh]), random.Random(seed))
+        previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
+        evolver.deadline = deadline
+        evolver.deadline_exceeded = lambda: deadline is not None and time.perf_counter() >= deadline
+        try:
+            assessed = evolver.assess(fresh, adapter, state)
+            return {} if assessed.module is None else dict(assessed.metrics)
+        finally:
+            evolver.deadline, evolver.deadline_exceeded = previous_deadline, previous_callback
+
+    def _evaluate_field_fold(self, genome: Genome, field_template: dict[str, Any], task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        strategy: Any = dict(self.strategies).get("field")
+        if strategy is None:
+            return {}
+        from versal.field import FieldAdapter, FieldContract, deterministic_sites, encode_sites, evaluate_field_module, valid_sites
+
+        contract = FieldContract.from_dict(field_template)
+        sites = valid_sites(task.support)
+        selected = deterministic_sites(sites, strategy.train_sites, salt=f"cv:{seed}:{contract.identity}")
+        encoded = encode_sites(task, selected, contract, chunk_size=strategy.verify_chunk_size, deadline=deadline)
+        adapter = FieldAdapter(encoded, encoded, contract, max_inline_depth=strategy.evolver.max_inline_depth, library=self.library)
+        fresh = fresh_genome_weights(genome, seed)
+        state = EvolverState([], InnovationTracker.from_genomes([fresh]), random.Random(seed))
+        evolver = strategy.evolver
+        previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
+        evolver.deadline = deadline
+        evolver.deadline_exceeded = lambda: deadline is not None and time.perf_counter() >= deadline
+        try:
+            assessed = evolver.assess(fresh, adapter, state)
+            if assessed.module is None:
+                return {}
+            return evaluate_field_module(assessed.module, task, contract, split="query", chunk_size=strategy.verify_chunk_size, deadline=deadline)
+        finally:
+            evolver.deadline, evolver.deadline_exceeded = previous_deadline, previous_callback
+
+    def _evaluate_composition_fold(self, comp: CompositionGenome, task: Task, seed: int, deadline: float | None) -> dict[str, float]:
+        spec = comp_task_spec(task, structured_grid=self.structured_grid)
+        fresh = fresh_composition_glue(comp, seed, dense_scale=self.loop.glue_scale)
+        champions = {species_id: fresh_genome_weights(genome, seed ^ species_id) for species_id, genome in self.state.species_champions.items()}
+        assessed = assess_composition_pure(
+            fresh,
+            spec,
+            champions,
+            self.library,
+            self.loop.max_inline_depth,
+            train=True,
+            train_op=self.loop.evolver.train_op,
+            evaluate_op=self.loop.evolver.evaluate_op,
+            fitness=self.loop.evolver.fitness,
+            rng=random.Random(seed),
+            deadline=deadline,
+        )
+        return dict(assessed.metrics)
+
+    # the evolve step: a config-ordered strategy ladder with budget carry
 
     def _shutdown_requested(self) -> bool:
         callback = self._shutdown_requested_callback
         return bool(callback is not None and callback())
 
     def _time_deadline_exceeded(self) -> bool:
+        """Whether the support-search cutoff has expired (legacy/public timeout meaning)."""
+
         deadline = getattr(self, "_solve_deadline", None)
         return deadline is not None and time.perf_counter() > deadline
 
+    def _search_deadline_exceeded(self) -> bool:
+        return self._time_deadline_exceeded()
+
+    def _task_allowance_exceeded(self) -> bool:
+        deadline = getattr(self, "_task_deadline", None)
+        return deadline is not None and time.perf_counter() > deadline
+
+    def _support_timed_out(self, result: StrategyResult | None = None) -> bool:
+        """Allow a completed reserved-time validation to cross the earlier search cutoff."""
+
+        if self._task_allowance_exceeded():
+            return True
+        if not self._time_deadline_exceeded():
+            return False
+        return result is None or result.validation_status not in {"passed", "not_applicable"}
+
     def _deadline_exceeded(self) -> bool:
-        return self._shutdown_requested() or self._time_deadline_exceeded()
+        return self._shutdown_requested() or self._search_deadline_exceeded()
 
     def _total_deadline_exceeded(self) -> bool:
         deadline = getattr(self, "_total_task_deadline", None)
@@ -641,6 +673,7 @@ class Orchestrator:
             self._failure_stage = "shutdown_requested"
         recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
         if recovered is not None:
+            report_result = self._report_result_for(recovered, depth)
             attempt = self._attempt_from_result(
                 recovered,
                 task=task.meta.name,
@@ -648,6 +681,8 @@ class Orchestrator:
                 outcome="failed",
                 failure_stage="shutdown_requested" if depth == 0 else None,
                 query_status="shutdown_before_evaluation",
+                report_result=report_result,
+                suppress_query=True,
             )
         else:
             attempt = Attempt(
@@ -674,9 +709,12 @@ class Orchestrator:
             self.counters["total_time_budget_hits"] += 1
             self._failure_stage = "time_budget"
         recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
+        if recovered is None and depth == 0:
+            recovered = getattr(self, "_best_parent_report_result", None)
         if recovered is not None:
-            if self.blind_query and not recovered.report_metrics:
-                recovered = self._attach_report_metrics(recovered, comp_task_spec(task, structured_grid=self.structured_grid))
+            report_result = self._report_result_for(recovered, depth)
+            if self.blind_query and not self._shutdown_requested() and not report_result.report_attempted:
+                report_result = self._attach_report_metrics(report_result, task, comp_task_spec(task, structured_grid=self.structured_grid))
             attempt = self._attempt_from_result(
                 recovered,
                 task=task.meta.name,
@@ -684,6 +722,7 @@ class Orchestrator:
                 outcome="failed",
                 failure_stage="time_budget",
                 query_status="time_limit_before_evaluation",
+                report_result=report_result,
             )
         else:
             attempt = Attempt(
@@ -801,11 +840,18 @@ class Orchestrator:
                 break
             stage_started = time.perf_counter()
             self.display.stage_started(name)
-            if name == "direct" and seed_entries:
+            if name == "field":
+                from versal.field import field_contract
+
+                contract = field_contract(task)
+                field_seeds = self.library.query_field(contract, limit=self.quick_eval_top_k) if contract is not None else []
+                outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=field_seeds or None)
+            elif name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=handoff_seeds if name == "composition" else None)
             stage_elapsed = time.perf_counter() - stage_started
+            outcome = self._cross_validate_result(outcome, task)
             stages = getattr(self, "_active_stages", None)
             if stages is not None:
                 stages[name] = round(stages.get(name, 0.0) + stage_elapsed, 3)
@@ -821,13 +867,18 @@ class Orchestrator:
                     if counter in self.counters:
                         self.counters[counter] += int(outcome.strategy_metrics.get(metric, 0.0))
             resource_metrics.update(outcome.resource_metrics)
-            declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
-            if declined and "resource_declines" in self.counters:
+            if outcome.strategy_metrics.get("direct_guard_declined") and "direct_guard_declines" in self.counters:
+                self.counters["direct_guard_declines"] += 1
+            resource_declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
+            skipped = outcome.skip_reason is not None or resource_declined
+            if resource_declined and "resource_declines" in self.counters:
                 self.counters["resource_declines"] += 1
                 counter = f"{name}_resource_declines"
                 if counter in self.counters:
                     self.counters[counter] += 1
             results.append(outcome)
+            self._consider_parent_report_result(outcome, depth=getattr(self, "_display_depth", 0))
+            self._consider_parent_field_result(outcome, depth=getattr(self, "_display_depth", 0))
             ladder_metrics.update(outcome.strategy_metrics)
             if name == "routed" and outcome.champion_comp is not None and not self._accepts_result(outcome):
                 fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(outcome.champion_comp.comp))
@@ -838,8 +889,8 @@ class Orchestrator:
             if name == "composition" and ladder_metrics.get("handoff_count", 0.0):
                 ladder_metrics["recovery_result"] = float(outcome.metric)
             support, _query, support_status, _query_status = self._quality_of_result(outcome)
-            notes = [f"{outcome.generations_used} generations"]
-            if support_status == "no_executable_champion":
+            notes = [outcome.skip_reason] if outcome.skip_reason is not None else [f"{outcome.generations_used} generations"]
+            if support_status == "no_executable_champion" and not skipped:
                 notes.append("diagnostic only; no executable champion")
             if name == "routed" and "router_score" in outcome.strategy_metrics:
                 notes.append(f"router {outcome.strategy_metrics['router_score']:.3f}")
@@ -847,15 +898,11 @@ class Orchestrator:
                     notes.append(f"distilled {outcome.strategy_metrics['distilled_score']:.3f}")
                 if ladder_metrics.get("handoff_count", 0.0):
                     notes.append("executable handoff prepared")
-            if declined:
-                notes.append(
-                    "explicit flat substrate cannot fit; continuing with field search/composition"
-                    if name == "direct"
-                    else "resource guard skipped allocation"
-                )
+            if resource_declined and outcome.skip_reason is None:
+                notes.append("explicit flat substrate cannot fit; continuing with field search/composition" if name == "direct" else "resource guard skipped allocation")
             self.display.stage_result(
                 name,
-                "accepted" if self._accepts_result(outcome) else ("skipped" if declined else "continue"),
+                "accepted" if self._accepts_result(outcome) else ("skipped" if skipped else "continue"),
                 " · ".join(notes),
                 seconds=stage_elapsed,
                 depth=getattr(self, "_display_depth", 0),
@@ -870,14 +917,17 @@ class Orchestrator:
             if remaining <= 0:
                 break
         # Metric-only diagnostics (for example an adapter-space routed score whose pathway could
-        # not be distilled) must not displace a real below-bar champion that the wall ledger can
-        # preserve. When every strategy declined, the metric remains a useful failure diagnostic.
-        best = max(results, key=lambda item: (item.has_admissible_champion, item.metric))
+        # not be distilled) must not displace a real support-selected payload that can receive the
+        # mandatory held-out report. When every strategy declined, the metric remains useful.
+        if self.blind_query:
+            best = max(results, key=lambda item: (item.has_report_candidate, self._report_candidate_value(item)))
+        else:
+            best = max(results, key=lambda item: item.metric)
         best.resource_metrics = dict(resource_metrics)
         best.strategy_metrics = dict(ladder_metrics)
         return best
 
-    # --- learn-mode refinement of library hits --------------------------------------------------------
+    # learn-mode refinement of library hits
 
     def _handle_library_hit(self, hit: Solution, task: Task, spec: CompTaskSpec, depth: int) -> Solution:
         """STEP 1b: a hit is free, but learn mode (refine budget_k > 0) spends a bounded, decaying
@@ -901,6 +951,8 @@ class Orchestrator:
                 library_key=hit.key,
                 refine_generations=refine_generations,
                 report_metric=hit.report_metric,
+                report_strategy="lookup",
+                report_representation=("field" if hit.key is not None and "field_template" in self.library.load(hit.key).payload else hit.entry_type),
                 task_metrics=dict(hit.task_metrics),
                 support_accuracy=hit.support_accuracy,
                 query_accuracy=hit.query_accuracy,
@@ -947,6 +999,9 @@ class Orchestrator:
                 result = strategy(task, spec, runtime, budget=effective_budget, seed_comps=[comp_from_dict(entry.payload)])
         finally:
             target.topology_tabu = previous_tabu
+        result = self._cross_validate_result(result, task)
+        support_timed_out = self._support_timed_out(result)
+        stopping = self._shutdown_requested()
         if topology_tabu is not None:
             topology_tabu.commit()
             topology_metrics = topology_tabu.metrics()
@@ -956,14 +1011,17 @@ class Orchestrator:
             self.counters["topology_retry_exhaustions"] += int(topology_metrics["topology_retry_exhaustions"])
             self.counters["topology_exhausted_attempts"] += int(topology_metrics["topology_exhausted"])
         self._last_refine_strategy_metrics = dict(result.strategy_metrics)
-        if self.blind_query:
-            result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
+        if self.blind_query and not stopping:
+            result = self._attach_report_metrics(result, task, comp_task_spec(task, structured_grid=self.structured_grid))
+        stopping = stopping or self._shutdown_requested()
         self.counters["refine_generations"] += result.generations_used
 
         candidate = self._candidate_rank(result)
         incumbent = self._incumbent_rank(hit, entry, seed_metric=result.seed_metric)
         improves = (
             candidate is not None
+            and not support_timed_out
+            and not stopping
             # A robustness/size tie-break can sit epsilon below an at-the-bar incumbent; never shelve below the bar.
             and self._accepts_result(result)
             # Identity check FIRST: the incumbent topology retrained on this variant is NOT a new
@@ -997,10 +1055,7 @@ class Orchestrator:
         # the improved solution this run but counts as a failure so full-K retries do not repeat.
         self.library.record_refinement(hit.key, improved=key is not None)
         if key is not None:
-            # The replacement continues the SAME lineage, so its cooldown rides the chain: a
-            # capability gain (metric/robustness tier) recharges the family, but a compression-only
-            # gain spends it (24 -> 12 -> 6 -> skip), or one capability epoch would fund an endless
-            # per-variant polish treadmill of near-identical entries (the 2026-07-04 lesson).
+            # Capability gains recharge the lineage; compression-only gains spend its cooldown.
             assert candidate is not None
             capability_gain = candidate.metric > incumbent.metric + self.refine_metric_epsilon or candidate.robustness > incumbent.robustness + self.refine_robustness_epsilon
             self.library.seed_refine_stats(key, attempts=parent_attempts + 1, failures=0 if capability_gain else parent_failures + 1)
@@ -1119,13 +1174,8 @@ class Orchestrator:
         )
 
     def _incumbent_rank(self, hit: Solution, entry: LibraryEntry, *, seed_metric: float | None = None) -> RefinementRank:
-        # The metric baseline is the STRONGER of the quick metric just measured on THIS task and the
-        # seed's own trained standing inside the refine run (when the strategy tracked it): a
-        # candidate must beat the incumbent GIVEN THE SAME TRAINING, or the comparison rewards
-        # retraining instead of topology. Robustness is stored-at-admission (the index max over
-        # re-admissions); recomputing it fresh would cost a weight-samples evaluation per hit,
-        # against the cheap-hit contract, and the asymmetry only matters inside the metric-tie tier
-        # where the epsilon band absorbs it.
+        # Compare against the stronger current or trained-seed metric so retraining alone is not a gain.
+        # Recomputing robustness here would violate the cheap-hit contract.
         summary = self.library.summary(entry.key) or {}
         robustness = float(summary.get("weight_robustness", entry.provenance.get("weight_robustness", 0.0)))
         complexity = self.library.expanded_complexity(entry.key)
@@ -1151,7 +1201,7 @@ class Orchestrator:
             self.library.retire(old_key)
             logger.info("retired superseded library entry %s (refined replacement dominates)", old_key)
 
-    # --- the wall ledger: failure leaves a trace ------------------------------------------------------
+    # the wall ledger: failure leaves a trace
 
     @staticmethod
     def _io_of(task: Task, spec: CompTaskSpec) -> dict[str, Any]:
@@ -1167,17 +1217,40 @@ class Orchestrator:
     def _wall_stone_seeds(self, task: Task, spec: CompTaskSpec) -> tuple[list[LibraryEntry], list[CompositionGenome]]:
         """The warm start for a fresh assault on a known wall, split by shape for the seeding rails
         (MODULE stones graft into the direct population, COMPOSITION stones seed the comp loop)."""
-        stones = self._wall_stones(task, spec)[: self.wall_seed_top_k]
-        modules = [stone for stone in stones if stone.entry_type == MODULE and "field_template" not in stone.payload]
+        # Field programs have a symbolic, cross-resolution seed rail of their own. Filter them
+        # before applying top-k so a strong field stone cannot crowd the ordinary direct/comp rail.
+        stones = [stone for stone in self._wall_stones(task, spec) if "field_template" not in stone.payload][: self.wall_seed_top_k]
+        modules = [stone for stone in stones if stone.entry_type == MODULE]
         comps = [comp_from_dict(stone.payload) for stone in stones if stone.entry_type == COMPOSITION]
         return modules, comps
+
+    def _wall_stones_for_result(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> list[LibraryEntry]:
+        """Return only stones competing for the candidate's representation-specific niche.
+
+        Field programs compete by symbolic field identity, independent of absolute grid size.
+        Ordinary modules and compositions each keep their own task-shaped lineage. This preserves
+        bounded replacement semantics without letting a minimal composition monopolize every
+        representation that could make progress on the same raw I/O contract.
+        """
+
+        if result.field_template is not None:
+            from versal.field import FieldContract
+
+            try:
+                contract = FieldContract.from_dict(result.field_template)
+            except ValueError:
+                return []
+            return [entry for entry in self.library.query_field(contract) if entry.provenance.get("stepping_stone")]
+        entry_type = COMPOSITION if result.champion_comp is not None else MODULE
+        return [entry for entry in self._wall_stones(task, spec) if entry.entry_type == entry_type and "field_template" not in entry.payload]
 
     def _admit_stepping_stone(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> str | None:
         """Shelve a failed attempt's best champion as a below-bar stepping stone: a dependency
         entry (bypasses the admission policy and signature caps, invisible to `signature_group`)
         that can never be a false lookup hit because quick-eval still gates on the accept bar.
-        One stone per signature lineage: replaced only on a strict lexicographic AND structural
-        win (the refine comparator, reused), so the wall gets chipped, not wallpapered. Free
+        One stone per representation lineage (and per symbolic field identity): replaced only on
+        a strict lexicographic AND structural win (the refine comparator, reused), so the wall gets
+        chipped, not wallpapered. Free
         synergies: stones enter module-pool absorption and the comp ref catalog through `query`,
         and become router vertices at sync (immature circuits in the overmind, by design)."""
         candidate = self._candidate_rank(result)
@@ -1185,7 +1258,7 @@ class Orchestrator:
             return None
         if float(result.champion_metrics.get("support_gain_over_baseline", math.inf)) < self.wall_min_gain_over_baseline:
             return None
-        incumbent_stone = next(iter(self._wall_stones(task, spec)), None)
+        incumbent_stone = next(iter(self._wall_stones_for_result(result, task, spec)), None)
         if incumbent_stone is not None:
             if self._candidate_matches_entry(result, incumbent_stone):
                 return None
@@ -1210,7 +1283,32 @@ class Orchestrator:
         logger.debug("wall ledger shelved stepping stone %s for %s (best %s=%.3f)", key, task.meta.name, self.search_metric, result.metric)
         return key
 
-    # --- ladder steps -------------------------------------------------------------------------------
+    def _admit_failure_stepping_stones(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> list[str]:
+        """Retain the overall loser and the best independently observed field program.
+
+        The ladder returns only one overall result, so without this second rail every losing field
+        population disappears whenever a routed/direct/composition candidate ranks higher. Exact
+        fingerprints are de-duplicated before admission; niche replacement performs the remaining
+        archive bounds.
+        """
+
+        candidates = [result]
+        field_result = getattr(self, "_best_parent_field_result", None)
+        if field_result is not None:
+            candidates.append(field_result)
+        admitted: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            fingerprint = self._candidate_fingerprint(candidate)
+            if fingerprint is None or fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            key = self._admit_stepping_stone(candidate, task, spec)
+            if key is not None and key not in admitted:
+                admitted.append(key)
+        return admitted
+
+    # ladder steps
 
     def _lookup(self, task: Task, spec: CompTaskSpec) -> Solution | None:
         io = self._io_of(task, spec)
@@ -1228,6 +1326,10 @@ class Orchestrator:
         candidates.extend(entry for entry in exact if entry.key not in seen)
         candidates = candidates[: self.quick_eval_top_k]
         for entry in candidates:
+            # Stones are reusable search material, not verified task solutions.  In particular a
+            # support-perfect stone that failed CV must never turn into a zero-cost lookup hit.
+            if entry.provenance.get("stepping_stone"):
+                continue
             if self._total_deadline_exceeded():
                 return None
             assessment = self._quick_assessment(entry, task, spec)
@@ -1235,8 +1337,13 @@ class Orchestrator:
                 continue
             self.library.note_reuse(entry.key, channel="lookup")
             metric = self._metric(assessment)
-            report_assessment = self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment
-            report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else metric
+            shutdown_before_report = self.blind_query and self._shutdown_requested()
+            report_assessment = (
+                None
+                if shutdown_before_report
+                else (self._quick_assessment(entry, task, comp_task_spec(task, structured_grid=self.structured_grid)) if self.blind_query else assessment)
+            )
+            report_metric = self._report(report_assessment) if self.blind_query and report_assessment is not None else (None if self.blind_query else metric)
             combined = dict(assessment.metrics) | (dict(report_assessment.metrics) if report_assessment is not None else {})
             task_metrics = _task_metrics(combined)
             if "field_template" in entry.payload:
@@ -1253,7 +1360,7 @@ class Orchestrator:
                 support_accuracy=support_accuracy,
                 query_accuracy=query_accuracy,
                 support_status="evaluated" if support_accuracy is not None else "evaluation_unavailable",
-                query_status="evaluated" if query_accuracy is not None else "evaluation_unavailable",
+                query_status="shutdown_before_evaluation" if shutdown_before_report else ("evaluated" if query_accuracy is not None else "evaluation_unavailable"),
             )
         return None
 
@@ -1342,13 +1449,8 @@ class Orchestrator:
         metrics = evaluate(module, spec.encoded, spec.encoder)
         return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None)
 
-    def _quick_metric(self, entry: LibraryEntry, task: Task, spec: CompTaskSpec, *, report: bool = False) -> float | None:
-        assessment = self._quick_assessment(entry, task, spec)
-        if assessment is None:
-            return None
-        return self._report(assessment) if report else self._metric(assessment)
-
     def _decompose_and_recurse(self, task: Task, spec: CompTaskSpec, depth: int, budget: int, first_metric: float) -> Solution | None:
+        self._last_decompose_report_overrun = False
         if self._total_deadline_exceeded():
             return None
         self.display.stage_started("decompose")
@@ -1383,6 +1485,7 @@ class Orchestrator:
             if self._total_deadline_exceeded():
                 return None
             solved = self.solve(subtask.task, depth + 1)
+            self._last_decompose_report_overrun = False
             if solved is None:
                 # A missing part means the wired parent cannot be completed; record WHERE it died.
                 self.counters["decompose_subtask_failed"] += 1
@@ -1403,12 +1506,17 @@ class Orchestrator:
             return None
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         result = self._remember_or_recover_parent_result(result, depth)
-        if self.blind_query:
-            result = self._attach_report_metrics(result, comp_task_spec(task, structured_grid=self.structured_grid))
-            _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_admissible_champion:
+        support_timed_out = self._support_timed_out(result)
+        report_result = self._report_result_for(result, depth)
+        report_attempted_before = report_result.report_attempted
+        if self.blind_query and not self._shutdown_requested():
+            report_result = self._attach_report_metrics(report_result, task, comp_task_spec(task, structured_grid=self.structured_grid))
+            report_started = not report_attempted_before and report_result.report_attempted
+            self._last_decompose_report_overrun = report_started and not support_timed_out and self._time_deadline_exceeded()
+            _support, query, _support_status, query_status = self._quality_of_result(report_result)
+            if report_result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
-        if self._accepts_result(result):
+        if not support_timed_out and not self._shutdown_requested() and self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=chosen_name)
             support, _query, _support_status, _query_status = self._quality_of_result(result)
             self.display.stage_result(
@@ -1426,9 +1534,17 @@ class Orchestrator:
                 depth=depth,
             )
             self.counters["accepts"] += 1
-            attempt = self._attempt_from_result(result, task=task.meta.name, depth=depth, outcome="decomposed", library_key=key, decompose_op=chosen_name)
+            attempt = self._attempt_from_result(
+                result,
+                task=task.meta.name,
+                depth=depth,
+                outcome="decomposed",
+                library_key=key,
+                decompose_op=chosen_name,
+                report_result=report_result,
+            )
             self._record(attempt)
-            return self._solution_from_result(result, key)
+            return self._solution_from_result(result, key, report_result=report_result)
         # Every part solved but the wired parent still missed the bar.
         self.counters["decompose_parent_failed"] += 1
         self._failure_stage = "parent_re_evolve"
@@ -1449,14 +1565,74 @@ class Orchestrator:
 
         if depth != 0:
             return result
+        self._consider_parent_report_result(result, depth=depth)
         incumbent = getattr(self, "_best_parent_result", None)
-        if result.has_admissible_champion:
-            if incumbent is None or result.metric > incumbent.metric:
+        result_retainable = result.has_report_candidate if self.blind_query else result.has_admissible_champion
+        if incumbent is None:
+            if result_retainable:
+                self._best_parent_result = result
+            return result
+        result_accepted = self._accepts_result(result)
+        incumbent_accepted = self._accepts_result(incumbent)
+        if result_accepted != incumbent_accepted:
+            if result_accepted:
                 self._best_parent_result = result
                 return result
             return incumbent
-        if not result.has_admissible_champion and incumbent is not None:
+        incumbent_retainable = incumbent.has_report_candidate if self.blind_query else incumbent.has_admissible_champion
+        if result_retainable and (not incumbent_retainable or result.metric > incumbent.metric):
+            self._best_parent_result = result
+            return result
+        if incumbent_retainable:
             return incumbent
+        return result
+
+    def _report_candidate_value(self, result: StrategyResult) -> float:
+        """Rank the executable reporting rail by its own support-search score."""
+
+        if not result.has_report_candidate:
+            return -math.inf
+        metrics = result.report_candidate_metrics or result.champion_metrics
+        return self._metric(SimpleNamespace(metrics=metrics))
+
+    def _consider_parent_report_result(self, result: StrategyResult, *, depth: int) -> None:
+        """Remember the highest-support parent payload independently of admission ranking."""
+
+        if depth != 0 or not result.has_report_candidate:
+            return
+        incumbent = getattr(self, "_best_parent_report_result", None)
+        candidate_rank = (self._report_candidate_value(result), result.has_admissible_champion)
+        incumbent_rank = (-math.inf, False) if incumbent is None else (self._report_candidate_value(incumbent), incumbent.has_admissible_champion)
+        if incumbent is None or candidate_rank > incumbent_rank:
+            self._best_parent_report_result = result
+
+    def _consider_parent_field_result(self, result: StrategyResult, *, depth: int) -> None:
+        """Remember the strongest verified field champion independently of ladder ranking."""
+
+        if depth != 0 or result.field_template is None or result.champion_genome is None or not math.isfinite(result.metric):
+            return
+        incumbent = getattr(self, "_best_parent_field_result", None)
+        candidate_rank = (
+            result.metric,
+            float(result.champion_metrics.get("weight_robustness", 0.0)),
+            -result.champion_genome.complexity(),
+        )
+        incumbent_rank = (
+            (-math.inf, -math.inf, -math.inf)
+            if incumbent is None or incumbent.champion_genome is None
+            else (
+                incumbent.metric,
+                float(incumbent.champion_metrics.get("weight_robustness", 0.0)),
+                -incumbent.champion_genome.complexity(),
+            )
+        )
+        if incumbent is None or candidate_rank > incumbent_rank:
+            self._best_parent_field_result = result
+
+    def _report_result_for(self, result: StrategyResult, depth: int) -> StrategyResult:
+        if depth == 0:
+            self._consider_parent_report_result(result, depth=depth)
+            return getattr(self, "_best_parent_report_result", None) or result
         return result
 
     def _subtasks_promising(self, subtasks: list[Subtask], parent_depth: int = 0) -> bool:
@@ -1547,7 +1723,7 @@ class Orchestrator:
         if current is None or float(observation["score"]) > float(current["score"]):
             self._best_diagnostic_observation = observation
 
-    # --- admission ----------------------------------------------------------------------------------
+    # admission
 
     def _gated_add(self, *, entry_type: str, payload: dict[str, Any], io: dict[str, Any], provenance: dict[str, Any], level: int, dependency: bool) -> str | None:
         """All library writes flow through here. Dependencies (module snapshots a composition
@@ -1590,7 +1766,7 @@ class Orchestrator:
                 self.counters["routed_solved"] += 1
                 if result.champion_metrics.get("routed_zero_shot"):
                     self.counters["routed_zero_shot"] += 1
-            return self._admit(result.champion_comp, task, spec, depth, decompose_op)
+            return self._admit(result.champion_comp, task, spec, depth, decompose_op, validation_result=result)
         if result.champion_genome is not None:
             return self._admit_direct_module(result, task, spec, depth)
         raise ValueError(f"strategy {result.strategy!r} produced no admissible champion")
@@ -1608,6 +1784,7 @@ class Orchestrator:
             "accepted_metric": result.metric,
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
             "behavior": _genome_behavior(result.champion_genome),
+            **self._validation_provenance(result),
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
@@ -1632,7 +1809,16 @@ class Orchestrator:
             dependency=depth > 0 or self._stepping_stone,
         )
 
-    def _admit(self, best: AssessedComposition, task: Task, spec: CompTaskSpec, depth: int, decompose_op: str | None) -> str | None:
+    def _admit(
+        self,
+        best: AssessedComposition,
+        task: Task,
+        spec: CompTaskSpec,
+        depth: int,
+        decompose_op: str | None,
+        *,
+        validation_result: StrategyResult,
+    ) -> str | None:
         """Detach the champion from run-local state and persist it: live refs become frozen MODULE
         entries carrying the exact trained weights that scored; the composition references those."""
         metric = self._metric(best)
@@ -1682,6 +1868,7 @@ class Orchestrator:
             "accepted_metric": metric,
             "weight_robustness": best.metrics.get("weight_robustness", 0.0),
             "behavior": _comp_behavior(detached, level),
+            **self._validation_provenance(validation_result),
         }
         if self._refined_from is not None:
             provenance["refined_from"] = self._refined_from  # lineage: this entry continues that one
@@ -1691,7 +1878,13 @@ class Orchestrator:
             entry_type=COMPOSITION, payload=comp_to_dict(detached), io=self._io_of(task, spec), provenance=provenance, level=level, dependency=depth > 0 or self._stepping_stone
         )
 
-    # --- skeleton wiring ------------------------------------------------------------------------------
+    @staticmethod
+    def _validation_provenance(result: StrategyResult) -> dict[str, Any]:
+        if result.validation_status == "not_run" and not result.validation_metrics:
+            return {}
+        return {"validation_status": result.validation_status, **result.validation_metrics}
+
+    # skeleton wiring
 
     def _port_wired_skeleton(self, spec: CompTaskSpec, solutions: list[tuple[Subtask, Solution]]) -> CompositionGenome | None:
         """Seed every decomposer role with compact immutable gather/scatter port maps."""
@@ -1776,7 +1969,7 @@ class Orchestrator:
             comp.edges.append(CompEdgeGene(node_id, output_id, True, tracker.innovation(node_id, output_id), (), 0, output_map))
         return comp
 
-    # --- plumbing -------------------------------------------------------------------------------------
+    # plumbing
 
     def _budget(self, depth: int) -> int:
         if depth in self.budgets:
@@ -1819,7 +2012,11 @@ class Orchestrator:
         # A score is not a solution unless the strategy can hand admission an executable payload.
         # This defense is intentionally strategy-agnostic: declined guards, empty grammars, and
         # undistillable router wins all use metric-only StrategyResults to continue the ladder.
-        return result.has_admissible_champion and self._accepts_metrics(result.champion_metrics)
+        if not result.has_admissible_champion or not self._accepts_metrics(result.champion_metrics):
+            return False
+        if not getattr(self, "cross_validation_config", CrossValidationConfig()).enabled:
+            return True
+        return result.validation_status in {"passed", "not_applicable"}
 
     def _report(self, item: Any) -> float:
         return self._report_value(item.metrics) or 0.0
@@ -1834,11 +2031,17 @@ class Orchestrator:
         result. The configurable policy scores continue to live in `metric`/`report_metric`.
         """
 
-        if not result.has_admissible_champion:
+        if not result.has_admissible_champion and not result.has_report_candidate:
             return None, None, "no_executable_champion", "no_executable_champion"
-        support = _finite_accuracy(result.champion_metrics, "support_accuracy")
-        support_status = "evaluated" if support is not None else "evaluation_unavailable"
-        query_metrics = result.report_metrics if self.blind_query else result.champion_metrics
+        support_metrics = result.report_candidate_metrics or result.champion_metrics
+        support = _finite_accuracy(support_metrics, "support_accuracy")
+        if result.report_candidate_routed is not None:
+            support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        elif result.has_admissible_champion:
+            support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        else:
+            support_status = "support_verification_incomplete"
+        query_metrics = result.report_metrics if self.blind_query else support_metrics
         query = _finite_accuracy(query_metrics, "query_accuracy", loss_key="query_loss")
         if query is not None:
             query_status = "evaluated"
@@ -1860,8 +2063,18 @@ class Orchestrator:
         failure_stage: str | None = None,
         refine_generations: int = 0,
         query_status: str | None = None,
+        report_result: StrategyResult | None = None,
+        suppress_query: bool = False,
     ) -> Attempt:
-        support, query, support_status, observed_query_status = self._quality_of_result(result)
+        quality_result = report_result or result
+        support, query, support_status, observed_query_status = self._quality_of_result(quality_result)
+        if suppress_query:
+            query = None
+            observed_query_status = query_status or "shutdown_before_evaluation"
+        elif support_status == "no_executable_champion":
+            observed_query_status = "no_executable_champion"
+        elif query is None and not quality_result.report_attempted and query_status is not None:
+            observed_query_status = query_status
         size_metrics = dict(result.size_metrics)
         rank = self._candidate_rank(result)
         if rank is not None:
@@ -1888,23 +2101,28 @@ class Orchestrator:
             size_metrics=size_metrics,
             resource_metrics=dict(result.resource_metrics),
             strategy_metrics=dict(result.strategy_metrics),
-            report_metric=self._result_report_value(result),
-            task_metrics=_task_metrics_of(result),
+            validation_status=result.validation_status,
+            validation_metrics=dict(result.validation_metrics),
+            report_metric=None if suppress_query else self._result_report_value(quality_result),
+            report_strategy=quality_result.strategy if quality_result.has_report_candidate else None,
+            report_representation=(quality_result.representation or quality_result.strategy) if quality_result.has_report_candidate else None,
+            task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,
-            query_status=query_status if query is None and query_status is not None else observed_query_status,
-            representation=result.representation,
+            query_status=observed_query_status,
+            representation=result.representation or result.strategy,
         )
 
-    def _solution_from_result(self, result: StrategyResult, key: str | None) -> Solution:
-        support, query, support_status, query_status = self._quality_of_result(result)
+    def _solution_from_result(self, result: StrategyResult, key: str | None, *, report_result: StrategyResult | None = None) -> Solution:
+        quality_result = report_result or result
+        support, query, support_status, query_status = self._quality_of_result(quality_result)
         return Solution(
             key=key,
             entry_type=self._entry_type_of(result),
             metric=result.metric,
-            report_metric=self._result_report_value(result),
-            task_metrics=_task_metrics_of(result),
+            report_metric=self._result_report_value(quality_result),
+            task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,
@@ -1979,34 +2197,5 @@ def _comp_behavior(comp: CompositionGenome, level: int) -> list[str]:
     return [f"m{min(len(comp.module_ids), 6)}", f"L{level}"]
 
 
-def _stored_glue(values: Any, storage: str) -> GlueValues:
-    return array("f", values) if storage == "f32" else tuple(values)
-
-
 def _zero_glue(count: int, storage: str) -> GlueValues:
     return array("f", [0.0]) * count if storage == "f32" else tuple(0.0 for _ in range(count))
-
-
-def _identity_glue(in_width: int, out_width: int, storage: str = "tuple") -> GlueValues:
-    """Row-major identity-ish map: 1.0 on the diagonal, zero elsewhere (rectangular allowed)."""
-    return _stored_glue((1.0 if row == column else 0.0 for row in range(in_width) for column in range(out_width)), storage)
-
-
-def _placement_glue(in_width: int, out_width: int, start: int, storage: str = "tuple") -> GlueValues:
-    """Maps a module's output block onto its slice of the parent head: out[start + r] = in[r]."""
-    return _stored_glue((1.0 if row == start + column else 0.0 for row in range(in_width) for column in range(out_width)), storage)
-
-
-def _selection_glue(in_width: int, offsets: tuple[int, int], storage: str = "tuple") -> GlueValues:
-    """Selects parent input columns [start, end) into a module's input ports."""
-    start, end = offsets
-    out_width = end - start
-    return _stored_glue((1.0 if start + column == row else 0.0 for row in range(in_width) for column in range(out_width)), storage)
-
-
-def attempts_to_dicts(attempts: list[Attempt]) -> list[dict[str, Any]]:
-    return [attempt.to_dict() for attempt in attempts]
-
-
-def attempts_from_dicts(data: list[dict[str, Any]]) -> list[Attempt]:
-    return [Attempt.from_dict(item) for item in data]

@@ -633,9 +633,11 @@ def insert_production(program: Program, grammar: Grammar, *, rng: random.Random)
         target = grammar.production(next(node.production for node in program.nodes if node.id == edge.target)).port(edge.target_port)
         for production in grammar.productions:
             for input_port in (port for port in production.ports if port.direction == "input"):
-                for output_port in (port for port in production.ports if port.direction == "output"):
-                    if _compatible(source, input_port) and _compatible(output_port, target):
-                        candidates.append((edge, production, input_port, output_port))
+                candidates.extend(
+                    (edge, production, input_port, output_port)
+                    for output_port in production.ports
+                    if output_port.direction == "output" and _compatible(source, input_port) and _compatible(output_port, target)
+                )
     if not candidates:
         return program
     edge, production, input_port, output_port = candidates[rng.randrange(len(candidates))]
@@ -710,9 +712,11 @@ def reconnect_program(program: Program, grammar: Grammar, *, rng: random.Random)
             source_production = grammar.production(source_node.production)
             target_production = grammar.production(target_node.production)
             for source_port in (port for port in source_production.ports if port.direction == "output"):
-                for target_port in (port for port in target_production.ports if port.direction == "input"):
-                    if (target_node.id, target_port.name) not in occupied_inputs and _compatible(source_port, target_port):
-                        options.append(ProgramEdge(source_node.id, source_port.name, target_node.id, target_port.name))
+                options.extend(
+                    ProgramEdge(source_node.id, source_port.name, target_node.id, target_port.name)
+                    for target_port in target_production.ports
+                    if target_port.direction == "input" and (target_node.id, target_port.name) not in occupied_inputs and _compatible(source_port, target_port)
+                )
     rng.shuffle(options)
     for option in options:
         candidate = _normalized_program(program.nodes, [*remaining, option])
@@ -735,9 +739,11 @@ def repeat_production(program: Program, grammar: Grammar, *, rng: random.Random)
         for production_key in (by_id[edge.source].production, by_id[edge.target].production):
             production = grammar.production(production_key)
             for input_port in (port for port in production.ports if port.direction == "input"):
-                for output_port in (port for port in production.ports if port.direction == "output"):
-                    if _compatible(source_port, input_port) and _compatible(output_port, target_port):
-                        candidates.append((edge, production, input_port, output_port))
+                candidates.extend(
+                    (edge, production, input_port, output_port)
+                    for output_port in production.ports
+                    if output_port.direction == "output" and _compatible(source_port, input_port) and _compatible(output_port, target_port)
+                )
     if not candidates:
         return program
     edge, production, input_port, output_port = candidates[rng.randrange(len(candidates))]

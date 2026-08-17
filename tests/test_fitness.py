@@ -10,6 +10,7 @@ from versal.evolution.fitness import (
     FITNESS,
     FitnessAggregator,
     bounded_negative_support_loss,
+    complexity_penalty,
     connection_cost,
     negative_query_loss,
     negative_support_loss,
@@ -53,7 +54,7 @@ def test_non_finite_fitness_floors_instead_of_propagating() -> None:
     assert aggregator(None, {"support_loss": 0.5, "support_accuracy": 0.5}) > -1e9
 
 
-# --- objective vectors (the nsga2 foundation) -------------------------------------------------------
+# objective vectors (the nsga2 foundation)
 
 
 def test_objectives_vector_matches_components_and_scalar_unchanged(linear_genome: Genome) -> None:
@@ -82,7 +83,7 @@ def test_objectives_floor_non_finite_slot_only() -> None:
     assert vector == [0.7, -1e9]  # the exploded slot floors; the healthy slot survives
 
 
-# --- connection cost (the Clune/Mouret/Lipson wiring pressure) --------------------------------------
+# connection cost (the Clune/Mouret/Lipson wiring pressure)
 
 
 def _coordinate_genome() -> Genome:
@@ -114,3 +115,14 @@ def test_connection_cost_falls_back_to_edge_count(linear_genome: Genome) -> None
     disabled = replace(linear_genome.connections[0], enabled=False)
     linear_genome.connections[0] = disabled
     assert connection_cost(linear_genome, {}) == -2.0
+
+
+def test_persisted_complexity_metrics_skip_structural_recount(monkeypatch, linear_genome: Genome) -> None:
+    def unexpected_recount(_genome: Genome) -> int:
+        raise AssertionError("complexity should come from the supplied metrics")
+
+    monkeypatch.setattr(Genome, "complexity", unexpected_recount)
+    metrics = {"expanded_complexity": 7.0, "shell_complexity": 5.0}
+
+    assert complexity_penalty(linear_genome, metrics) == -7.0
+    assert connection_cost(linear_genome, metrics) == -5.0

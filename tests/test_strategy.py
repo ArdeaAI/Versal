@@ -3,16 +3,32 @@
 import random
 from dataclasses import replace as gene_replace
 from pathlib import Path
+from typing import cast
 
 from tests.test_hierarchical_loop import _config as _loop_config
 from tests.test_hierarchical_loop import _live_comp, _spec
 from tests.test_orchestrator import _orchestrator
 from versal.dataset.icarus import Task
+from versal.evolution.evolver import Evolver
 from versal.evolution.genome import InnovationTracker, genome_to_dict
 from versal.evolution.loop import AssessedComposition, CompTaskSpec, HierarchicalLoop, HierarchicalState
 from versal.evolution.registry import build_loop
 from versal.library import MODULE, ModuleLibrary, task_io
-from versal.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyResult, StrategyRuntime
+from versal.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrategy, StrategyPreflight, StrategyResult, StrategyRuntime
+from versal.substrate import SubstrateModule
+
+
+def test_strategy_facade_reexports_implementation_types() -> None:
+    from versal.strategy import DirectStrategy, FieldStrategy
+    from versal.strategy_composition import CompositionStrategy as CompositionImplementation
+    from versal.strategy_direct import DirectStrategy as DirectImplementation
+    from versal.strategy_field import FieldStrategy as FieldImplementation
+    from versal.strategy_grammar import GrammarStrategy as GrammarImplementation
+
+    assert CompositionStrategy is CompositionImplementation
+    assert DirectStrategy is DirectImplementation
+    assert FieldStrategy is FieldImplementation
+    assert GrammarStrategy is GrammarImplementation
 
 
 def _runtime_for(loop: HierarchicalLoop, state: HierarchicalState, threshold: float) -> StrategyRuntime:
@@ -53,10 +69,108 @@ def test_verification_reassembles_against_current_state(xor_task: Task) -> None:
     assert all(abs(fresh_weights[key] - expected[key]) < 1e-6 for key in fresh_weights)
 
 
-def test_field_strategy_runs_compact_program_and_full_verifies(tmp_path: Path) -> None:
+def test_composition_timeout_retains_support_best_for_reporting(monkeypatch, xor_task: Task) -> None:
+    loop = build_loop(_loop_config())
+    state = loop.fresh_state(random.Random(0))
+    state.comp_innovations = InnovationTracker(_next_node_id=100)
+    spec = _spec(xor_task)
+    species_id = sorted(state.species_champions)[0]
+    best = AssessedComposition(
+        comp=_live_comp(species_id, 2, 1),
+        metrics={"support_accuracy": 0.8},
+        fitness=0.8,
+        net=None,
+    )
+    runtime = _runtime_for(loop, state, threshold=0.95)
+    runtime.deadline_exceeded = lambda: True
+    monkeypatch.setattr(loop, "run_task", lambda *_args, **_kwargs: best)
+
+    result = CompositionStrategy(blind_query=True)(xor_task, spec, runtime, budget=1)
+
+    assert result.report_candidate_comp is best
+    assert result.champion_comp is None
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+
+
+def test_composition_verification_timeout_retains_support_best_for_reporting(monkeypatch, xor_task: Task) -> None:
+    from versal.evolution.composition import ComposedNet
+
+    loop = build_loop(_loop_config())
+    state = loop.fresh_state(random.Random(0))
+    state.comp_innovations = InnovationTracker(_next_node_id=100)
+    spec = _spec(xor_task)
+    species_id = sorted(state.species_champions)[0]
+    best = AssessedComposition(
+        comp=_live_comp(species_id, 2, 1),
+        metrics={"support_accuracy": 0.8},
+        fitness=0.8,
+        net=cast(ComposedNet, object()),
+    )
+    runtime = _runtime_for(loop, state, threshold=0.95)
+    monkeypatch.setattr(loop, "run_task", lambda *_args, **_kwargs: best)
+    monkeypatch.setattr(loop, "assess_composition", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError))
+
+    result = CompositionStrategy(blind_query=True)(xor_task, spec, runtime, budget=1)
+
+    assert result.report_candidate_comp is best
+    assert result.champion_comp is None
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+
+
+def test_field_strategy_runs_compact_program_and_defers_blind_query(monkeypatch, tmp_path: Path) -> None:
     from tests.test_field import _task
+    from versal import field as field_module
     from versal.strategy import FieldStrategy
 
+    splits: list[str] = []
+    original_evaluate = field_module.evaluate_field_module
+
+    def track_split(*args, **kwargs):
+        splits.append(kwargs.get("split", "support"))
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(field_module, "evaluate_field_module", track_split)
+
+    config = _loop_config()
+    config["orchestrator"] = {
+        "blind_query": True,
+        "field": {
+            "pop_size": 2,
+            "elitism": 1,
+            "train_sites": 8,
+            "audit_sites": 8,
+            "verify_top_k": 1,
+            "train": {"kind": "gradient", "steps": 1, "lr": 0.01, "writeback": True},
+            "evaluate": {"kind": "standard"},
+        },
+    }
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    strategy = EVOLVE_STRATEGY.get("field")(config)
+    assert isinstance(strategy, FieldStrategy)
+    result = strategy(_task(), _spec(_task()), _runtime_for(loop, state, threshold=2.0), budget=1)
+    assert result.champion_genome is not None and result.field_template is not None
+    assert result.champion_metrics["support_accuracy"] == result.champion_metrics["full_support_accuracy"]
+    assert result.strategy_metrics["field_application_sites"] == 20.0
+    assert result.report_metrics == {}
+    assert "query" not in splits
+
+    strategy.evaluate_report(result.champion_genome, _task(), result.field_template)
+    assert splits.count("query") == 1
+
+
+def test_field_strategy_warm_starts_from_compatible_library_entry(monkeypatch, tmp_path: Path) -> None:
+    from tests.test_field import _task
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width, field_payload
+
+    task = _task()
+    contract = field_contract(task)
+    assert contract is not None
     config = _loop_config()
     config["orchestrator"] = {
         "field": {
@@ -73,12 +187,249 @@ def test_field_strategy_runs_compact_program_and_full_verifies(tmp_path: Path) -
     library = ModuleLibrary(tmp_path / "lib")
     loop.attach_library(library)
     state = loop.fresh_state(random.Random(0))
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(1))
+    key = library.add(entry_type=MODULE, payload=field_payload(genome, contract), io=task_io(task), provenance={"accepted_metric": 1.0})
+    entry = library.load(key)
+    strategy = EVOLVE_STRATEGY.get("field")(config)
+    original_seed_state = strategy.evolver.seed_state
+    seeded = False
+
+    def capture_seed_state(*args, **kwargs):
+        nonlocal seeded
+        seeded = kwargs.get("seeded_front") is not None
+        return original_seed_state(*args, **kwargs)
+
+    monkeypatch.setattr(strategy.evolver, "seed_state", capture_seed_state)
+    result = strategy(task, _spec(task), _runtime_for(loop, state, threshold=2.0), budget=1, seed_entries=[entry])
+
+    assert seeded is True
+    assert result.strategy_metrics["field_seed_count"] == 1.0
+
+
+def test_direct_report_evaluates_full_task_once_without_training_and_restores_deadline(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from versal.strategy import DirectStrategy
+
+    config = _loop_config()
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    assert isinstance(strategy, DirectStrategy)
+    previous_deadline = 123.0
+
+    def previous_callback() -> bool:
+        return True
+
+    strategy.evolver.deadline = previous_deadline
+    strategy.evolver.deadline_exceeded = previous_callback
+    adapter_calls: list[bool] = []
+    evaluation_calls = 0
+    original_adapter = strategy._adapter
+    original_evaluate_only = strategy.evolver.evaluate_only
+
+    def adapter(task: Task, *, include_query: bool = True):
+        adapter_calls.append(include_query)
+        return original_adapter(task, include_query=include_query)
+
+    def evaluate_only(genome, task_adapter):
+        nonlocal evaluation_calls
+        evaluation_calls += 1
+        assert strategy.evolver.deadline is None
+        assert strategy.evolver.deadline_exceeded is None
+        return original_evaluate_only(genome, task_adapter)
+
+    monkeypatch.setattr(strategy, "_adapter", adapter)
+    monkeypatch.setattr(strategy.evolver, "evaluate_only", evaluate_only)
+    monkeypatch.setattr(
+        strategy.evolver,
+        "train_op",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("report evaluation must not train")),
+    )
+
+    metrics = strategy.evaluate_report(solving_genome, xor_task)
+
+    assert metrics["support_accuracy"] == 1.0
+    assert metrics["query_accuracy"] == 1.0
+    assert adapter_calls == [True]
+    assert evaluation_calls == 1
+    assert strategy.evolver.deadline == previous_deadline
+    assert strategy.evolver.deadline_exceeded is previous_callback
+
+
+def test_direct_blind_search_defers_query_evaluation_to_orchestrator(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+    from versal.strategy import DirectStrategy
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.stall_factory = lambda _budget: lambda _generation, _best: True
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    assert isinstance(strategy, DirectStrategy)
+    best = Assessed(solving_genome, {"support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object()))
+    state = SimpleNamespace(population=[best], topology_exhausted=False)
+    adapter_calls: list[bool] = []
+    evaluation_calls = 0
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: adapter_calls.append(include_query) or object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+
+    def evaluate_only(genome, _adapter):
+        nonlocal evaluation_calls
+        evaluation_calls += 1
+        return Assessed(genome, {"support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object()))
+
+    monkeypatch.setattr(strategy.evolver, "evaluate_only", evaluate_only)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert result.report_metrics == {}
+    assert adapter_calls == [False]
+    assert evaluation_calls == 1
+
+
+def test_field_report_decodes_payload_and_evaluates_query_without_training(tmp_path: Path) -> None:
+    from tests.test_field import _task
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width
+    from versal.strategy import FieldStrategy
+
+    config = _loop_config()
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
     strategy = EVOLVE_STRATEGY.get("field")(config)
     assert isinstance(strategy, FieldStrategy)
-    result = strategy(_task(), _spec(_task()), _runtime_for(loop, state, threshold=2.0), budget=1)
-    assert result.champion_genome is not None and result.field_template is not None
-    assert result.champion_metrics["support_accuracy"] == result.champion_metrics["full_support_accuracy"]
+    strategy.evolver.library = library
+    task = _task(query_size=3)
+    contract = field_contract(task)
+    assert contract is not None
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(0))
+
+    metrics = strategy.evaluate_report(genome, task, contract.to_dict())
+
+    assert set(metrics) == {"query_accuracy", "query_loss", "query_sites"}
+    assert metrics["query_loss"] >= 0.0
+    assert metrics["query_sites"] == 9.0
+
+
+def test_field_report_decode_failure_is_evaluation_unavailable(monkeypatch, tmp_path: Path, solving_genome) -> None:
+    from tests.test_field import _task
+    from versal import field as field_module
+    from versal.strategy import FieldStrategy
+
+    config = _loop_config()
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    strategy = EVOLVE_STRATEGY.get("field")(config)
+    assert isinstance(strategy, FieldStrategy)
+
+    def fail_decode(*_args, **_kwargs):
+        raise ValueError("floored retained candidate")
+
+    monkeypatch.setattr(field_module, "decode_field_payload", fail_decode)
+
+    assert strategy.evaluate_report(solving_genome, _task(query_size=3), {"version": "field/local_multiscale_v1"}) == {}
+
+
+def test_field_timeout_retains_population_best_as_report_only(monkeypatch, tmp_path: Path, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from tests.test_field import _task
+    from versal import field as field_module
+    from versal.evolution.evolver import Assessed
+    from versal.strategy import FieldStrategy
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.stall_factory = lambda _budget: lambda _generation, _best: True
+    best_genome = solving_genome.clone()
+    population = [
+        Assessed(solving_genome.clone(), {"support_accuracy": 0.2, "sampled_support_accuracy": 0.2}, 0.2, cast(SubstrateModule, object())),
+        Assessed(best_genome, {"support_accuracy": 0.8, "sampled_support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object())),
+    ]
+    state = SimpleNamespace(population=population, topology_exhausted=False)
+    evolver = SimpleNamespace(
+        max_inline_depth=4,
+        seed_state=lambda *_args, **_kwargs: state,
+        advance=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stalled search must not advance")),
+    )
+    strategy = FieldStrategy(evolver=cast(Evolver, evolver), train_sites=8, audit_sites=8, verify_top_k=1, blind_query=True)
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "field_template"))
+    monkeypatch.setattr(field_module, "encode_sites", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(field_module, "FieldAdapter", lambda *_args, **_kwargs: object())
+
+    def time_out_full_verification(*_args, **_kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr(field_module, "evaluate_field_module", time_out_full_verification)
+    task = _task()
+
+    result = strategy(task, _spec(task), runtime, budget=1)
+
+    assert result.report_candidate_genome is best_genome
+    assert result.metric == 0.8
+    assert result.champion_metrics == {"support_accuracy": 0.8, "sampled_support_accuracy": 0.8}
+    assert result.report_attempted is False
+    assert result.report_metrics == {}
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+    assert result.field_template is not None
+    assert result.representation == "field/local_multiscale_v1"
+    assert result.size_metrics["champion_nodes"] == float(len(best_genome.nodes))
     assert result.strategy_metrics["field_application_sites"] == 20.0
+    orchestrator = _orchestrator(tmp_path / "orchestrator")
+    assert not orchestrator._accepts_result(result)
+
+
+def test_field_timeout_reports_current_population_best_instead_of_stale_verified_member(monkeypatch, tmp_path: Path, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from tests.test_field import _task
+    from versal import field as field_module
+    from versal.evolution.evolver import Assessed
+    from versal.strategy import FieldStrategy
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    expired = False
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.deadline_exceeded = lambda: expired
+    runtime.stall_factory = lambda _budget: lambda _generation, _best: False
+    stale_genome = solving_genome.clone()
+    current_best_genome = solving_genome.clone()
+    stale = Assessed(stale_genome, {"support_accuracy": 0.4}, 0.4, cast(SubstrateModule, object()))
+    current_best = Assessed(current_best_genome, {"support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object()))
+    state = SimpleNamespace(population=[stale], topology_exhausted=False)
+
+    def advance(_state, _adapter) -> None:
+        nonlocal expired
+        state.population = [current_best]
+        expired = True
+
+    evolver = SimpleNamespace(max_inline_depth=4, seed_state=lambda *_args, **_kwargs: state, advance=advance)
+    strategy = FieldStrategy(evolver=cast(Evolver, evolver), train_sites=8, audit_sites=8, verify_top_k=1, blind_query=True)
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "field_template"))
+    monkeypatch.setattr(field_module, "encode_sites", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(field_module, "FieldAdapter", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(field_module, "evaluate_field_module", lambda *_args, **_kwargs: {"support_accuracy": 0.4, "support_loss": 0.6})
+    task = _task()
+
+    result = strategy(task, _spec(task), runtime, budget=2)
+
+    assert result.report_candidate_genome is current_best_genome
+    assert result.champion_genome is None
+    assert result.metric == 0.8
+    assert result.champion_metrics == {"support_accuracy": 0.8}
 
 
 def test_composition_declines_oversized_initial_glue_before_run_task(monkeypatch, xor_task: Task) -> None:
@@ -220,6 +571,176 @@ def test_direct_strategy_solves_xor_admits_real_io_and_revisit_hits(tmp_path: Pa
     assert second is not None
     assert orchestrator.attempts[-1].outcome == "library_hit"
     assert orchestrator.counters["library_hits"] == 1
+
+
+def test_direct_timeout_after_advance_retains_final_population_best(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.99)
+    expired = False
+    runtime.deadline_exceeded = lambda: expired
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    previous_best = Assessed(solving_genome.clone(), {"support_accuracy": 0.4}, 0.4, None)
+    final_best_genome = solving_genome.clone()
+    final_best = Assessed(final_best_genome, {"support_accuracy": 0.7}, 0.9, None)
+    final_metric_best = Assessed(solving_genome.clone(), {"support_accuracy": 0.9}, 0.8, None)
+    state = SimpleNamespace(population=[previous_best], topology_exhausted=False)
+
+    def advance(_state, _adapter) -> None:
+        nonlocal expired
+        state.population = [final_metric_best, final_best]
+        expired = True
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(strategy.evolver, "advance", advance)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert result.report_candidate_genome is final_best_genome
+    assert result.metric == 0.7
+    assert result.champion_metrics == {"support_accuracy": 0.7}
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+
+
+def test_direct_timeout_keeps_stronger_historical_population_best(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.99)
+    expired = False
+    runtime.deadline_exceeded = lambda: expired
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    historical_best_genome = solving_genome.clone()
+    historical_best = Assessed(historical_best_genome, {"support_accuracy": 0.9}, 0.9, None)
+    final_best = Assessed(solving_genome.clone(), {"support_accuracy": 0.7}, 0.7, None)
+    state = SimpleNamespace(population=[historical_best], topology_exhausted=False)
+
+    def advance(_state, _adapter) -> None:
+        nonlocal expired
+        state.population = [final_best]
+        expired = True
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(strategy.evolver, "advance", advance)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert result.report_candidate_genome is historical_best_genome
+    assert result.metric == 0.9
+    assert result.champion_metrics == {"support_accuracy": 0.9}
+
+
+def test_direct_does_not_advance_after_deadline(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.deadline_exceeded = lambda: True
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    best_genome = solving_genome.clone()
+    population = [
+        Assessed(solving_genome.clone(), {"support_accuracy": 0.2}, 0.2, None),
+        Assessed(best_genome, {"support_accuracy": 0.8}, 0.8, None),
+    ]
+    state = SimpleNamespace(population=population, topology_exhausted=False)
+    advance_calls = 0
+
+    def advance(_state, _adapter) -> None:
+        nonlocal advance_calls
+        advance_calls += 1
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(strategy.evolver, "advance", advance)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert advance_calls == 0
+    assert result.report_candidate_genome is best_genome
+    assert result.metric == 0.8
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+
+
+def test_direct_verification_timeout_retains_support_best_for_reporting(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+
+    config = _loop_config()
+    config["orchestrator"] = {"blind_query": True}
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.stall_factory = lambda _budget: lambda _generation, _best: True
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    best_genome = solving_genome.clone()
+    best = Assessed(best_genome, {"support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object()))
+    state = SimpleNamespace(population=[best], topology_exhausted=False)
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+    monkeypatch.setattr(strategy.evolver, "evaluate_only", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError))
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert result.report_candidate_genome is best_genome
+    assert result.champion_genome is None
+    assert result.metric == 0.8
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
+
+
+def test_non_blind_direct_timeout_preserves_live_incumbent_champion(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    from types import SimpleNamespace
+
+    from versal.evolution.evolver import Assessed
+
+    config = _loop_config()
+    loop = build_loop(config)
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    runtime = _runtime_for(loop, loop.fresh_state(random.Random(0)), threshold=0.95)
+    runtime.deadline_exceeded = lambda: True
+    runtime.stall_factory = lambda _budget: lambda _generation, _best: True
+    strategy = EVOLVE_STRATEGY.get("direct")(config)
+    assert strategy.blind_query is False
+    best_genome = solving_genome.clone()
+    best = Assessed(best_genome, {"support_accuracy": 0.8}, 0.8, cast(SubstrateModule, object()))
+    state = SimpleNamespace(population=[best], topology_exhausted=False)
+
+    monkeypatch.setattr(strategy, "preflight", lambda _task, _runtime: StrategyPreflight(True, "explicit_flat"))
+    monkeypatch.setattr(strategy, "_adapter", lambda _task, *, include_query=True: object())
+    monkeypatch.setattr(strategy.evolver, "seed_state", lambda *_args, **_kwargs: state)
+
+    result = strategy(xor_task, _spec(xor_task), runtime, budget=1)
+
+    assert result.champion_genome is best_genome
+    assert result.report_candidate_genome is None
+    assert result.metric == 0.8
+    assert result.has_admissible_champion
 
 
 def test_direct_strategy_picks_temporal_adapter(temporal_task: Task, xor_task: Task) -> None:
@@ -370,6 +891,37 @@ def test_grammar_strategy_seeds_compatible_program_into_direct(monkeypatch, tmp_
 
     assert result.strategy == "grammar" and result.generations_used == 1
     assert captured == [solving_genome]
+
+
+def test_grammar_composition_timeout_retains_report_only_best(monkeypatch, tmp_path: Path, xor_task: Task) -> None:
+    from types import SimpleNamespace
+
+    from versal import grammar as grammar_module
+
+    loop = build_loop(_loop_config())
+    loop.attach_library(ModuleLibrary(tmp_path / "lib"))
+    state = loop.fresh_state(random.Random(0))
+    state.comp_innovations = InnovationTracker(_next_node_id=100)
+    runtime = _runtime_for(loop, state, threshold=0.95)
+    runtime.deadline_exceeded = lambda: True
+    spec = _spec(xor_task)
+    species_id = sorted(state.species_champions)[0]
+    comp = _live_comp(species_id, 2, 1)
+    best = AssessedComposition(comp=comp, metrics={"support_accuracy": 0.8}, fitness=0.8, net=None)
+    strategy = GrammarStrategy(direct=lambda *_args, **_kwargs: StrategyResult("direct", 0.0, 0), blind_query=True)
+    strategy._grammar = SimpleNamespace(productions=[object()])
+    strategy._library_keys = tuple(runtime.library.keys())
+    monkeypatch.setattr(strategy, "_programs", lambda _runtime: [object()])
+    monkeypatch.setattr(grammar_module, "compile_program", lambda *_args, **_kwargs: comp)
+    monkeypatch.setattr(loop, "run_task", lambda *_args, **_kwargs: best)
+
+    result = strategy(xor_task, spec, runtime, budget=4)
+
+    assert result.strategy == "grammar"
+    assert result.report_candidate_comp is best
+    assert result.champion_comp is None
+    assert result.has_report_candidate
+    assert not result.has_admissible_champion
 
 
 def test_grammar_strategy_is_zero_cost_before_independent_motifs_exist(tmp_path: Path, xor_task: Task) -> None:

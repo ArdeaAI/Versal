@@ -7,12 +7,15 @@ pyplot loads.
 """
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from versal.rendering import THEME
 
 DEFAULT_ROOT = "results"
+_RESULT_DPI = 300
 
 
 def write_stats(directory: Path, stats: dict[str, Any]) -> Path:
@@ -29,6 +32,10 @@ def render_speciation(directory: Path, species_history: list[dict[int, int]], *,
     import matplotlib.pyplot as plt
 
     path = directory / "speciation.png"
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".speciation-", suffix=".tmp.png", dir=directory)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
     figure, axis = plt.subplots(figsize=(11, 6))
     figure.patch.set_facecolor(THEME["background"])
     axis.set_facecolor(THEME["background"])
@@ -52,7 +59,11 @@ def render_speciation(directory: Path, species_history: list[dict[int, int]], *,
         axis.axis("off")
 
     axis.set_title(title, fontsize=11, color=THEME["title"])
-    figure.tight_layout()
-    figure.savefig(path, dpi=150, facecolor=figure.get_facecolor())
-    plt.close(figure)
+    try:
+        figure.tight_layout()
+        figure.savefig(temporary, dpi=_RESULT_DPI, facecolor=figure.get_facecolor())
+        temporary.replace(path)
+    finally:
+        plt.close(figure)
+        temporary.unlink(missing_ok=True)
     return path

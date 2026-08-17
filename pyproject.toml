@@ -59,6 +59,3 @@ select = ["E", "F", "W", "I"]
 
 [tool.ty.environment]
 python-version = "3.12"
-
-[tool.ty.rules]
-# unresolved-attribute = "ignore"  # mixin self-refs + dict/tensor/getattr dynamics

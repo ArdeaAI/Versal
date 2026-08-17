@@ -51,9 +51,11 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert canary["clearml_capture_streams"] is False
     assert canary["schedule"]["rungs"] == "all"
     assert canary["orchestrator"]["max_depth"] == 8
-    assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
+    assert canary["orchestrator"]["max_task_seconds"] == 400
+    assert canary["orchestrator"]["max_total_task_seconds"] == 600
     assert canary["min_fixed_query_samples"] == 32
     assert canary["orchestrator"]["refine"]["mode"] == "always"
+    assert canary["orchestrator"]["evolve"] == ["routed", "grammar", "field", "direct", "composition"]
     assert canary["evolution"]["composition"]["max_initial_glue_values"] == 0
 
     smoke = Config(Config.PROJECT_ROOT / "configs" / "smoke.toml").current
@@ -71,10 +73,10 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
 
     brute = Config(Config.PROJECT_ROOT / "configs" / "brute.toml").current
     assert len(brute["schedule"]["rungs"]) == 1 and 1 <= brute["schedule"]["rungs"][0] <= 18  # intentionally retargetable
-    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 2000
+    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 200
     assert brute["n_samples"] == 400
-    assert brute["orchestrator"]["budgets"]["depth0"] == 2000
-    assert brute["orchestrator"]["max_total_task_seconds"] == 7200
+    assert brute["orchestrator"]["budgets"]["depth0"] == 400
+    assert brute["orchestrator"]["max_total_task_seconds"] == 600
 
     lattice = Config(Config.PROJECT_ROOT / "configs" / "canary-lattice.toml").current
     assert lattice["machine_env"] == "LocalLatticeCUDA"

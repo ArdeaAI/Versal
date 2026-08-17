@@ -238,12 +238,17 @@ def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, s
         persist=False,
         distill_usage_floor=2.0,  # no expert can clear a floor above 1.0: the pathway is always empty
     )
-    result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
+    result = strategy(xor_task, comp_task_spec(xor_task, include_query=False), orchestrator._runtime(), budget=1)
     assert result.metric == 0.0 and result.champion_comp is None and result.champion_routed is None
     assert result.champion_metrics["routed_undistillable"] == 1.0
     assert result.champion_metrics["routed_metric"] >= 0.2  # the router-space win is kept as a diagnostic
     assert "support_accuracy" not in result.champion_metrics
+    assert result.report_candidate_routed is not None
+    assert result.report_candidate_metrics["support_accuracy"] >= 0.2
+    assert result.has_report_candidate
     assert not orchestrator._accepts_result(result)
+    reported = strategy.evaluate_report(result.report_candidate_routed, xor_task, comp_task_spec(xor_task), orchestrator.library)
+    assert "query_accuracy" in reported and math.isfinite(reported["query_accuracy"])
 
 
 def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:
@@ -404,6 +409,33 @@ def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solvi
     library.add(entry_type=MODULE, payload=genome_to_dict(linear_genome), io=task_io(xor_task), provenance={"accepted_metric": 0.6})
     assert service.sync() == 1
     assert overmind.stat().st_mtime_ns >= first_mtime  # rewritten on growth
+
+
+def test_overmind_refreshes_when_adapters_and_route_traffic_change(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch: pytest.MonkeyPatch) -> None:
+    import versal.rendering as rendering
+
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    captured: list[rendering.OvermindView] = []
+
+    def capture(_render, _path, view, **_kwargs):
+        captured.append(view)
+
+    monkeypatch.setattr(rendering, "submit_render", capture)
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2, image_dir=tmp_path / "lib" / "images")
+    service.sync()
+    assert len(captured) == 1
+    assert captured[-1].input_signatures == [] and captured[-1].output_signatures == []
+
+    view, x, _width = _task_view(service.net, xor_task)
+    view(x)
+    service.record_traffic()
+
+    assert len(captured) == 2
+    assert captured[-1].input_signatures and captured[-1].output_signatures
+    assert captured[-1].traffic_observed is True
+    assert "(100%)" in captured[-1].vertices[0].label
+    service.render_overmind()
+    assert len(captured) == 2  # an unchanged snapshot still stays cached
 
 
 def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(

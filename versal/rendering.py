@@ -1,33 +1,16 @@
-"""Artistic recursive renders of evolved networks: the full nested detail, dark, in one image.
+"""Recursive network rendering with a pure semantic-spec builder and hybrid raster/vector draw.
 
-Nested networks render as CALLOUTS: the host network keeps its natural compact layout (a macro's
-output stubs and a composition's module nodes stay in place as green footprint nodes), and each
-referenced network is drawn fully inside a translucent container packed into rows across the top of
-the frame. A green line runs from the footprint node to a gold input anchor at the callout's
-top-left. Callouts recurse (depth- and budget-guarded): a nested network's own callouts ride along
-inside its box.
-
-These renders are an artistic overview: the library JSON stays the ground truth, so every failure
-mode (missing ref, cycle, over budget, undeserializable payload) degrades to a labeled opaque box
-instead of raising. A render must never kill a run or a gallery.
-
-The build/draw split keeps layout pure: builders produce a semantic `RenderSpec` (flat primitive
-lists in one shared coordinate frame; children are translated and merged into the parent at
-placement, never scaled). `draw_spec` rasterizes every dense edge/node layer with Datashader, then
-uses Matplotlib for crisp cards, markers, labels, direction cues, and legends. The same hybrid path
-drives full portraits, task artifacts, galleries, motifs, and the overmind; both libraries import
-lazily and Matplotlib is forced onto the headless Agg backend.
+Missing, cyclic, or oversized references degrade to labeled opaque boxes; rendering is never part
+of experiment correctness.
 """
 
-import heapq
 import math
 import os
 import tempfile
 import textwrap
-from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable
 
 from versal.evolution.composition import CompNodeKind, CompositionGenome, comp_from_dict, comp_topological_order
 from versal.evolution.genome import Genome, NodeKind, genome_from_dict, macro_implied_edges, make_acyclic, topological_order
@@ -35,7 +18,7 @@ from versal.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary
 from versal.motifs import FORWARD_EDGE, MACRO_EDGE, RECURRENT_EDGE, MotifRecord, NodeLabel
 from versal.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 
-# --- async rendering ------------------------------------------------------------------------------
+# async rendering
 # Every RUNTIME render site (admission net portraits, speciation plots, the overmind portrait)
 # funnels through `submit_render` so matplotlib's pyplot state only ever runs on ONE thread (pyplot
 # is not thread-safe). Async mode ([run] render_async) moves renders off the run loop (a big
@@ -117,14 +100,19 @@ _PAD = 0.9
 _CALLOUT_GAP = 1.4  # vertical clearance between the host network and the callout band
 _NETWORK_ANCHOR_INSET = 0.3
 _MAX_COLUMN_NODES = 64  # a layer taller than this wraps into a near-square block of sub-columns
-_MAX_STRAIGHT_EDGES = 60_000  # classic failure-fallback cap; the normal Datashader path includes all
-_MAX_CURVED_EDGES = 2_000  # classic failure-fallback cap; FancyArrowPatch is one artist per edge
-_DENSITY_WIDTH = 2400
-_DENSITY_HEIGHT = 1600
+_MAX_STRAIGHT_EDGES = 60_000  # line-collection ceiling before a scene becomes a density portrait
+_MAX_CURVED_EDGES = 2_000  # FancyArrowPatch is one artist per curve; larger scenes use density
+_DENSITY_WIDTH = 4800
+_DENSITY_HEIGHT = 3200
 _DENSITY_EDGE_CHUNK = 250_000
 _EXPLICIT_EDGE_LIMIT = 512
-_HYBRID_MAX_RASTER_DIMENSION = 2400
-_HYBRID_MAX_RASTER_PIXELS = 2400 * 1600
+_HYBRID_MAX_RASTER_DIMENSION = 4800
+_HYBRID_MAX_RASTER_PIXELS = 4800 * 3200
+_RENDER_DPI = 300
+_MAX_RENDER_PIXELS = 36_000_000
+
+_FEED_EDGE_ROLES = frozenset({"routing-entry", "routing-exit"})
+_ROUTING_EDGE_ROLES = frozenset({"routing-observed", "routing-potential"})
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -252,7 +240,7 @@ def library_resolver(library: ModuleLibrary) -> ResolveFn:
     return resolve
 
 
-# --- internal recursion ----------------------------------------------------------------------------
+# internal recursion
 
 
 @dataclass(slots=True)
@@ -748,7 +736,7 @@ def _build_comp(
     return _Built(spec=spec, output_nodes=output_nodes)
 
 
-# --- public builders -------------------------------------------------------------------------------
+# public builders
 
 
 def build_genome_spec(
@@ -822,7 +810,7 @@ def build_entry_spec(
     return built.spec
 
 
-# --- painting --------------------------------------------------------------------------------------
+# painting
 
 
 def _edge_segments(edge: SpecEdge) -> list[tuple[float, float, float, float]]:
@@ -865,32 +853,45 @@ def _rasterized_spec_edges(
     import pandas as pd
 
     canvas = ds.Canvas(plot_width=max(pixel_width, 2), plot_height=max(pixel_height, 2), x_range=x_range, y_range=y_range)
-    layers: dict[str, Any] = {}
-    rows: dict[str, list[tuple[float, float, float, float, float]]] = {}
+    layers: dict[tuple[str, int], Any] = {}
+    rows: dict[tuple[str, int], list[tuple[float, float, float, float, float]]] = {}
     pending_segments = 0
 
     def flush() -> None:
         nonlocal pending_segments
-        for color, color_rows in rows.items():
+        for visual, color_rows in rows.items():
             if not color_rows:
                 continue
             frame = pd.DataFrame(color_rows, columns=["x0", "y0", "x1", "y1", "weight"])
-            layers[color] = _accumulate_density_lines(canvas, frame, ds, np, layers.get(color))
+            layers[visual] = _accumulate_density_lines(canvas, frame, ds, np, layers.get(visual))
         rows.clear()
         pending_segments = 0
 
     for edge in spec.edges:
+        alpha = max(0.0, min(float(edge.alpha), 1.0))
+        if alpha <= 0.0:
+            continue
         magnitude = edge.magnitude if math.isfinite(edge.magnitude) else 0.0
         # Zero-weight structural edges must remain visible, but never dominate weighted density.
         weight = max(abs(magnitude), 0.05)
         segments = _edge_segments(edge)
-        rows.setdefault(edge.color, []).extend((*segment, weight) for segment in segments)
+        visual = (edge.color, round(alpha * 255))
+        rows.setdefault(visual, []).extend((*segment, weight) for segment in segments)
         pending_segments += len(segments)
         if pending_segments >= _DENSITY_EDGE_CHUNK:
             flush()
     flush()
 
-    shaded = [tf.shade(layer.where(layer > 0.0), cmap=[color, color], how="log", min_alpha=32, alpha=205) for color, layer in layers.items()]
+    shaded = [
+        tf.shade(
+            layer.where(layer > 0.0),
+            cmap=[color, color],
+            how="log",
+            min_alpha=max(1, round(alpha_byte * 0.16)),
+            alpha=alpha_byte,
+        )
+        for (color, alpha_byte), layer in layers.items()
+    ]
     if not shaded:
         return np.zeros((max(pixel_height, 2), max(pixel_width, 2), 4), dtype=np.uint8), 0
     return np.asarray(tf.stack(*shaded, how="over").to_pil()), len(spec.edges)
@@ -933,7 +934,7 @@ def _rasterized_spec_nodes(
     return np.asarray(tf.stack(*shaded, how="over").to_pil())
 
 
-def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) -> None:
+def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool, zorder: float = 2.2) -> None:
     """Crisp semantic overlay for small scenes and a resilient fallback if rasterization fails."""
     from matplotlib import colors as mcolors
     from matplotlib.collections import LineCollection
@@ -946,19 +947,19 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                     (edge.x0, edge.y0),
                     (edge.x1, edge.y1),
                     connectionstyle=f"arc3,rad={edge.curve}",
-                    color=mcolors.to_rgba(edge.color, min(edge.alpha + 0.12, 0.9)),
+                    color=mcolors.to_rgba(edge.color, edge.alpha),
                     linewidth=edge.width,
                     linestyle=edge.style,
                     arrowstyle="-|>",
                     mutation_scale=5.0,
                     shrinkA=1.5,
                     shrinkB=1.5,
-                    zorder=2.2,
+                    zorder=zorder,
                 )
             )
         return
 
-    # Failure fallback only: cap Matplotlib work while retaining an honest note in the caller.
+    # Medium scenes use collections directly; the same caps keep failure fallback bounded.
     straight = [edge for edge in edges if edge.curve == 0.0][:_MAX_STRAIGHT_EDGES]
     curved = [edge for edge in edges if edge.curve != 0.0][:_MAX_CURVED_EDGES]
     for style in ("solid", "dashed"):
@@ -970,7 +971,7 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                     colors=[mcolors.to_rgba(edge.color, edge.alpha) for edge in group],
                     linewidths=[edge.width for edge in group],
                     linestyle=style,
-                    zorder=2,
+                    zorder=zorder,
                 )
             )
     for edge in curved:
@@ -983,7 +984,7 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                 linewidth=edge.width,
                 linestyle=edge.style,
                 arrowstyle="-",
-                zorder=2,
+                zorder=zorder,
             )
         )
 
@@ -1051,8 +1052,8 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
     y_range = (-_PAD, spec.height + _PAD)
     raw_pixel_width = max(64, int(fig_w * figure.dpi))
     raw_pixel_height = max(64, int(fig_h * figure.dpi))
-    max_raster_dimension = 1200 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_DIMENSION
-    max_raster_pixels = 1200 * 800 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_PIXELS
+    max_raster_dimension = _HYBRID_MAX_RASTER_DIMENSION
+    max_raster_pixels = _HYBRID_MAX_RASTER_PIXELS
     raster_scale = min(
         1.0,
         max_raster_dimension / raw_pixel_width,
@@ -1061,14 +1062,65 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
     )
     pixel_width = max(64, int(raw_pixel_width * raster_scale))
     pixel_height = max(64, int(raw_pixel_height * raster_scale))
+    feed_edges = [edge for edge in spec.edges if edge.role in _FEED_EDGE_ROLES]
+    routing_edges = [edge for edge in spec.edges if edge.role in _ROUTING_EDGE_ROLES]
+    legend_edges = [edge for edge in spec.edges if edge.role == "legend"]
+    network_edges = [edge for edge in spec.edges if edge.role not in _FEED_EDGE_ROLES | _ROUTING_EDGE_ROLES and edge.role != "legend"]
+    rendered_edges = 0
+    edge_note = ""
+    straight_count = sum(edge.curve == 0.0 for edge in network_edges)
+    curved_count = len(network_edges) - straight_count
+    rasterize_feeds = len(feed_edges) > _EXPLICIT_EDGE_LIMIT
+    rasterize_network = len(network_edges) > _EXPLICIT_EDGE_LIMIT and (straight_count > _MAX_STRAIGHT_EDGES or curved_count > _MAX_CURVED_EDGES)
     try:
-        edge_image, rendered_edges = _rasterized_spec_edges(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
-        axis.imshow(edge_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2)
-        node_image = _rasterized_spec_nodes(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
-        if node_image is not None:
-            axis.imshow(node_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2.6)
-        if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT:
-            _draw_classic_edges(axis, spec.edges, directional=True)
+        feed_image = None
+        rasterized_feeds = 0
+        if rasterize_feeds:
+            feed_image, rasterized_feeds = _rasterized_spec_edges(
+                RenderSpec(edges=feed_edges),
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                x_range=x_range,
+                y_range=y_range,
+            )
+        edge_image = None
+        rasterized_edges = 0
+        if rasterize_network:
+            raster_spec = RenderSpec(edges=network_edges)
+            edge_image, rasterized_edges = _rasterized_spec_edges(
+                raster_spec,
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                x_range=x_range,
+                y_range=y_range,
+            )
+
+        if feed_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(feed_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=1.8)
+            rendered_edges += rasterized_feeds
+        elif feed_edges:
+            _draw_classic_edges(axis, feed_edges, directional=len(feed_edges) <= _EXPLICIT_EDGE_LIMIT, zorder=1.8)
+            rendered_edges += len(feed_edges)
+
+        if len(network_edges) <= _EXPLICIT_EDGE_LIMIT:
+            _draw_classic_edges(axis, network_edges, directional=True, zorder=2.2)
+            rendered_edges += len(network_edges)
+        elif not rasterize_network:
+            _draw_classic_edges(axis, network_edges, directional=False, zorder=2.2)
+            rendered_edges += len(network_edges)
+        elif edge_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(edge_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=2)
+            rendered_edges += rasterized_edges
+
+        if routing_edges:
+            _draw_classic_edges(axis, routing_edges, directional=len(routing_edges) <= _EXPLICIT_EDGE_LIMIT, zorder=2.4)
+            rendered_edges += len(routing_edges)
+        if legend_edges:
+            _draw_classic_edges(axis, legend_edges, directional=True, zorder=3.2)
+            rendered_edges += len(legend_edges)
+
         edge_note = f"all {rendered_edges:,} scene edges included"
     except Exception as error:
         from versal.utils.logging import Logger
@@ -1078,6 +1130,16 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
         _draw_classic_edges(axis, spec.edges, directional=len(spec.edges) <= _EXPLICIT_EDGE_LIMIT)
         edge_note = f"classic fallback showing {rendered_edges:,} of {len(spec.edges):,} scene edges"
         axis.text(0.005, 0.005, "Datashader unavailable; classic fallback", transform=axis.transAxes, fontsize=6, color=THEME["label"], ha="left", va="bottom", zorder=5)
+
+    try:
+        node_image = _rasterized_spec_nodes(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
+        if node_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(node_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=2.6)
+    except Exception as error:
+        from versal.utils.logging import Logger
+
+        Logger.get_logger().warning("hybrid Datashader node layer failed: %s: %s", type(error).__name__, error)
 
     pixels_per_unit = min(fig_w * 72 / max(spec.width, 1e-6), fig_h * 72 / max(spec.height, 1e-6))
     base_area = min(max((0.5 * pixels_per_unit) ** 2, 16.0), 700.0)
@@ -1116,17 +1178,28 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
         axis.set_title(title, fontsize=11, color=THEME["title"])
 
 
-def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int = 150, x_padding: float = _PAD) -> Path:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+def _render_figure_size(spec: RenderSpec, dpi: int) -> tuple[float, float]:
+    """Aspect-aware figure inches with a hard final-canvas memory bound."""
     # Aspect-preserving sizing: clipping each side independently used to hand a tall-narrow spec a
     # square figure, and set_aspect("equal") filled the rest with dead background.
     scale = min(1.0, 30.0 / (0.6 * max(spec.width, spec.height, 1e-6)))
     fig_w = max(spec.width * 0.6 * scale, 4.0)
     fig_h = max(spec.height * 0.6 * scale, 4.0)
+    pixel_count = fig_w * fig_h * dpi * dpi
+    if pixel_count > _MAX_RENDER_PIXELS:
+        pixel_scale = math.sqrt(_MAX_RENDER_PIXELS / pixel_count)
+        fig_w *= pixel_scale
+        fig_h *= pixel_scale
+    return fig_w, fig_h
+
+
+def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int = _RENDER_DPI, x_padding: float = _PAD) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig_w, fig_h = _render_figure_size(spec, dpi)
     temporary = _temporary_sibling(out_path)
     figure, axis = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
     try:
@@ -1141,272 +1214,7 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int =
     return out_path
 
 
-# --- large individual module portraits ------------------------------------------------------------
-
-
-def _signature_axes(signature: object) -> tuple[str, ...]:
-    if not isinstance(signature, str) or "|" not in signature:
-        return ()
-    _value_type, encoded_axes = signature.split("|", 1)
-    return tuple(axis.strip() for axis in encoded_axes.split(",") if axis.strip())
-
-
-def _format_axis_value(value: float) -> str:
-    return str(int(value)) if value.is_integer() else f"{value:g}"
-
-
-def _packed_bank_positions(
-    bank: list[dict[str, Any]],
-    positions: dict[int, tuple[float, float]],
-    *,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-) -> None:
-    if not bank:
-        return
-    aspect = max((x1 - x0) / max(y1 - y0, 1e-6), 0.1)
-    columns = max(1, math.ceil(math.sqrt(len(bank) * aspect)))
-    rows = math.ceil(len(bank) / columns)
-    x_span = max(x1 - x0, 1e-6)
-    y_span = max(y1 - y0, 1e-6)
-    for index, node in enumerate(bank):
-        row, column = divmod(index, columns)
-        x = x0 + (column + 0.5) * x_span / columns
-        y = y1 - (row + 0.5) * y_span / rows
-        positions[int(node["id"])] = (x, y)
-
-
-def _semantic_bank_positions(
-    bank: list[dict[str, Any]],
-    axes: tuple[str, ...],
-    signature: str,
-    positions: dict[int, tuple[float, float]],
-    panels: list[_DensityPanel],
-    *,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-) -> str | None:
-    if "H" not in axes or "W" not in axes or axes.count("H") != 1 or axes.count("W") != 1:
-        return f"{signature or '(unknown)'} has no unique H/W axes"
-    if not bank:
-        return None
-
-    h_index, w_index = axes.index("H"), axes.index("W")
-    coordinate_values: list[set[float]] = [set() for _ in axes]
-    for node in bank:
-        raw = node.get("coordinate")
-        if not isinstance(raw, (list, tuple)) or len(raw) != len(axes):
-            return f"{signature} coordinates do not match its axes"
-        try:
-            coordinate = tuple(float(value) for value in raw)
-        except (TypeError, ValueError):
-            return f"{signature} coordinates are not numeric"
-        if not all(math.isfinite(value) for value in coordinate):
-            return f"{signature} coordinates are not finite"
-        for index, value in enumerate(coordinate):
-            coordinate_values[index].add(value)
-
-    # Detect malformed duplicates without retaining another set of large coordinate tuples. Axis
-    # ranks turn each tuple into one integer; sparse but valid spatial banks remain valid.
-    sorted_values = [sorted(values) for values in coordinate_values]
-    ranks = [{value: rank for rank, value in enumerate(values)} for values in sorted_values]
-    multipliers: list[int] = [1] * len(axes)
-    for index in range(len(axes) - 2, -1, -1):
-        multipliers[index] = multipliers[index + 1] * max(len(sorted_values[index + 1]), 1)
-    flattened_ids: set[int] = set()
-    combinations_set: set[tuple[float, ...]] = set()
-    panel_axis_indices = tuple(index for index in range(len(axes)) if index not in (h_index, w_index))
-    for node in bank:
-        coordinate = tuple(float(value) for value in node["coordinate"])
-        flattened_ids.add(sum(ranks[index][value] * multipliers[index] for index, value in enumerate(coordinate)))
-        combinations_set.add(tuple(coordinate[index] for index in panel_axis_indices))
-    if len(flattened_ids) != len(bank):
-        return f"{signature} contains duplicate coordinates"
-
-    combinations = sorted(combinations_set) or [()]
-    columns = max(1, math.ceil(math.sqrt(len(combinations))))
-    rows = math.ceil(len(combinations) / columns)
-    horizontal_gap = 0.008
-    vertical_gap = 0.018
-    header = min(0.025, max((y1 - y0) * 0.12, 0.012))
-    panel_width = (x1 - x0 - horizontal_gap * (columns - 1)) / columns
-    panel_height = (y1 - y0 - header - vertical_gap * (rows - 1)) / rows
-    panel_rects: dict[tuple[float, ...], _DensityPanel] = {}
-    for index, combination in enumerate(combinations):
-        row, column = divmod(index, columns)
-        panel_x0 = x0 + column * (panel_width + horizontal_gap)
-        panel_y1 = y1 - header - row * (panel_height + vertical_gap)
-        panel_y0 = panel_y1 - panel_height
-        labels = [f"{axes[axis_index]}={_format_axis_value(value)}" for axis_index, value in zip(panel_axis_indices, combination)]
-        label = " · ".join(labels) if labels else "H×W"
-        panel = _DensityPanel(panel_x0, panel_y0, panel_x0 + panel_width, panel_y1, label)
-        panels.append(panel)
-        panel_rects[combination] = panel
-
-    h_values, w_values = sorted_values[h_index], sorted_values[w_index]
-    h_min, h_span = h_values[0], max(h_values[-1] - h_values[0], 1.0)
-    w_min, w_span = w_values[0], max(w_values[-1] - w_values[0], 1.0)
-    for node in bank:
-        coordinate = tuple(float(value) for value in node["coordinate"])
-        combination = tuple(coordinate[index] for index in panel_axis_indices)
-        panel = panel_rects[combination]
-        panel_x0, panel_y0, panel_x1, panel_y1 = panel.x0, panel.y0, panel.x1, panel.y1
-        inset_x = min((panel_x1 - panel_x0) * 0.04, 0.006)
-        inset_y = min((panel_y1 - panel_y0) * 0.04, 0.006)
-        x = panel_x0 + inset_x + (coordinate[w_index] - w_min) / w_span * max(panel_x1 - panel_x0 - 2 * inset_x, 1e-6)
-        # Raw row zero belongs at the visual top, regardless of where H occurs in the signature.
-        y = panel_y1 - inset_y - (coordinate[h_index] - h_min) / h_span * max(panel_y1 - panel_y0 - 2 * inset_y, 1e-6)
-        node_id = int(node["id"])
-        positions[node_id] = (x, y)
-        panel.node_ids.append(node_id)
-    return None
-
-
-def _macro_implied_payload_edges(payload: dict[str, Any]) -> Iterator[tuple[int, int]]:
-    for macro in payload.get("macros", []):
-        inputs = [int(node_id) for node_id in macro.get("inputs", [])]
-        outputs = [int(node_id) for node_id in macro.get("outputs", [])]
-        for source in inputs:
-            for target in outputs:
-                yield source, target
-
-
-def _computed_node_positions(
-    nodes: list[dict[str, Any]],
-    connections: list[dict[str, Any]],
-    macro_edges: Iterable[tuple[int, int]],
-    positions: dict[int, tuple[float, float]],
-) -> tuple[list[int], str | None]:
-    computed = sorted((node for node in nodes if node.get("kind") != NodeKind.INPUT.value), key=lambda node: int(node["id"]))
-    computed_ids = [int(node["id"]) for node in computed]
-    computed_set = set(computed_ids)
-    adjacency: dict[int, list[int]] = {}
-    incoming = {node_id: 0 for node_id in computed_ids}
-
-    def add_candidate(source: int, target: int) -> None:
-        if source in computed_set and target in computed_set:
-            adjacency.setdefault(source, []).append(target)
-            incoming[target] += 1
-
-    for connection in connections:
-        if bool(connection.get("enabled", False)) and not bool(connection.get("recurrent", False)):
-            add_candidate(int(connection["in"]), int(connection["out"]))
-    for source, target in macro_edges:
-        add_candidate(source, target)
-
-    ready = [node_id for node_id, count in incoming.items() if count == 0]
-    heapq.heapify(ready)
-    layer = {node_id: 1 for node_id in ready}
-    visited: list[int] = []
-    while ready:
-        source = heapq.heappop(ready)
-        visited.append(source)
-        for target in sorted(adjacency.get(source, [])):
-            layer[target] = max(layer.get(target, 1), layer.get(source, 1) + 1)
-            incoming[target] -= 1
-            if incoming[target] == 0:
-                heapq.heappush(ready, target)
-    fallback_reason = None
-    if len(visited) != len(computed_ids):
-        fallback_reason = "forward computed-node cycle; cyclic nodes packed in a final column"
-        last_layer = max(layer.values(), default=0) + 1
-        for node_id in computed_ids:
-            layer.setdefault(node_id, last_layer)
-
-    grouped: dict[int, list[int]] = {}
-    for node_id in computed_ids:
-        grouped.setdefault(layer.get(node_id, 1), []).append(node_id)
-    ordered_layers = sorted(grouped)
-    slot_width = 0.22 / max(len(ordered_layers), 1)
-    for column_index, layer_id in enumerate(ordered_layers):
-        group = grouped[layer_id]
-        sub_columns = max(1, math.ceil(len(group) / 64))
-        rows = math.ceil(len(group) / sub_columns)
-        slot_x0 = 0.75 + column_index * slot_width
-        for index, node_id in enumerate(group):
-            sub_column, row = divmod(index, rows)
-            x = slot_x0 + (sub_column + 0.5) * slot_width / sub_columns
-            y = 0.87 - (row + 0.5) * 0.72 / rows
-            positions[node_id] = (x, y)
-    return computed_ids, fallback_reason
-
-
-def _density_layout(entry: LibraryEntry) -> _DensityLayout:
-    raw_nodes_value = entry.payload.get("nodes", [])
-    raw_connections_value = entry.payload.get("connections", [])
-    if not isinstance(raw_nodes_value, list) or not isinstance(raw_connections_value, list):
-        raise ValueError("module payload nodes/connections must be lists")
-    raw_nodes = cast(list[dict[str, Any]], raw_nodes_value)
-    raw_connections = cast(list[dict[str, Any]], raw_connections_value)
-    nodes = sorted(raw_nodes, key=lambda node: int(node["id"]))
-    seen_node_ids: set[int] = set()
-    for node in nodes:
-        node_id = int(node["id"])
-        if node_id in seen_node_ids:
-            raise ValueError("module payload contains duplicate node ids")
-        seen_node_ids.add(node_id)
-    del seen_node_ids
-    input_nodes = [node for node in nodes if node.get("kind") == NodeKind.INPUT.value]
-    positions: dict[int, tuple[float, float]] = {}
-    panels: list[_DensityPanel] = []
-    fallback_reasons: list[str] = []
-
-    descriptors = entry.io.get("inputs", []) if isinstance(entry.io, dict) else []
-    if not isinstance(descriptors, list) or not descriptors:
-        descriptors = [{"signature": "(untyped)", "width": len(input_nodes)}]
-    banks: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
-    cursor = 0
-    for descriptor in descriptors:
-        try:
-            width = max(0, int(descriptor.get("width", 0)))
-        except (AttributeError, TypeError, ValueError):
-            width = 0
-        bank = input_nodes[cursor : cursor + width]
-        banks.append((descriptor if isinstance(descriptor, dict) else {}, bank))
-        cursor += width
-    if cursor != len(input_nodes):
-        fallback_reasons.append(f"I/O widths describe {cursor:,} of {len(input_nodes):,} inputs")
-        if cursor < len(input_nodes):
-            banks.append(({"signature": "(unmapped)", "width": len(input_nodes) - cursor}, input_nodes[cursor:]))
-
-    spatial_banks = 0
-    packed_banks = 0
-    bank_count = max(len(banks), 1)
-    available_height = 0.74
-    bank_gap = min(0.025, available_height / max(bank_count * 8, 1))
-    bank_height = (available_height - bank_gap * (bank_count - 1)) / bank_count
-    for bank_index, (descriptor, bank) in enumerate(banks):
-        bank_y1 = 0.90 - bank_index * (bank_height + bank_gap)
-        bank_y0 = bank_y1 - bank_height
-        signature = str(descriptor.get("signature", "(unknown)"))
-        axes = _signature_axes(signature)
-        reason = _semantic_bank_positions(bank, axes, signature, positions, panels, x0=0.04, y0=bank_y0, x1=0.69, y1=bank_y1)
-        if reason is None and "H" in axes and "W" in axes:
-            spatial_banks += 1
-        else:
-            packed_banks += 1
-            if reason is not None:
-                fallback_reasons.append(reason)
-            _packed_bank_positions(bank, positions, x0=0.04, y0=bank_y0, x1=0.69, y1=bank_y1 - 0.02)
-            panels.append(_DensityPanel(0.04, bank_y0, 0.69, bank_y1 - 0.02, signature, [int(node["id"]) for node in bank]))
-
-    macro_edges = _macro_implied_payload_edges(entry.payload)
-    computed_ids, computed_reason = _computed_node_positions(nodes, raw_connections, macro_edges, positions)
-    if computed_reason:
-        fallback_reasons.append(computed_reason)
-    mode = "semantic-spatial" if spatial_banks and not packed_banks else ("mixed semantic/packed" if spatial_banks else "packed-grid")
-    return _DensityLayout(
-        positions=positions,
-        input_ids=[int(node["id"]) for node in input_nodes],
-        computed_ids=computed_ids,
-        panels=panels,
-        mode=mode,
-        fallback_reason="; ".join(fallback_reasons) or None,
-    )
+# large individual module portraits
 
 
 def _accumulate_density_lines(canvas: Any, frame: Any, datashader: Any, numpy: Any, current: Any | None) -> Any:
@@ -1418,701 +1226,10 @@ def _accumulate_density_lines(canvas: Any, frame: Any, datashader: Any, numpy: A
     return current
 
 
-def _rasterized_edge_layers(
-    canvas: Any,
-    positions: dict[int, tuple[float, float]],
-    connections: list[dict[str, Any]],
-    macro_edges: Iterable[tuple[int, int]],
-    datashader: Any,
-    pandas: Any,
-    numpy: Any,
-) -> tuple[dict[str, Any], int, int]:
-    layers: dict[str, Any] = {"positive": None, "negative": None, "recurrent": None, "macro": None}
-    enabled_count = 0
-    rendered_count = 0
-
-    def consume(rows: list[tuple[float, float, float, float, float, str]]) -> None:
-        grouped: dict[str, list[tuple[float, float, float, float, float]]] = {}
-        for x0, y0, x1, y1, weight, category in rows:
-            grouped.setdefault(category, []).append((x0, y0, x1, y1, weight))
-        for category, category_rows in grouped.items():
-            frame = pandas.DataFrame(category_rows, columns=["x0", "y0", "x1", "y1", "weight"])
-            layers[category] = _accumulate_density_lines(canvas, frame, datashader, numpy, layers[category])
-
-    chunk: list[tuple[float, float, float, float, float, str]] = []
-    for connection in connections:
-        if not bool(connection.get("enabled", False)):
-            continue
-        enabled_count += 1
-        source_id, target_id = int(connection["in"]), int(connection["out"])
-        if source_id not in positions or target_id not in positions:
-            raise ValueError(f"enabled edge {source_id}->{target_id} names a missing node")
-        source, target = positions[source_id], positions[target_id]
-        weight = float(connection.get("weight", 0.0))
-        if not math.isfinite(weight):
-            raise ValueError(f"enabled edge {source_id}->{target_id} has a non-finite weight")
-        category = "recurrent" if bool(connection.get("recurrent", False)) else ("positive" if weight >= 0 else "negative")
-        chunk.append((source[0], source[1], target[0], target[1], abs(weight), category))
-        rendered_count += 1
-        if len(chunk) == _DENSITY_EDGE_CHUNK:
-            consume(chunk)
-            chunk = []
-    if chunk:
-        consume(chunk)
-
-    macro_chunk: list[tuple[float, float, float, float, float, str]] = []
-    for source_id, target_id in macro_edges:
-        if source_id not in positions or target_id not in positions:
-            raise ValueError(f"macro-implied edge {source_id}->{target_id} names a missing node")
-        source, target = positions[source_id], positions[target_id]
-        macro_chunk.append((source[0], source[1], target[0], target[1], 1.0, "macro"))
-        if len(macro_chunk) == _DENSITY_EDGE_CHUNK:
-            consume(macro_chunk)
-            macro_chunk = []
-    if macro_chunk:
-        consume(macro_chunk)
-    return layers, enabled_count, rendered_count
-
-
-def _panel_influence_aggregate(
-    panel: _DensityPanel,
-    positions: dict[int, tuple[float, float]],
-    magnitude: dict[int, float],
-    signed: dict[int, float],
-    datashader: Any,
-    pandas: Any,
-    numpy: Any,
-) -> tuple[Any, Any]:
-    """Rasterize one semantic panel at its native coordinate resolution, so grid cells fill the
-    panel instead of appearing as widely separated point markers."""
-    if not panel.node_ids:
-        return numpy.zeros((1, 1), dtype=numpy.float32), numpy.zeros((1, 1), dtype=numpy.float32)
-    x_values = sorted({positions[node_id][0] for node_id in panel.node_ids})
-    y_values = sorted({positions[node_id][1] for node_id in panel.node_ids})
-
-    def bounds(values: list[float]) -> tuple[float, float]:
-        if len(values) == 1:
-            return values[0] - 0.5, values[0] + 0.5
-        low_step = max(values[1] - values[0], 1e-9)
-        high_step = max(values[-1] - values[-2], 1e-9)
-        return values[0] - low_step / 2, values[-1] + high_step / 2
-
-    frame = pandas.DataFrame(
-        {
-            "x": numpy.fromiter((positions[node_id][0] for node_id in panel.node_ids), dtype=numpy.float64, count=len(panel.node_ids)),
-            "y": numpy.fromiter((positions[node_id][1] for node_id in panel.node_ids), dtype=numpy.float64, count=len(panel.node_ids)),
-            "magnitude": numpy.fromiter((magnitude.get(node_id, 0.0) for node_id in panel.node_ids), dtype=numpy.float64, count=len(panel.node_ids)),
-            "signed": numpy.fromiter((signed.get(node_id, 0.0) for node_id in panel.node_ids), dtype=numpy.float64, count=len(panel.node_ids)),
-        }
-    )
-    canvas = datashader.Canvas(plot_width=max(len(x_values), 1), plot_height=max(len(y_values), 1), x_range=bounds(x_values), y_range=bounds(y_values))
-    magnitude_aggregate = canvas.points(frame, "x", "y", agg=datashader.sum("magnitude"))
-    signed_aggregate = canvas.points(frame, "x", "y", agg=datashader.sum("signed"))
-    return (
-        numpy.nan_to_num(numpy.asarray(magnitude_aggregate.data), nan=0.0).astype(numpy.float32, copy=False),
-        numpy.nan_to_num(numpy.asarray(signed_aggregate.data), nan=0.0).astype(numpy.float32, copy=False),
-    )
-
-
-def _signed_influence_rgba(magnitude: Any, signed: Any, span: float, numpy: Any, colors: Any) -> Any:
-    """Bivariate field: brightness is accumulated |weight| and hue is signed balance."""
-    safe_span = max(float(span), 1e-12)
-    level = numpy.clip(numpy.log1p(magnitude) / math.log1p(safe_span), 0.0, 1.0)
-    balance = numpy.divide(signed, magnitude, out=numpy.zeros_like(signed, dtype=numpy.float32), where=magnitude > 0)
-    balance = numpy.clip(balance, -1.0, 1.0)
-    positive = numpy.asarray(colors.to_rgb(THEME["edge_glue"]), dtype=numpy.float32)
-    negative = numpy.asarray(colors.to_rgb(THEME["edge_exit"]), dtype=numpy.float32)
-    neutral = numpy.asarray(colors.to_rgb("#7d86a3"), dtype=numpy.float32)
-    background = numpy.asarray(colors.to_rgb("#172033"), dtype=numpy.float32)
-    positive_mix = numpy.clip(balance, 0.0, 1.0)[..., None]
-    negative_mix = numpy.clip(-balance, 0.0, 1.0)[..., None]
-    hue = neutral + positive_mix * (positive - neutral) + negative_mix * (negative - neutral)
-    visibility = (0.12 + 0.88 * level)[..., None]
-    rgb = background * (1.0 - visibility) + hue * visibility
-    alpha = numpy.ones((*magnitude.shape, 1), dtype=numpy.float32)
-    return numpy.concatenate((numpy.clip(rgb, 0.0, 1.0), alpha), axis=2)
-
-
-def _flow_color(stats: _FlowStats, colors: Any) -> tuple[float, float, float, float]:
-    if stats.magnitude <= 0:
-        return colors.to_rgba(THEME["label"], 0.35)
-    balance = max(-1.0, min(1.0, stats.signed / stats.magnitude))
-    neutral = colors.to_rgb("#7d86a3")
-    target = colors.to_rgb(THEME["edge_glue"] if balance >= 0 else THEME["edge_exit"])
-    amount = abs(balance)
-    return (*(neutral[index] + amount * (target[index] - neutral[index]) for index in range(3)), 0.72)
-
-
-def _flow_width(stats: _FlowStats, peak: float) -> float:
-    if stats.magnitude <= 0:
-        return 0.7
-    return 0.8 + 6.2 * math.log1p(stats.magnitude) / math.log1p(max(peak, stats.magnitude, 1e-12))
-
-
-def _render_large_module_density_raw(out_path: Path, entry: LibraryEntry) -> _LargeRenderMetadata:
-    """Render one oversized module directly from its serialized payload, with no Genome or graph construction."""
-    # Deliberately lazy: normal startup, small portraits, galleries, task renders, and overmind cards
-    # never import Datashader (or its pandas/xarray/numba dependency chain).
-    import datashader as ds
-    import matplotlib
-    import numpy as np
-    import pandas as pd
-    from datashader import transfer_functions as tf
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import Rectangle
-
-    layout = _density_layout(entry)
-    connections = entry.payload.get("connections", [])
-    if not isinstance(connections, list):
-        raise ValueError("module payload connections must be a list")
-    macro_edges = _macro_implied_payload_edges(entry.payload)
-    canvas = ds.Canvas(plot_width=_DENSITY_WIDTH, plot_height=_DENSITY_HEIGHT, x_range=(0.0, 1.0), y_range=(0.0, 1.0))
-
-    input_id_set = set(layout.input_ids)
-    outgoing_strength: dict[int, float] = {}
-    active_input_ids: set[int] = set()
-    for connection in connections:
-        if not bool(connection.get("enabled", False)):
-            continue
-        source_id = int(connection["in"])
-        if source_id in input_id_set:
-            weight = float(connection.get("weight", 0.0))
-            if not math.isfinite(weight):
-                raise ValueError(f"input edge from {source_id} has a non-finite weight")
-            outgoing_strength[source_id] = outgoing_strength.get(source_id, 0.0) + abs(weight)
-            active_input_ids.add(source_id)
-    isolated_count = len(layout.input_ids) - len(active_input_ids)
-    del active_input_ids, input_id_set
-
-    input_frame = pd.DataFrame(
-        {
-            "x": np.fromiter((layout.positions[node_id][0] for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
-            "y": np.fromiter((layout.positions[node_id][1] for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
-            "strength": np.fromiter((outgoing_strength.get(node_id, 0.0) for node_id in layout.input_ids), dtype=np.float64, count=len(layout.input_ids)),
-        }
-    )
-    del outgoing_strength
-    images: list[Any] = []
-    edge_layers, enabled_count, rendered_count = _rasterized_edge_layers(canvas, layout.positions, connections, macro_edges, ds, pd, np)
-    edge_colors = {
-        "positive": THEME["edge_glue"],
-        "negative": THEME["edge_exit"],
-        "recurrent": THEME["edge_recurrent"],
-        "macro": THEME["edge_macro"],
-    }
-    for category in ("positive", "negative", "recurrent", "macro"):
-        aggregate = edge_layers[category]
-        if aggregate is not None and bool(np.any(aggregate.data > 0)):
-            visible = aggregate.where(aggregate > 0)
-            images.append(tf.shade(visible, cmap=[edge_colors[category], edge_colors[category]], how="log", alpha=185, min_alpha=28))
-    del edge_layers
-
-    if layout.input_ids:
-        base = canvas.points(input_frame, "x", "y", agg=ds.count())
-        active = canvas.points(input_frame, "x", "y", agg=ds.sum("strength"))
-        images.append(tf.spread(tf.shade(base, cmap=[THEME["node_input"], THEME["node_input"]], how="linear", alpha=105, min_alpha=105), px=1))
-        if bool(np.any(np.nan_to_num(active.data, nan=0.0) > 0)):
-            images.append(tf.spread(tf.shade(active.where(active > 0), cmap=["#315f9e", THEME["edge_glue"]], how="log", alpha=245, min_alpha=75), px=1))
-        del active, base, input_frame
-
-    if images:
-        raster = np.asarray(tf.stack(*images, how="over").to_pil(origin="upper"))
-    else:
-        raster = np.zeros((_DENSITY_HEIGHT, _DENSITY_WIDTH, 4), dtype=np.uint8)
-    del images
-
-    figure = plt.figure(figsize=(_DENSITY_WIDTH / 200, _DENSITY_HEIGHT / 200), dpi=200)
-    figure.patch.set_facecolor(THEME["background"])
-    axis = figure.add_axes((0.0, 0.0, 1.0, 1.0))
-    axis.set_facecolor(THEME["background"])
-    axis.imshow(raster, extent=(0.0, 1.0, 0.0, 1.0), origin="lower", interpolation="nearest", zorder=1)
-    axis.set_aspect("auto")
-    for panel in layout.panels:
-        axis.add_patch(
-            Rectangle((panel.x0, panel.y0), panel.x1 - panel.x0, panel.y1 - panel.y0, fill=False, edgecolor=THEME["container_edge"], linewidth=0.55, alpha=0.8, zorder=2)
-        )
-        axis.text((panel.x0 + panel.x1) / 2, panel.y1 + 0.003, panel.label, color=THEME["label"], fontsize=5.5, ha="center", va="bottom", zorder=4)
-
-    raw_nodes = entry.payload.get("nodes", [])
-    computed_set = set(layout.computed_ids)
-    nodes_by_id = {int(node["id"]): node for node in raw_nodes if int(node["id"]) in computed_set}
-    macro_outputs = {int(node_id) for macro in entry.payload.get("macros", []) for node_id in macro.get("outputs", [])}
-    marker_groups: dict[tuple[str, str], list[int]] = {}
-    for node_id in layout.computed_ids:
-        node = nodes_by_id[node_id]
-        kind = str(node.get("kind", "hidden"))
-        if node_id in macro_outputs:
-            marker, color = "h", THEME["node_module"]
-        elif kind == NodeKind.BIAS.value:
-            marker, color = "s", THEME["node_bias"]
-        elif kind == NodeKind.OUTPUT.value:
-            marker, color = "s", THEME["node_output"]
-        else:
-            marker = "D" if node.get("aggregation", "sum") == "product" else "o"
-            color = "#73d055"
-        marker_groups.setdefault((marker, color), []).append(node_id)
-    for (marker, color), node_ids in marker_groups.items():
-        axis.scatter(
-            [layout.positions[node_id][0] for node_id in node_ids],
-            [layout.positions[node_id][1] for node_id in node_ids],
-            s=22 if len(layout.computed_ids) <= 64 else 12,
-            c=color,
-            marker=marker,
-            linewidths=0.35,
-            edgecolors=THEME["background"],
-            zorder=5,
-        )
-    if len(layout.computed_ids) <= 64:
-        for node_id in layout.computed_ids:
-            x, y = layout.positions[node_id]
-            axis.text(x + 0.004, y, str(node_id), color=THEME["label"], fontsize=5, ha="left", va="center", zorder=6)
-
-    kind_counts: dict[str, int] = {}
-    for node in raw_nodes:
-        kind = str(node.get("kind", "?"))
-        kind_counts[kind] = kind_counts.get(kind, 0) + 1
-    macro_refs = sorted({str(macro.get("ref", "?")) for macro in entry.payload.get("macros", [])})
-    inputs = " + ".join(f"{item.get('signature', '?')}:{item.get('width', '?')}" for item in entry.io.get("inputs", []))
-    output = entry.io.get("output", {})
-    output_label = f"{output.get('signature', '?')}:{output.get('width', '?')}"
-    axis.text(0.025, 0.975, f"{entry.key}  L{entry.level} module", color=THEME["title"], fontsize=15, fontweight="bold", ha="left", va="top", zorder=7)
-    axis.text(0.025, 0.948, f"{inputs}  →  {output_label}", color=THEME["label"], fontsize=8, ha="left", va="top", zorder=7)
-    axis.text(0.735, 0.975, "computed topology", color=THEME["title"], fontsize=10, ha="left", va="top", zorder=7)
-    count_text = " · ".join(f"{kind_counts.get(kind, 0):,} {kind}" for kind in ("input", "bias", "hidden", "output") if kind_counts.get(kind, 0))
-    axis.text(0.735, 0.945, count_text, color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
-    axis.text(0.735, 0.925, f"{enabled_count:,} enabled edges · {isolated_count:,} isolated inputs", color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
-    axis.text(0.735, 0.905, f"renderer: Datashader · {layout.mode} · {_DENSITY_WIDTH}×{_DENSITY_HEIGHT}", color=THEME["label"], fontsize=7, ha="left", va="top", zorder=7)
-    if macro_refs:
-        refs = ", ".join(ref.removeprefix("library:") for ref in macro_refs)
-        axis.text(0.735, 0.885, f"macro refs (not expanded): {refs}", color=THEME["node_module"], fontsize=6.5, ha="left", va="top", wrap=True, zorder=7)
-    if layout.fallback_reason:
-        axis.text(0.025, 0.115, f"layout note: {layout.fallback_reason}", color=THEME["label"], fontsize=6, ha="left", va="top", zorder=7)
-
-    legend = (
-        (THEME["edge_glue"], "positive forward density"),
-        (THEME["edge_exit"], "negative forward density"),
-        (THEME["edge_recurrent"], "recurrent density"),
-        (THEME["edge_macro"], "macro-implied flow"),
-        (THEME["node_input"], "input location / outgoing |weight|"),
-    )
-    for index, (color, label) in enumerate(legend):
-        x = 0.04 + index * 0.185
-        axis.plot((x, x + 0.022), (0.075, 0.075), color=color, linewidth=2.2, zorder=7)
-        axis.text(x + 0.027, 0.075, label, color=THEME["label"], fontsize=6, ha="left", va="center", zorder=7)
-    axis.text(
-        0.5,
-        0.025,
-        f"Aggregate density portrait · all {rendered_count:,} enabled edges included · intensity accumulates absolute weight",
-        color=THEME["label"],
-        fontsize=7,
-        ha="center",
-        va="center",
-        zorder=7,
-    )
-    axis.set_xlim(0.0, 1.0)
-    axis.set_ylim(0.0, 1.0)
-    axis.axis("off")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(out_path, dpi=200, facecolor=figure.get_facecolor())
-    plt.close(figure)
-    return _LargeRenderMetadata(
-        node_count=len(raw_nodes),
-        enabled_edge_count=enabled_count,
-        isolated_input_count=isolated_count,
-        rendered_edge_count=rendered_count,
-        semantic_layout_mode=layout.mode,
-        fallback_reason=layout.fallback_reason,
-    )
-
-
 def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeRenderMetadata:
-    """A conceptual potential-influence portrait: spatial fields, transform cards, and output matrix."""
-    import datashader as ds
-    import matplotlib
-    import numpy as np
-    import pandas as pd
+    from versal.rendering_density import _render_large_module_density as render_density
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib import colors as mcolors
-    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
-
-    layout = _density_layout(entry)
-    connections = entry.payload.get("connections", [])
-    raw_nodes = entry.payload.get("nodes", [])
-    if not isinstance(connections, list) or not isinstance(raw_nodes, list):
-        raise ValueError("module payload nodes/connections must be lists")
-
-    # Compress the field slightly to make a clean transform-card column. No semantic coordinates
-    # change relative to one another; only their final screen extent changes.
-    input_left, input_right = 0.04, 0.59
-    old_input_right = max((panel.x1 for panel in layout.panels), default=0.69)
-    if old_input_right > input_left:
-        scale = (input_right - input_left) / (old_input_right - input_left)
-        for node_id in layout.input_ids:
-            x, y = layout.positions[node_id]
-            layout.positions[node_id] = (input_left + (x - input_left) * scale, y)
-        for panel in layout.panels:
-            panel.x0 = input_left + (panel.x0 - input_left) * scale
-            panel.x1 = input_left + (panel.x1 - input_left) * scale
-
-    input_ids = set(layout.input_ids)
-    computed_ids = set(layout.computed_ids)
-    nodes_by_id = {int(node["id"]): node for node in raw_nodes if int(node["id"]) in computed_ids}
-    output_ids = sorted(node_id for node_id in layout.computed_ids if nodes_by_id[node_id].get("kind") == NodeKind.OUTPUT.value)
-    output_set = set(output_ids)
-    transform_ids = [node_id for node_id in layout.computed_ids if node_id not in output_set]
-    macro_outputs = {int(node_id) for macro in entry.payload.get("macros", []) for node_id in macro.get("outputs", [])}
-    hidden_ids = [node_id for node_id in transform_ids if nodes_by_id[node_id].get("kind") == NodeKind.HIDDEN.value]
-    card_ids = hidden_ids if len(hidden_ids) <= 6 else []
-    card_set = set(card_ids)
-
-    # Output-matrix columns are concrete transform nodes while that remains readable. Large
-    # transform banks collapse by kind, but every edge still accumulates into its group cell.
-    source_labels = ["input field"]
-    source_group_for_id: dict[int, int] = {}
-    if len(transform_ids) <= 11:
-        for node_id in transform_ids:
-            source_group_for_id[node_id] = len(source_labels)
-            kind = "macro" if node_id in macro_outputs else str(nodes_by_id[node_id].get("kind", "node"))
-            source_labels.append(f"{kind} {node_id}")
-    else:
-        grouped: dict[str, int] = {}
-        for node_id in transform_ids:
-            kind = "macro" if node_id in macro_outputs else str(nodes_by_id[node_id].get("kind", "node"))
-            if kind not in grouped:
-                grouped[kind] = len(source_labels)
-                source_labels.append(f"{kind} bank")
-            source_group_for_id[node_id] = grouped[kind]
-
-    input_magnitude: dict[int, float] = {}
-    input_signed: dict[int, float] = {}
-    target_input_magnitude: dict[int, dict[int, float]] = {node_id: {} for node_id in card_ids}
-    target_input_signed: dict[int, dict[int, float]] = {node_id: {} for node_id in card_ids}
-    input_target_flow: dict[int, _FlowStats] = {}
-    computed_flow: dict[tuple[int, int, bool], _FlowStats] = {}
-    source_output_flow: dict[int, _FlowStats] = {}
-    output_cells: dict[tuple[int, int], _FlowStats] = {}
-    active_inputs: set[int] = set()
-    enabled_count = 0
-
-    for connection in connections:
-        if not bool(connection.get("enabled", False)):
-            continue
-        enabled_count += 1
-        source_id, target_id = int(connection["in"]), int(connection["out"])
-        if source_id not in layout.positions or target_id not in layout.positions:
-            raise ValueError(f"enabled edge {source_id}->{target_id} names a missing node")
-        weight = float(connection.get("weight", 0.0))
-        if not math.isfinite(weight):
-            raise ValueError(f"enabled edge {source_id}->{target_id} has a non-finite weight")
-        recurrent = bool(connection.get("recurrent", False))
-        if source_id in input_ids:
-            input_magnitude[source_id] = input_magnitude.get(source_id, 0.0) + abs(weight)
-            input_signed[source_id] = input_signed.get(source_id, 0.0) + weight
-            active_inputs.add(source_id)
-            source_group = 0
-            if target_id not in output_set:
-                input_target_flow.setdefault(target_id, _FlowStats()).add(weight)
-            if target_id in card_set:
-                magnitude = target_input_magnitude[target_id]
-                signed = target_input_signed[target_id]
-                magnitude[source_id] = magnitude.get(source_id, 0.0) + abs(weight)
-                signed[source_id] = signed.get(source_id, 0.0) + weight
-        else:
-            source_group = source_group_for_id.get(source_id, -1)
-        if target_id in output_set:
-            if source_group < 0:
-                source_group = len(source_labels)
-                source_group_for_id[source_id] = source_group
-                source_labels.append(f"output feedback {source_id}")
-            output_cells.setdefault((target_id, source_group), _FlowStats()).add(weight)
-            source_output_flow.setdefault(source_group, _FlowStats()).add(weight)
-        elif source_id not in input_ids:
-            computed_flow.setdefault((source_id, target_id, recurrent), _FlowStats()).add(weight)
-
-    macro_flow: dict[tuple[int, int], _FlowStats] = {}
-    for source_id, target_id in _macro_implied_payload_edges(entry.payload):
-        if source_id not in layout.positions or target_id not in layout.positions:
-            raise ValueError(f"macro-implied edge {source_id}->{target_id} names a missing node")
-        macro_flow.setdefault((source_id, target_id), _FlowStats()).add(1.0)
-    isolated_count = len(layout.input_ids) - len(active_inputs)
-
-    main_fields: list[tuple[_DensityPanel, Any, Any]] = []
-    main_spans: list[float] = []
-    for panel in layout.panels:
-        magnitude, signed = _panel_influence_aggregate(panel, layout.positions, input_magnitude, input_signed, ds, pd, np)
-        main_fields.append((panel, magnitude, signed))
-        nonzero = magnitude[magnitude > 0]
-        if nonzero.size:
-            main_spans.append(float(np.quantile(nonzero, 0.99)))
-    main_span = max(main_spans, default=1.0)
-
-    figure = plt.figure(figsize=(_DENSITY_WIDTH / 200, _DENSITY_HEIGHT / 200), dpi=200)
-    figure.patch.set_facecolor(THEME["background"])
-    axis = figure.add_axes((0.0, 0.0, 1.0, 1.0))
-    axis.set_facecolor(THEME["background"])
-    axis.set_aspect("auto")
-
-    # Filled semantic fields: no raw edge crosses this region.
-    for panel, magnitude, signed in main_fields:
-        rgba = _signed_influence_rgba(magnitude, signed, main_span, np, mcolors)
-        axis.imshow(rgba, extent=(panel.x0, panel.x1, panel.y0, panel.y1), origin="lower", interpolation="nearest", aspect="auto", zorder=1)
-        axis.add_patch(Rectangle((panel.x0, panel.y0), panel.x1 - panel.x0, panel.y1 - panel.y0, fill=False, edgecolor=THEME["container_edge"], linewidth=0.7, zorder=2))
-        axis.text((panel.x0 + panel.x1) / 2, panel.y1 + 0.003, panel.label, color=THEME["label"], fontsize=5.5, ha="center", va="bottom", zorder=4)
-
-    # Hidden-node cards carry locally normalized receptive-field thumbnails.
-    transform_positions = dict(layout.positions)
-    card_rects: dict[int, tuple[float, float, float, float]] = {}
-    if card_ids:
-        card_x0, card_x1 = 0.625, 0.805
-        centers = np.linspace(0.79, 0.27, len(card_ids)) if len(card_ids) > 1 else np.asarray([0.54])
-        card_height = min(0.15, 0.48 / max(len(card_ids), 1))
-        panel_y_min = min((panel.y0 for panel in layout.panels), default=0.16)
-        panel_y_max = max((panel.y1 for panel in layout.panels), default=0.90)
-        panel_y_span = max(panel_y_max - panel_y_min, 1e-6)
-        for node_id, center_value in zip(card_ids, centers):
-            center_y = float(center_value)
-            y0, y1 = center_y - card_height / 2, center_y + card_height / 2
-            card_rects[node_id] = (card_x0, y0, card_x1, y1)
-            transform_positions[node_id] = (card_x1, center_y)
-            axis.add_patch(
-                FancyBboxPatch(
-                    (card_x0, y0),
-                    card_x1 - card_x0,
-                    y1 - y0,
-                    boxstyle="round,pad=0.002,rounding_size=0.006",
-                    facecolor=THEME["panel_even"],
-                    edgecolor=THEME["container_edge"],
-                    linewidth=0.7,
-                    zorder=3,
-                )
-            )
-            target_fields: list[tuple[_DensityPanel, Any, Any]] = []
-            target_spans: list[float] = []
-            for panel in layout.panels:
-                magnitude, signed = _panel_influence_aggregate(panel, layout.positions, target_input_magnitude[node_id], target_input_signed[node_id], ds, pd, np)
-                target_fields.append((panel, magnitude, signed))
-                nonzero = magnitude[magnitude > 0]
-                if nonzero.size:
-                    target_spans.append(float(np.quantile(nonzero, 0.99)))
-            target_span = max(target_spans, default=1.0)
-            map_x0, map_x1 = card_x0 + 0.004, card_x0 + 0.102
-            map_y0, map_y1 = y0 + 0.008, y1 - 0.008
-            for panel, magnitude, signed in target_fields:
-                px0 = map_x0 + (panel.x0 - input_left) / max(input_right - input_left, 1e-6) * (map_x1 - map_x0)
-                px1 = map_x0 + (panel.x1 - input_left) / max(input_right - input_left, 1e-6) * (map_x1 - map_x0)
-                py0 = map_y0 + (panel.y0 - panel_y_min) / panel_y_span * (map_y1 - map_y0)
-                py1 = map_y0 + (panel.y1 - panel_y_min) / panel_y_span * (map_y1 - map_y0)
-                rgba = _signed_influence_rgba(magnitude, signed, target_span, np, mcolors)
-                axis.imshow(rgba, extent=(px0, px1, py0, py1), origin="lower", interpolation="nearest", aspect="auto", zorder=4)
-            stats = input_target_flow.get(node_id, _FlowStats())
-            kind = "macro" if node_id in macro_outputs else "hidden"
-            axis.text(card_x0 + 0.108, y1 - 0.018, f"{kind} {node_id}", color=THEME["title"], fontsize=6.2, ha="left", va="top", zorder=6)
-            axis.text(card_x0 + 0.108, y1 - 0.041, f"{stats.count:,} edges", color=THEME["label"], fontsize=5.2, ha="left", va="top", zorder=6)
-            axis.text(card_x0 + 0.108, y1 - 0.062, f"Σ|w| {stats.magnitude:,.2g}", color=THEME["label"], fontsize=5.2, ha="left", va="top", zorder=6)
-
-    for index, node_id in enumerate(node_id for node_id in transform_ids if nodes_by_id[node_id].get("kind") == NodeKind.BIAS.value):
-        transform_positions[node_id] = (0.805, 0.145 - index * 0.025)
-
-    # The output bank is a signed influence matrix. For 200 outputs this replaces an unreadable
-    # marker/edge comb; for small banks it remains concrete and receives row labels.
-    matrix_x0, matrix_x1, matrix_y0, matrix_y1 = 0.855, 0.975, 0.17, 0.84
-    output_row = {node_id: index for index, node_id in enumerate(output_ids)}
-    matrix_magnitude = np.zeros((max(len(output_ids), 1), max(len(source_labels), 1)), dtype=np.float32)
-    matrix_signed = np.zeros_like(matrix_magnitude)
-    for (output_id, source_group), stats in output_cells.items():
-        matrix_magnitude[output_row[output_id], source_group] = stats.magnitude
-        matrix_signed[output_row[output_id], source_group] = stats.signed
-    matrix_nonzero = matrix_magnitude[matrix_magnitude > 0]
-    matrix_span = float(np.quantile(matrix_nonzero, 0.99)) if matrix_nonzero.size else 1.0
-    matrix_rgba = _signed_influence_rgba(matrix_magnitude, matrix_signed, matrix_span, np, mcolors)
-    axis.imshow(matrix_rgba, extent=(matrix_x0, matrix_x1, matrix_y0, matrix_y1), origin="lower", interpolation="nearest", aspect="auto", zorder=3)
-    axis.add_patch(Rectangle((matrix_x0, matrix_y0), matrix_x1 - matrix_x0, matrix_y1 - matrix_y0, fill=False, edgecolor=THEME["container_edge"], linewidth=0.8, zorder=4))
-    axis.text(
-        (matrix_x0 + matrix_x1) / 2,
-        matrix_y1 + 0.028,
-        f"output influence matrix · {len(output_ids):,} outputs",
-        color=THEME["title"],
-        fontsize=7,
-        ha="center",
-        va="bottom",
-        zorder=6,
-    )
-    for index, label in enumerate(source_labels):
-        x = matrix_x0 + (index + 0.5) * (matrix_x1 - matrix_x0) / max(len(source_labels), 1)
-        axis.text(x, matrix_y1 - 0.006, label, color=THEME["title"], fontsize=4.3, rotation=90, ha="center", va="top", zorder=6)
-    if len(output_ids) <= 16:
-        for index, output_id in enumerate(output_ids):
-            y = matrix_y0 + (index + 0.5) * (matrix_y1 - matrix_y0) / max(len(output_ids), 1)
-            axis.text(matrix_x1 + 0.003, y, str(output_id), color=THEME["label"], fontsize=5, ha="left", va="center", zorder=6)
-
-    all_stats = list(input_target_flow.values()) + list(computed_flow.values()) + list(source_output_flow.values()) + list(macro_flow.values())
-    flow_peak = max((stats.magnitude for stats in all_stats), default=1.0)
-
-    def draw_flow(
-        start: tuple[float, float],
-        end: tuple[float, float],
-        stats: _FlowStats,
-        *,
-        curve: float = 0.0,
-        color: str | None = None,
-        dashed: bool = False,
-        zorder: int = 5,
-    ) -> None:
-        rgba = mcolors.to_rgba(color, 0.75) if color else _flow_color(stats, mcolors)
-        axis.add_patch(
-            FancyArrowPatch(
-                start,
-                end,
-                connectionstyle=f"arc3,rad={curve}",
-                arrowstyle="-|>",
-                mutation_scale=7.0,
-                linewidth=_flow_width(stats, flow_peak),
-                linestyle="dashed" if dashed else "solid",
-                color=rgba,
-                capstyle="round",
-                joinstyle="round",
-                zorder=zorder,
-            )
-        )
-
-    for target_id, stats in input_target_flow.items():
-        if target_id in transform_positions:
-            target = transform_positions[target_id]
-            end_x = card_rects[target_id][0] if target_id in card_rects else target[0]
-            draw_flow((input_right + 0.006, target[1]), (end_x, target[1]), stats, zorder=2)
-    for (source_id, target_id, recurrent), stats in computed_flow.items():
-        source = transform_positions.get(source_id)
-        if source is None and source_id in output_row:
-            source = (matrix_x1, matrix_y0 + (output_row[source_id] + 0.5) * (matrix_y1 - matrix_y0) / max(len(output_ids), 1))
-        if source is not None and target_id in transform_positions:
-            draw_flow(
-                source,
-                transform_positions[target_id],
-                stats,
-                curve=0.32 if recurrent else 0.12,
-                color=THEME["edge_recurrent"] if recurrent else None,
-                dashed=recurrent,
-            )
-    for (source_id, target_id), stats in macro_flow.items():
-        source = transform_positions.get(source_id, layout.positions[source_id])
-        target = transform_positions.get(target_id, layout.positions[target_id])
-        draw_flow(source, target, stats, curve=-0.15, color=THEME["edge_macro"], dashed=True)
-    for source_group, stats in source_output_flow.items():
-        column_x = matrix_x0 + (source_group + 0.5) * (matrix_x1 - matrix_x0) / max(len(source_labels), 1)
-        if source_group == 0:
-            rgba = _flow_color(stats, mcolors)
-            axis.plot((input_right + 0.006, matrix_x0 - 0.018), (0.125, 0.125), color=rgba, linewidth=_flow_width(stats, flow_peak), alpha=0.72, zorder=2)
-            draw_flow((matrix_x0 - 0.018, 0.125), (column_x, matrix_y0), stats, curve=0.16, zorder=2)
-            axis.text(0.70, 0.108, "direct input bypass", color=THEME["label"], fontsize=5.5, ha="center", va="top", zorder=6)
-        else:
-            group_ids = [node_id for node_id, group in source_group_for_id.items() if group == source_group]
-            points = [transform_positions[node_id] for node_id in group_ids if node_id in transform_positions]
-            if points:
-                start = (max(point[0] for point in points), sum(point[1] for point in points) / len(points))
-                draw_flow(start, (column_x, matrix_y1), stats, curve=-0.14, zorder=2)
-
-    marker_groups: dict[tuple[str, str], list[int]] = {}
-    for node_id in transform_ids:
-        node = nodes_by_id[node_id]
-        kind = str(node.get("kind", "hidden"))
-        if node_id in macro_outputs:
-            marker, color = "h", THEME["node_module"]
-        elif kind == NodeKind.BIAS.value:
-            marker, color = "s", THEME["node_bias"]
-        else:
-            marker = "D" if node.get("aggregation", "sum") == "product" else "o"
-            color = "#73d055"
-        marker_groups.setdefault((marker, color), []).append(node_id)
-    for (marker, color), node_ids in marker_groups.items():
-        axis.scatter(
-            [transform_positions[node_id][0] for node_id in node_ids],
-            [transform_positions[node_id][1] for node_id in node_ids],
-            s=27,
-            c=color,
-            marker=marker,
-            linewidths=0.45,
-            edgecolors=THEME["background"],
-            zorder=7,
-        )
-    for node_id in transform_ids:
-        if node_id not in card_set:
-            x, y = transform_positions[node_id]
-            axis.text(x + 0.005, y, str(node_id), color=THEME["label"], fontsize=5, ha="left", va="center", zorder=7)
-
-    kind_counts: dict[str, int] = {}
-    for node in raw_nodes:
-        kind = str(node.get("kind", "?"))
-        kind_counts[kind] = kind_counts.get(kind, 0) + 1
-    macro_refs = sorted({str(macro.get("ref", "?")) for macro in entry.payload.get("macros", [])})
-    inputs = " + ".join(f"{item.get('signature', '?')}:{item.get('width', '?')}" for item in entry.io.get("inputs", []))
-    output = entry.io.get("output", {})
-    output_label = f"{output.get('signature', '?')}:{output.get('width', '?')}"
-    axis.text(0.025, 0.975, f"{entry.key}  L{entry.level} module", color=THEME["title"], fontsize=15, fontweight="bold", ha="left", va="top", zorder=8)
-    axis.text(0.025, 0.948, f"{inputs}  →  {output_label}", color=THEME["label"], fontsize=8, ha="left", va="top", zorder=8)
-    axis.text(0.04, 0.922, "spatial potential influence · filled semantic H×W cells", color=THEME["label"], fontsize=6.3, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.975, "potential influence flow", color=THEME["title"], fontsize=11, fontweight="bold", ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.949, "conceptual weight flow · not activation analysis", color=THEME["label"], fontsize=6.8, ha="left", va="top", zorder=8)
-    count_text = " · ".join(f"{kind_counts.get(kind, 0):,} {kind}" for kind in ("input", "bias", "hidden", "output") if kind_counts.get(kind, 0))
-    axis.text(0.625, 0.928, count_text, color=THEME["label"], fontsize=6.5, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.908, f"{enabled_count:,} enabled edges · {isolated_count:,} isolated inputs", color=THEME["label"], fontsize=6.5, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.888, f"renderer: Datashader · {layout.mode} · {_DENSITY_WIDTH}×{_DENSITY_HEIGHT}", color=THEME["label"], fontsize=5.8, ha="left", va="top", zorder=8)
-    if macro_refs:
-        refs = ", ".join(ref.removeprefix("library:") for ref in macro_refs)
-        axis.text(0.625, 0.870, f"macro refs (not expanded): {refs}", color=THEME["node_module"], fontsize=6, ha="left", va="top", wrap=True, zorder=8)
-    if layout.fallback_reason:
-        axis.text(0.025, 0.112, f"layout note: {layout.fallback_reason}", color=THEME["label"], fontsize=5.5, ha="left", va="top", zorder=8)
-
-    legend = (
-        (THEME["edge_glue"], "positive influence"),
-        (THEME["edge_exit"], "negative influence"),
-        ("#7d86a3", "mixed sign"),
-        (THEME["edge_recurrent"], "recurrent"),
-        (THEME["edge_macro"], "macro-implied"),
-    )
-    for index, (color, label) in enumerate(legend):
-        x = 0.04 + index * 0.185
-        axis.plot((x, x + 0.022), (0.072, 0.072), color=color, linewidth=2.2, zorder=8)
-        axis.text(x + 0.027, 0.072, label, color=THEME["label"], fontsize=6, ha="left", va="center", zorder=8)
-    axis.text(
-        0.04,
-        0.048,
-        "field brightness = log accumulated |weight| · field hue = signed balance · hidden cards are locally scaled",
-        color=THEME["label"],
-        fontsize=5.8,
-        ha="left",
-        va="center",
-        zorder=8,
-    )
-    axis.text(
-        0.5,
-        0.022,
-        f"Potential influence flow (weights, not activations) · all {enabled_count:,} enabled edges included in fields, ribbons, or matrices",
-        color=THEME["label"],
-        fontsize=7,
-        ha="center",
-        va="center",
-        zorder=8,
-    )
-    axis.set_xlim(0.0, 1.0)
-    axis.set_ylim(0.0, 1.0)
-    axis.axis("off")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        figure.savefig(out_path, dpi=200, facecolor=figure.get_facecolor())
-    finally:
-        plt.close(figure)
-    return _LargeRenderMetadata(
-        node_count=len(raw_nodes),
-        enabled_edge_count=enabled_count,
-        isolated_input_count=isolated_count,
-        rendered_edge_count=enabled_count,
-        semantic_layout_mode=layout.mode,
-        fallback_reason=layout.fallback_reason,
-    )
+    return render_density(out_path, entry)
 
 
 def _temporary_sibling(out_path: Path) -> Path:
@@ -2195,7 +1312,7 @@ def render_entry(
     return _render_spec_png(out_path, spec, f"{entry.key}  L{entry.level} {entry.entry_type}")
 
 
-# --- gallery ---------------------------------------------------------------------------------------
+# gallery
 
 
 def _cell_title(summary: dict[str, Any]) -> str:
@@ -2268,7 +1385,7 @@ def render_library_gallery(
     return out_path
 
 
-# --- motif atlas -----------------------------------------------------------------------------------
+# motif atlas
 
 # Hidden-node tints for the atlas only: a tanh-gated motif should read at a glance without text.
 # Identity stays neutral so the interesting activations pop.
@@ -2390,138 +1507,47 @@ def render_motif_atlas(out_path: Path, motifs: list[MotifRecord], *, columns: in
     return out_path
 
 
-# --- overmind: the whole routed model in one frame -------------------------------------------------
+# overmind: the whole routed model in one frame
 
 
 @dataclass(slots=True)
 class OvermindVertex:
-    """A read-only view of one routed-model expert, so rendering stays decoupled from `routing.py`."""
+    """Read-only routed-expert data used by the renderer."""
 
-    key: str  # the library key (or "" for a synthetic vertex); resolved to its embedded network
-    label: str  # display label (usage share, stone/retired markers, ...)
+    key: str
+    label: str
     retired: bool = False
-    usage: float = 0.0  # lifetime gate-mass share in [0, 1]
-    entry_share: float = 0.0  # step-0 gate mass, peak-normalized; widths the input feed edge
-    exit_share: float = 0.0  # final-step gate mass, peak-normalized; widths the output feed edge
-    mean_step: float | None = None  # mass-weighted mean firing step; None = never trafficked
-    embedding_rank: int = 0  # 1D latent-projection rank; orders cells WITHIN a grid row
-    stepping_stone: bool = False  # wall-ledger below-bar admission (immature circuit)
+    usage: float = 0.0
+    entry_share: float = 0.0
+    exit_share: float = 0.0
+    mean_step: float | None = None
+    embedding_rank: int = 0
+    stepping_stone: bool = False
 
 
 @dataclass(slots=True)
 class OvermindView:
-    """Everything the overmind render needs about a routed model, as plain data. `routing.py` builds
-    this from a live `RoutedNet`; the renderer never imports the router. Vertices arrive in FINAL
-    ROW ORDER (traffic-first: early-firing experts lead); the renderer only chunks them."""
+    """Plain routed-model data required for an overmind render."""
 
     vertices: list[OvermindVertex]
-    input_signatures: list[str]  # one per input adapter (e.g. "BINARY|K:2")
-    output_signatures: list[str]  # one per output head
+    input_signatures: list[str]
+    output_signatures: list[str]
     d_model: int
     top_k: int
     max_steps: int
-    # REAL routing paths: directed (source_index, target_index, weight in [0, 1]) between vertices,
-    # from observed step-to-step traffic (or the edge_bias prior as a fallback). Drawn as curved
-    # weighted edges from concrete source outputs to target network-input anchors.
     pathways: list[tuple[int, int, float]] = field(default_factory=list)
     traffic_observed: bool = True
 
 
 def prune_overmind_view(view: OvermindView) -> OvermindView:
-    """Remove retired cards and compact the remaining portrait without changing its grid width.
+    from versal.rendering_overmind import prune_overmind_view as prune
 
-    Vertex order is preserved, so :func:`build_overmind_spec` repacks the survivors left-to-right
-    into the same eight-column rows.  Pathway indices are remapped and edges touching a hidden
-    vertex disappear.
-    """
-
-    kept = [index for index, vertex in enumerate(view.vertices) if not vertex.retired]
-    remap = {old: new for new, old in enumerate(kept)}
-    pathways = [(remap[source], remap[target], weight) for source, target, weight in view.pathways if source in remap and target in remap]
-    return OvermindView(
-        vertices=[view.vertices[index] for index in kept],
-        input_signatures=list(view.input_signatures),
-        output_signatures=list(view.output_signatures),
-        d_model=view.d_model,
-        top_k=view.top_k,
-        max_steps=view.max_steps,
-        pathways=pathways,
-        traffic_observed=view.traffic_observed,
-    )
+    return prune(view)
 
 
-_ROW_GAP = 2.4  # vertical gap between grid rows; leaves room for the container label above a box
-_BAND_GAP = 4  # clearance between the input/output bands and the grid
-_BAND_H = 1.6  # band strip: node row plus its signature label
-_LEGEND_COLUMNS = 2
-_LEGEND_ROW_STEP = 1.45
-_LEGEND_WIDTH = 22.0
 _OVERMIND_COLUMNS = 8
 _OVERMIND_DPI = 300
 _OVERMIND_X_PADDING = 2 * _PAD
-
-
-def _overmind_legend_entries(*, traffic_observed: bool = True) -> list[tuple[str, dict[str, Any], str]]:
-    """Every marker/edge class the overmind canvas can show, as (swatch kind, params, label) rows."""
-    early, deep = _layer_color(0, 3), _layer_color(3, 3)
-    return [
-        ("node", {"color": THEME["node_input"], "marker": "s"}, "input"),
-        ("node", {"color": THEME["node_bias"], "marker": "s", "alpha": 0.7}, "bias"),
-        ("node", {"color": THEME["node_output"], "marker": "s"}, "output"),
-        ("node", {"color": early, "marker": "o"}, "hidden (early layer)"),
-        ("node", {"color": deep, "marker": "o"}, "hidden (deep layer)"),
-        ("node", {"color": deep, "marker": "D"}, "product gate"),
-        ("node", {"color": THEME["node_module"], "marker": "h"}, "module ref / macro footprint"),
-        ("node", {"color": THEME["node_anchor"], "marker": "o", "size": 0.65}, "network input anchor"),
-        ("node", {"color": deep, "marker": "o", "alpha": 0.25, "size": 0.5}, "isolated (unused)"),
-        ("box", {}, "retired or unexpanded network"),
-        ("edge", {"color": THEME["edge_forward"]}, "forward connection"),
-        ("edge", {"color": THEME["edge_recurrent"], "style": "dashed", "curve": 0.25}, "recurrent (time-delayed)"),
-        ("edge", {"color": THEME["edge_macro"]}, "macro implied wiring"),
-        ("edge", {"color": THEME["edge_glue"]}, "composition glue"),
-        ("edge", {"color": THEME["edge_callout"]}, "nested-network flow"),
-        (
-            "edge",
-            {"color": THEME["edge_pathway"], "curve": 0.25},
-            "routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)",
-        ),
-        ("edge", {"color": THEME["edge_entry"]}, "input feed (step-0 gate mass)"),
-        ("edge", {"color": THEME["edge_exit"]}, "output feed (final-step gate mass)"),
-    ]
-
-
-def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tuple[str, dict[str, Any], str]]) -> float:
-    """Append a compact two-column key panel at the right margin; returns its width."""
-    spec.texts.append(SpecText(x0 + 0.6, y_top - 0.6, "key", size=8.0, color=THEME["title"]))
-    item_width = _LEGEND_WIDTH / _LEGEND_COLUMNS
-    for index, (kind, params, label) in enumerate(entries):
-        column, row = divmod(index, math.ceil(len(entries) / _LEGEND_COLUMNS))
-        item_x = x0 + column * item_width
-        y = y_top - 1.4 - row * _LEGEND_ROW_STEP
-        if kind == "node":
-            spec.nodes.append(SpecNode(item_x + 1.0, y, color=params["color"], size=params.get("size", 1.2), marker=params.get("marker", "o"), alpha=params.get("alpha", 1.0)))
-        elif kind == "edge":
-            spec.edges.append(
-                SpecEdge(
-                    item_x + 0.4,
-                    y,
-                    item_x + 1.8,
-                    y,
-                    width=1.6,
-                    color=params["color"],
-                    style=params.get("style", "solid"),
-                    curve=params.get("curve", 0.0),
-                    alpha=0.9,
-                    role="legend",
-                )
-            )
-        else:
-            spec.containers.append(SpecContainer(item_x + 0.3, y - 0.35, item_x + 1.9, y + 0.35, label="", depth=1, opaque=True))
-        spec.texts.append(SpecText(item_x + 2.4, y, label, size=5.7))
-    rows = math.ceil(len(entries) / _LEGEND_COLUMNS)
-    bottom = y_top - 1.4 - max(rows - 1, 0) * _LEGEND_ROW_STEP - 0.8
-    spec.containers.append(SpecContainer(x0, bottom, x0 + _LEGEND_WIDTH, y_top, label="", depth=0))
-    return _LEGEND_WIDTH
 
 
 def build_overmind_spec(
@@ -2532,187 +1558,21 @@ def build_overmind_spec(
     cell_node_budget: int = 160,
     columns: int = _OVERMIND_COLUMNS,
     legend: bool = True,
+    legend_mode: str = "full",
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
-    """The whole routed model as a top-down flow portrait: input adapters band across the TOP, every
-    expert a fully-embedded cell in a `columns`-wide grid (row order = observed firing order, so an
-    input can be traced downward through the paths it actually takes), output heads across the
-    BOTTOM. There is no gate-hub node: the gate IS the edge fabric (feed widths and pathway edges
-    carry the learned routing). This whole-graph portrait is for the current scale; at thousands of
-    vertices it becomes a density-map problem, not more edges.
+    from versal.rendering_overmind import build_overmind_spec as build
 
-    Never raises: an unresolvable/oversized expert degrades to a labeled opaque box, like everywhere.
-
-    `cell_node_budget` is the PER-EXPERT detail cap, separate from the shared `node_budget`: one
-    image-scale entry (the 798-node MNIST stepping stone, 2026-07-05) otherwise fits the shared
-    budget, embeds as a ~784-node input column, and its cell height degenerates the whole portrait
-    into a tall-narrow bar while starving every other cell's budget. Above the cap an expert reads
-    as its labeled opaque footprint; its own full-detail portrait still lives in images/<key>.png."""
-    spec = RenderSpec()
-    inputs = view.input_signatures or ["(no input adapter yet)"]
-    outputs = view.output_signatures or ["(no output head yet)"]
-    columns = max(1, columns)
-
-    budget = _Budget(node_budget)
-    children: list[_Built] = []
-    for vertex in view.vertices:
-        entry: LibraryEntry | None = None
-        if vertex.key:
-            allowance = min(cell_node_budget, budget.remaining)
-            cell_budget = _Budget(allowance)
-            entry = resolve(vertex.key) if resolve is not None else None
-            try:
-                # An overmind cell is a root payload, just like render_entry: selecting it for the
-                # grid does not consume a reference level. Seed its key only for cycle detection.
-                child = (
-                    _build_entry(
-                        entry,
-                        resolve=resolve,
-                        budget=cell_budget,
-                        depth=1,
-                        reference_depth=0,
-                        stack=(vertex.key,),
-                        max_inline_depth=max_inline_depth,
-                    )
-                    if entry is not None
-                    else _opaque_built(vertex.key)
-                )
-            except Exception:
-                child = _opaque_built(f"{vertex.key}  ?")
-            budget.remaining -= allowance - cell_budget.remaining
-        else:
-            child = _opaque_built(vertex.label)
-        child.label = f"{vertex.label}\n{_entry_size_label(entry)}" if child.opaque and entry is not None else vertex.label
-        child.opaque = child.opaque or vertex.retired  # retired experts read as opaque footprints
-        children.append(child)
-    boxes = [(child.spec.width + 2 * _PAD, child.spec.height + 2 * _PAD) for child in children]
-
-    # Rows of `columns` in arrival (traffic) order; WITHIN a row, latent order keeps similar experts
-    # adjacent on the x axis. Rows are independently centered flow rows, never rigid column slots:
-    # one oversized cell would otherwise blow a whole column wide and smear the rest.
-    rows = [list(range(start, min(start + columns, len(children)))) for start in range(0, len(children), columns)]
-    for row in rows:
-        row.sort(key=lambda index: (view.vertices[index].embedding_rank, index))
-    row_heights = [max(boxes[i][1] for i in row) for row in rows]
-    row_widths = [sum(boxes[i][0] for i in row) + _H_GAP * (len(row) - 1) for row in rows]
-    grid_width = max([*row_widths, 8.0])
-    grid_height = sum(row_heights) + _ROW_GAP * max(len(rows) - 1, 0)
-
-    legend_entries = _overmind_legend_entries(traffic_observed=view.traffic_observed) if legend else []
-    legend_height = 2.2 + _LEGEND_ROW_STEP * math.ceil(len(legend_entries) / _LEGEND_COLUMNS)
-    total_height = max(2 * (_BAND_H + _BAND_GAP) + grid_height, legend_height)
-
-    bottoms: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
-    anchors: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
-    y_cursor = total_height - _BAND_H - _BAND_GAP  # y-up frame: the top rail of the first row
-    for row, row_height, row_width in zip(rows, row_heights, row_widths):
-        x_cursor = (grid_width - row_width) / 2
-        for i in row:
-            box_w, box_h = boxes[i]
-            cx, cy = x_cursor + box_w / 2, y_cursor - box_h / 2  # top-aligned: a clean rail for input feeds
-            _place_child(spec, children[i], (cx, cy), depth=1)
-            bottoms[i] = (cx, y_cursor - box_h)
-            anchors[i] = (cx - box_w / 2 + _NETWORK_ANCHOR_INSET, y_cursor - _NETWORK_ANCHOR_INSET)
-            spec.nodes.append(SpecNode(*anchors[i], color=THEME["node_anchor"], size=0.65, role="network-input-anchor"))
-            if not children[i].opaque and box_w < 2.5:
-                # draw_spec skips container labels on narrow boxes; every cell still deserves a name
-                spec.texts.append(SpecText(cx - box_w / 2 + 0.15, y_cursor + 0.08, children[i].label, size=5.0, va="bottom"))
-            x_cursor += box_w + _H_GAP
-        y_cursor -= row_height + _ROW_GAP
-
-    def _band(signatures: list[str], y: float, color: str) -> list[tuple[float, float]]:
-        placed: list[tuple[float, float]] = []
-        for index, signature in enumerate(signatures):
-            x = grid_width * (index + 1) / (len(signatures) + 1)
-            spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="s", role="input-adapter" if color == THEME["node_input"] else "output-head"))
-            spec.texts.append(SpecText(x, y - 0.45, signature, size=6.0, ha="center", va="top"))
-            placed.append((x, y))
-        return placed
-
-    input_positions = _band(inputs, total_height - 0.5, THEME["node_input"])
-    output_positions = _band(outputs, 0.5, THEME["node_output"])
-
-    def _outputs(index: int) -> list[tuple[float, float]]:
-        rendered = children[index].output_nodes
-        return [(node.x, node.y) for node in rendered] if rendered else [bottoms[index]]
-
-    # Traffic feeds. Full bipartite is honest: the bus injects every adapter into every selected
-    # expert, and per-adapter attribution does not exist in the ledgers. A fresh library (no traffic
-    # yet) draws uniform thin feeds so the flow story exists on day one.
-    live = [index for index, vertex in enumerate(view.vertices) if not vertex.retired]
-    uniform = all(view.vertices[index].entry_share <= 0.0 and view.vertices[index].exit_share <= 0.0 for index in live)
-    for index in live:
-        vertex = view.vertices[index]
-        entry_width = 0.8 if uniform else (_edge_width(vertex.entry_share * 3) if vertex.entry_share > 0.0 else 0.0)
-        exit_width = 0.8 if uniform else (_edge_width(vertex.exit_share * 3) if vertex.exit_share > 0.0 else 0.0)
-        alpha = 0.2 if uniform else 0.35
-        if entry_width > 0.0:
-            for x, y in input_positions:
-                spec.edges.append(
-                    SpecEdge(
-                        x,
-                        y,
-                        anchors[index][0],
-                        anchors[index][1],
-                        width=entry_width,
-                        color=THEME["edge_entry"],
-                        alpha=alpha,
-                        role="routing-entry",
-                        magnitude=max(vertex.entry_share, 0.05),
-                    )
-                )
-        if exit_width > 0.0:
-            for source_x, source_y in _outputs(index):
-                for x, y in output_positions:
-                    spec.edges.append(
-                        SpecEdge(
-                            source_x,
-                            source_y,
-                            x,
-                            y,
-                            width=exit_width,
-                            color=THEME["edge_exit"],
-                            alpha=alpha,
-                            role="routing-exit",
-                            magnitude=max(vertex.exit_share, 0.05),
-                        )
-                    )
-
-    # THE ROUTING PATHS: output node -> target input anchor, from observed traffic (or the edge-bias
-    # prior). An observed self-transition is recurrent expert use and loops back to that card's own
-    # anchor. Retired vertices carry no pathways.
-    for source, target, weight in view.pathways:
-        if not (0 <= source < len(children) and 0 <= target < len(children)):
-            continue
-        if view.vertices[source].retired or view.vertices[target].retired:
-            continue
-        x1, y1 = anchors[target]
-        for x0, y0 in _outputs(source):
-            spec.edges.append(
-                SpecEdge(
-                    x0,
-                    y0,
-                    x1,
-                    y1,
-                    width=_edge_width(weight * 3),
-                    color=THEME["edge_pathway"],
-                    curve=0.25,
-                    alpha=0.25 + 0.6 * min(weight, 1.0),
-                    role="routing-observed" if view.traffic_observed else "routing-potential",
-                    magnitude=weight,
-                )
-            )
-
-    spec.width = grid_width
-    if legend:
-        spec.width = grid_width + 2 * _H_GAP + _overmind_legend(spec, grid_width + 2 * _H_GAP, total_height - 0.5, legend_entries)
-    spec.height = total_height
-    spec.flow_label = (
-        "observed routing flow · gate-mass traffic, not activation analysis"
-        if view.traffic_observed
-        else "routing potential · cold structural view, not observed traffic or activations"
+    return build(
+        view,
+        resolve=resolve,
+        node_budget=node_budget,
+        cell_node_budget=cell_node_budget,
+        columns=columns,
+        legend=legend,
+        legend_mode=legend_mode,
+        max_inline_depth=max_inline_depth,
     )
-    return spec
 
 
 def render_overmind(
@@ -2739,7 +1599,7 @@ def render_overmind(
     if not out_path.stem.endswith("_pruned"):
         pruned_path = out_path.with_name(f"{out_path.stem}_pruned{out_path.suffix}")
         pruned = prune_overmind_view(view)
-        pruned_spec = build_overmind_spec(pruned, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
+        pruned_spec = build_overmind_spec(pruned, resolve=resolve, node_budget=node_budget, legend_mode="adaptive", max_inline_depth=max_inline_depth)
         pruned_title = f"overmind current: {len(pruned.vertices)} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
         _render_spec_png(pruned_path, pruned_spec, pruned_title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)
     return rendered

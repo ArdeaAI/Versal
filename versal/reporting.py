@@ -8,7 +8,6 @@ so it is safe to run against a live, crashed, resumed, or historical experiment 
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 import math
@@ -17,6 +16,8 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
+
+from versal.utils.files import file_sha256
 
 REPORT_SCHEMA_VERSION = 1
 RUNG_FIELDS = (
@@ -46,14 +47,6 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _tasks(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -110,6 +103,20 @@ def _support(row: dict[str, Any]) -> float | None:
 def _mean(values: Iterable[float]) -> float | None:
     materialized = list(values)
     return sum(materialized) / len(materialized) if materialized else None
+
+
+def _first_occurrences(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return independent task identities once, deriving repeat status for legacy ledgers."""
+
+    seen: set[tuple[Any, Any]] = set()
+    output: list[dict[str, Any]] = []
+    for row in tasks:
+        identity = (row.get("rung"), row.get("task"))
+        repeated = bool(row.get("is_repeat")) if "is_repeat" in row else identity in seen
+        if not repeated:
+            output.append(row)
+        seen.add(identity)
+    return output
 
 
 def _sentence(rung: int, task_count: int, query_values: list[float], support_values: list[float], failures: int) -> str:
@@ -183,14 +190,23 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
     if not isinstance(summary, dict):
         raise ValueError("run_summary.json must contain a JSON object")
     tasks = _tasks(summary)
+    first_occurrences = _first_occurrences(tasks)
     held = [value for row in tasks if (value := _held_out(row)) is not None]
     support = [value for row in tasks if (value := _support(row)) is not None]
+    first_held = [value for row in first_occurrences if (value := _held_out(row)) is not None]
+    first_support = [value for row in first_occurrences if (value := _support(row)) is not None]
     outcome_counts = Counter(str(row.get("outcome", "unknown")) for row in tasks)
     strategy_counts = Counter(str(row.get("strategy")) for row in tasks if row.get("strategy") is not None)
     representation_counts = Counter(
         str(row.get("representation") or ("field" if row.get("strategy") == "field" else ("composition" if row.get("strategy") == "composition" else "flat")))
         for row in tasks
         if row.get("strategy") is not None
+    )
+    report_strategy_counts = Counter(str(row.get("report_strategy") or "legacy_unattributed") for row in tasks if _held_out(row) is not None)
+    report_representation_counts = Counter(
+        str(row.get("report_representation") or (row.get("report_strategy") if row.get("report_strategy") is not None else "legacy_unattributed"))
+        for row in tasks
+        if _held_out(row) is not None
     )
     stage_seconds: Counter[str] = Counter()
     resource_events: Counter[str] = Counter()
@@ -209,12 +225,13 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
                 if (number := _finite(value)) is not None:
                     strategy_metrics[str(name)].append(number)
     gaps = [support_value - query for row in tasks if (support_value := _support(row)) is not None and (query := _held_out(row)) is not None]
+    first_gaps = [support_value - query for row in first_occurrences if (support_value := _support(row)) is not None and (query := _held_out(row)) is not None]
 
     provenance_files: list[dict[str, Any]] = []
-    for name in ("run_summary.json", "config.toml", "config.effective.json", "task_pool.json"):
+    for name in ("run_summary.json", "run_manifest.json", "config.toml", "config.effective.json", "task_pool.json"):
         path = run_dir / name
         if path.is_file():
-            provenance_files.append({"path": name, "sha256": _sha256(path), "size": path.stat().st_size})
+            provenance_files.append({"path": name, "sha256": file_sha256(path), "size": path.stat().st_size})
     library_metadata: dict[str, Any] | None = None
     if library is not None:
         index_path = library.resolve() / "index.json"
@@ -224,19 +241,33 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
         library_metadata = {
             "path": str(library.resolve()),
             "index_entries": len(index) if isinstance(index, list) else None,
-            "index_sha256": _sha256(index_path) if index_path.is_file() else None,
-            "motifs_sha256": _sha256(motifs_path) if motifs_path.is_file() else None,
+            "index_sha256": file_sha256(index_path) if index_path.is_file() else None,
+            "motifs_sha256": file_sha256(motifs_path) if motifs_path.is_file() else None,
             "motif_count": len(motifs.get("motifs", [])) if isinstance(motifs, dict) and isinstance(motifs.get("motifs"), list) else None,
             "field_entries": sum(row.get("representation") == "field" for row in index) if isinstance(index, list) else None,
             "field_exclusions": ["flat_grafting", "flat_macros", "live_flat_module_pool", "grammar_induction", "motif_claims"],
         }
 
+    start_manifest = _read_optional_json(run_dir / "run_manifest.json")
     start_size = 0
+    manifest_library = start_manifest.get("library_start") if isinstance(start_manifest, dict) else None
+    if isinstance(manifest_library, dict) and manifest_library.get("entry_count") is not None:
+        start_size = int(manifest_library["entry_count"])
     end_size = int(summary.get("library_size", 0) or 0)
-    if tasks:
-        first_size = int(tasks[0].get("library_size", 0) or 0)
-        first_admissions = len(tasks[0].get("new_library_keys", [])) if isinstance(tasks[0].get("new_library_keys", []), list) else 0
-        start_size = max(0, first_size - first_admissions)
+    if not isinstance(manifest_library, dict) or manifest_library.get("entry_count") is None:
+        # Legacy inference: exact count only. New runs use the immutable content identity above.
+        if tasks:
+            first_size = int(tasks[0].get("library_size", 0) or 0)
+            first_admissions = len(tasks[0].get("new_library_keys", [])) if isinstance(tasks[0].get("new_library_keys", []), list) else 0
+            start_size = max(0, first_size - first_admissions)
+    task_pool = summary.get("task_pool") if isinstance(summary.get("task_pool"), dict) else {}
+    tasks_to_run = int(summary.get("tasks_to_run", len(tasks)) or 0)
+    unique_pool_references = int(task_pool.get("unique_references", task_pool.get("entries", 0)) or 0)
+    revisit_slots = int(task_pool.get("revisit_slots", max(0, tasks_to_run - unique_pool_references)) or 0)
+    repeated_attempts = len(tasks) - len(first_occurrences)
+    counters = summary.get("counters") if isinstance(summary.get("counters"), dict) else {}
+    routed_rows = [row for row in tasks if isinstance(row.get("strategy_metrics"), dict) and _finite(row["strategy_metrics"].get("router_score")) is not None]
+    distillation_gaps = [value for row in routed_rows if (value := _finite((row.get("strategy_metrics") or {}).get("distillation_gap"))) is not None]
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "source_schema_version": summary.get("schema_version"),
@@ -245,13 +276,18 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "files": provenance_files,
             "library": library_metadata,
             "dataset": summary.get("dataset_provenance"),
-            "task_pool": summary.get("task_pool"),
+            "task_pool": task_pool,
+            "start_manifest": start_manifest,
         },
         "run": {
             "status": summary.get("status", "unknown"),
             "seed": summary.get("seed"),
             "tasks_attempted": int(summary.get("tasks_attempted", len(tasks)) or 0),
-            "tasks_to_run": int(summary.get("tasks_to_run", len(tasks)) or 0),
+            "tasks_to_run": tasks_to_run,
+            "unique_tasks_attempted": len(first_occurrences),
+            "repeated_attempts": repeated_attempts,
+            "unique_pool_references": unique_pool_references,
+            "revisit_slots": revisit_slots,
             "generations": int(summary.get("generations_run", summary.get("total_generations", 0)) or 0),
             "seconds": sum(_finite(row.get("seconds")) or 0.0 for row in tasks),
             "search_metric": summary.get("search_metric", "metric"),
@@ -266,11 +302,26 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "support_accuracy_mean": _mean(support),
             "support_accuracy_max": max(support) if support else None,
             "support_query_gap_mean": _mean(gaps),
+            "first_occurrence": {
+                "task_count": len(first_occurrences),
+                "held_out_query_count": len(first_held),
+                "held_out_accuracy_mean": _mean(first_held),
+                "held_out_accuracy_max": max(first_held) if first_held else None,
+                "support_count": len(first_support),
+                "support_accuracy_mean": _mean(first_support),
+                "support_accuracy_max": max(first_support) if first_support else None,
+                "support_query_gap_mean": _mean(first_gaps),
+            },
         },
         "outcomes": dict(sorted(outcome_counts.items())),
         "strategies": {
+            # Compatibility aliases retain the pre-attribution report surface; both mean selected.
             "task_usage": dict(sorted(strategy_counts.items())),
             "representations": dict(sorted(representation_counts.items())),
+            "selected_task_usage": dict(sorted(strategy_counts.items())),
+            "selected_representations": dict(sorted(representation_counts.items())),
+            "held_out_task_usage": dict(sorted(report_strategy_counts.items())),
+            "held_out_representations": dict(sorted(report_representation_counts.items())),
             "stage_seconds": dict(sorted(stage_seconds.items())),
             "metrics": {name: {"count": len(values), "mean": _mean(values), "max": max(values)} for name, values in sorted(strategy_metrics.items())},
         },
@@ -280,10 +331,14 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
             "library_hit_count": int(outcome_counts.get("library_hit", 0)),
             "deadline_count": sum(row.get("failure_stage") == "time_budget" for row in tasks),
             "cross_resolution_reuse_count": sum(float((row.get("task_metrics") or {}).get("cross_resolution_reuse", 0.0)) > 0 for row in tasks),
+            "routed_attempt_count": len(routed_rows),
+            "routed_distilled_count": int(counters.get("routed_solved", 0) or 0),
+            "routed_undistillable_count": int(counters.get("routed_undistillable", 0) or 0),
+            "routed_distillation_gap_mean": _mean(distillation_gaps),
         },
         "resources": {
             "events": dict(sorted(resource_events.items())),
-            "counters": summary.get("counters", {}),
+            "counters": counters,
             "dataset": {
                 "pool_load_seconds": _finite((summary.get("task_pool") or {}).get("load_seconds")) if isinstance(summary.get("task_pool"), dict) else None,
                 "task_load_seconds": sum(_finite(row.get("task_load_seconds")) or 0.0 for row in tasks),
@@ -300,7 +355,8 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
         "limitations": [
             "Missing held-out values are excluded from aggregates and rendered as N/A; valid zeroes are retained.",
             "The report is observational and cannot establish causality or matched-baseline superiority.",
-            "Library metadata is index-level only; entry payloads are intentionally not inspected.",
+            "Live end-state library metadata is index-level; the immutable starting identity hashes payload files without decoding them.",
+            "Attempt-weighted aggregates include configured revisits; first-occurrence aggregates count each rung/task identity once.",
         ],
     }
 
@@ -335,13 +391,24 @@ def _markdown(report: dict[str, Any]) -> str:
         ),
         "",
     ]
-    for item in report["provenance"]["files"]:
-        lines.append(f"- `{item['path']}`: `{item['sha256']}` ({item['size']:,} bytes)")
+    lines.extend(f"- `{item['path']}`: `{item['sha256']}` ({item['size']:,} bytes)" for item in report["provenance"]["files"])
     dataset = report["provenance"].get("dataset")
     if isinstance(dataset, dict):
         revision = dataset.get("revision") or "local"
         selection = dataset.get("selection_algorithm") or "unspecified"
         lines.append(f"- Dataset `{dataset.get('source', 'unknown')}` at revision `{revision}`; selection `{selection}`.")
+    start_manifest = report["provenance"].get("start_manifest")
+    if isinstance(start_manifest, dict):
+        code = start_manifest.get("code") or {}
+        library_start = start_manifest.get("library_start") or {}
+        dirty = code.get("git_dirty")
+        dirty_label = "unknown worktree state" if dirty is None else ("dirty worktree" if dirty else "clean worktree")
+        lines.append(f"- Code commit `{code.get('git_commit') or 'unavailable'}`; {dirty_label}.")
+        if library_start.get("entry_count") is not None:
+            lines.append(f"- Starting library: {int(library_start['entry_count'])} entries; content hash `{library_start.get('content_sha256', 'unavailable')}`.")
+        elif library_start.get("reason"):
+            lines.append(f"- Starting library identity unavailable: {library_start['reason']}.")
+    first = quality["first_occurrence"]
     lines.extend(
         [
             "",
@@ -351,7 +418,12 @@ def _markdown(report: dict[str, Any]) -> str:
                 f"Status `{run['status']}`; {run['tasks_attempted']}/{run['tasks_to_run']} tasks; {run['generations']:,} generations; "
                 f"{_display(run['seconds'], 1)} recorded task-seconds. Held-out query accuracy covered {quality['held_out_query_count']} tasks "
                 f"(mean {_display(quality['held_out_accuracy_mean'])}, maximum {_display(quality['held_out_accuracy_max'])}); support accuracy is reported "
-                f"separately (mean {_display(quality['support_accuracy_mean'])}, maximum {_display(quality['support_accuracy_max'])})."
+                f"separately (mean {_display(quality['support_accuracy_mean'])}, maximum {_display(quality['support_accuracy_max'])}). "
+                f"The pool contains {run['unique_pool_references']} unique reference(s); {run['repeated_attempts']} completed attempt(s) are revisits."
+            ),
+            (
+                f"First-occurrence-only quality covers {first['held_out_query_count']}/{first['task_count']} query evaluations "
+                f"(mean {_display(first['held_out_accuracy_mean'])}, maximum {_display(first['held_out_accuracy_max'])})."
             ),
             "",
             "## Per-rung results",
@@ -391,9 +463,13 @@ def _markdown(report: dict[str, Any]) -> str:
             "",
             "## Strategy usage",
             "",
+            "Selected/admission paths:",
+            "",
         ]
     )
-    lines.extend(f"- `{name}`: {count} task record(s)" for name, count in report["strategies"]["task_usage"].items())
+    lines.extend(f"- `{name}`: {count} task record(s)" for name, count in report["strategies"]["selected_task_usage"].items())
+    lines.extend(["", "Held-out evaluated paths:", ""])
+    lines.extend(f"- `{name}`: {count} held-out evaluation(s)" for name, count in report["strategies"]["held_out_task_usage"].items())
     behavior = report["behavior"]
     lines.extend(
         [
@@ -405,6 +481,11 @@ def _markdown(report: dict[str, Any]) -> str:
                 f"and {behavior['library_hit_count']} library-hit outcome(s). Library size moved from {report['storage']['library_start_entries']} to "
                 f"{report['storage']['library_end_entries']} entries, peaked at {report['storage']['library_peak_entries']}, admitted "
                 f"{report['storage']['admissions']} entries, and removed {report['storage']['gc_removed']} during GC."
+            ),
+            (
+                f"Routing was exercised on {behavior['routed_attempt_count']} task(s): {behavior['routed_distilled_count']} distilled result(s), "
+                f"{behavior['routed_undistillable_count']} undistillable result(s), and mean recorded distillation gap "
+                f"{_display(behavior['routed_distillation_gap_mean'])}."
             ),
             "",
             "## Timing and resource events",

@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "complete": true,
+  "dataset": {
+    "source": "Ardea/Icarus-dataset",
+    "revision": "412029ed1b86072a08f47102959d3ebdc9dee766",
+    "selection_algorithm": "shard_round_robin_v1"
+  },
+  "selection": {
+    "rungs": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+    ],
+    "tasks_per_rung": 2,
+    "shuffle": true,
+    "seed": 0
+  },
+  "tasks": [
+    {
+      "rung": 1,
+      "name": "xor",
+      "config": "rung_1",
+      "shard": "rung_1/shard-00000.parquet",
+      "row_index": 0,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 2,
+      "name": "parity.n6.b0",
+      "config": "rung_2",
+      "shard": "rung_2/shard-00000.parquet",
+      "row_index": 2,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 2,
+      "name": "parity.n8.b3",
+      "config": "rung_2",
+      "shard": "rung_2/shard-00000.parquet",
+      "row_index": 8,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 3,
+      "name": "two_spirals",
+      "config": "rung_3",
+      "shard": "rung_3/shard-00000.parquet",
+      "row_index": 0,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 4,
+      "name": "pole.b38",
+      "config": "rung_4",
+      "shard": "rung_4/shard-00000.parquet",
+      "row_index": 38,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 4,
+      "name": "pole.b13",
+      "config": "rung_4",
+      "shard": "rung_4/shard-00000.parquet",
+      "row_index": 13,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 5,
+      "name": "double_pole.b6",
+      "config": "rung_5",
+      "shard": "rung_5/shard-00000.parquet",
+      "row_index": 6,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 5,
+      "name": "double_pole.b32",
+      "config": "rung_5",
+      "shard": "rung_5/shard-00000.parquet",
+      "row_index": 32,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 6,
+      "name": "mnist.b459",
+      "config": "rung_6",
+      "shard": "rung_6/shard-00003.parquet",
+      "row_index": 75,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 6,
+      "name": "mnist.b292",
+      "config": "rung_6",
+      "shard": "rung_6/shard-00002.parquet",
+      "row_index": 36,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 7,
+      "name": "cifar100.b26",
+      "config": "rung_7",
+      "shard": "rung_7/shard-00004.parquet",
+      "row_index": 14,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 7,
+      "name": "cifar100.b487",
+      "config": "rung_7",
+      "shard": "rung_7/shard-00007.parquet",
+      "row_index": 91,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 8,
+      "name": "ecg.b755",
+      "config": "rung_8",
+      "shard": "rung_8/shard-00005.parquet",
+      "row_index": 115,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 8,
+      "name": "ecg.b1285",
+      "config": "rung_8",
+      "shard": "rung_8/shard-00010.parquet",
+      "row_index": 5,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 9,
+      "name": "satellite.b14767",
+      "config": "rung_9",
+      "shard": "rung_9/shard-00115.parquet",
+      "row_index": 47,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 9,
+      "name": "satellite.b1593",
+      "config": "rung_9",
+      "shard": "rung_9/shard-00012.parquet",
+      "row_index": 57,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 10,
+      "name": "ninapro.b2",
+      "config": "rung_10",
+      "shard": "rung_10/shard-00000.parquet",
+      "row_index": 2,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 10,
+      "name": "ninapro.b18",
+      "config": "rung_10",
+      "shard": "rung_10/shard-00000.parquet",
+      "row_index": 18,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 11,
+      "name": "spherical.b639",
+      "config": "rung_11",
+      "shard": "rung_11/shard-00004.parquet",
+      "row_index": 127,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 11,
+      "name": "spherical.b690",
+      "config": "rung_11",
+      "shard": "rung_11/shard-00005.parquet",
+      "row_index": 50,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 12,
+      "name": "cosmic.b432",
+      "config": "rung_12",
+      "shard": "rung_12/shard-00028.parquet",
+      "row_index": 12,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 12,
+      "name": "cosmic.b201",
+      "config": "rung_12",
+      "shard": "rung_12/shard-00013.parquet",
+      "row_index": 6,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 13,
+      "name": "darcy_flow.b14",
+      "config": "rung_13",
+      "shard": "rung_13/shard-00002.parquet",
+      "row_index": 2,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 13,
+      "name": "darcy_flow.b30",
+      "config": "rung_13",
+      "shard": "rung_13/shard-00005.parquet",
+      "row_index": 0,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 14,
+      "name": "psicov.b22",
+      "config": "rung_14",
+      "shard": "rung_14/shard-00019.parquet",
+      "row_index": 0,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 14,
+      "name": "psicov.b53",
+      "config": "rung_14",
+      "shard": "rung_14/shard-00048.parquet",
+      "row_index": 0,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 15,
+      "name": "fsd50k.b761",
+      "config": "rung_15",
+      "shard": "rung_15/shard-00005.parquet",
+      "row_index": 121,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 15,
+      "name": "fsd50k.b7177",
+      "config": "rung_15",
+      "shard": "rung_15/shard-00056.parquet",
+      "row_index": 9,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 16,
+      "name": "deepsea.b41",
+      "config": "rung_16",
+      "shard": "rung_16/shard-00000.parquet",
+      "row_index": 41,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 16,
+      "name": "deepsea.b1916",
+      "config": "rung_16",
+      "shard": "rung_16/shard-00014.parquet",
+      "row_index": 124,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 17,
+      "name": "pgm.train.b15499",
+      "config": "rung_17",
+      "shard": "rung_17/shard-00790.parquet",
+      "row_index": 1,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 17,
+      "name": "pgm.train.b8877",
+      "config": "rung_17",
+      "shard": "rung_17/shard-00474.parquet",
+      "row_index": 15,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 18,
+      "name": "arc.test.9bebae7a",
+      "config": "rung_18",
+      "shard": "rung_18/shard-00004.parquet",
+      "row_index": 127,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    },
+    {
+      "rung": 18,
+      "name": "arc.train.a5f85a15",
+      "config": "rung_18",
+      "shard": "rung_18/shard-00001.parquet",
+      "row_index": 123,
+      "revision": "412029ed1b86072a08f47102959d3ebdc9dee766"
+    }
+  ],
+  "skipped_rungs": []
+}

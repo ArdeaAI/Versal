@@ -23,6 +23,10 @@ Versal is a Python 3.12 evolutionary neural architecture search system. Evolutio
 composition structure; gradient descent trains candidate weights. Every accepted result can enter a
 persistent library, where it becomes a frozen module available to later tasks.
 
+For an implementation-level reading guide, start with
+[the execution walkthrough](ai/walkthrough.md). It follows the live call path through every
+control-flow boundary and ends with a reading order for all 66 Python modules.
+
 The system is evaluated on the 18-rung
 [Icarus dataset](https://huggingface.co/datasets/Ardea/Icarus-dataset), which moves from Boolean
 functions through temporal, image, scientific, audio, and structured-grid problems. Task handling is
@@ -33,19 +37,51 @@ the currently scheduled task is decoded into memory.
 
 ```text
 task
-  → test compatible library entries and refine a hit
+  → build a support-only search view
+  → test compatible library entries and optionally refine a hit
+  → try configured decomposition and recurse under bounded depth/time
   → route frozen experts
   → synthesize from recurring graph grammar
   → evolve a task-shaped network
   → compose reusable modules
-  → decompose difficult tasks and recurse
-  → admit useful results, decay unused routes, and persist state
+  → select an executable parent and update the persistent library
+  → measure held-out query data once for reporting
+  → atomically checkpoint records, topology, scheduler, and library state
 ```
 
 The persistent library is both memory and an expanding structural vocabulary. A solution can be
 reused directly, embedded as a module, assembled into a deeper composition, or selected by the
 learned sparse router. Below-threshold executable champions may also survive as stepping stones so
 that repeated attempts do not always restart from nothing.
+
+### Execution control flow
+
+1. `versal.main:main` parses CLI overrides, loads the inherited TOML config, resolves device and
+   assessment execution policy, starts optional ClearML plumbing, and constructs the trial.
+2. `OrchestratedTrial` creates or resumes the run directory, persistent library, run-local topology
+   tabu, scheduler, reports, display, locks, and rolling checkpoint.
+3. For each scheduled task, the trial gives `Orchestrator.solve` a support-only search view. In
+   blind-query mode, query tensors are unavailable to search, training, admission, and reuse
+   decisions.
+4. The orchestrator tries compatible library lookup, optional refinement, wall reuse, decomposition,
+   and then the registered strategy ladder. Child solves re-enter the same method under depth and
+   wall-clock limits.
+5. The current canary ladder is `routed → grammar → direct → composition`. `field` is a fifth
+   registered and test-backed strategy that can be enabled explicitly for compatible spatial
+   mappings, but it is not in the current canary `evolve` list.
+6. Strategies use the registry-built evolutionary loop: initialize or restore, select, cross,
+   mutate, decode, train, evaluate support metrics, compute novelty/fitness, speciate, and retain the
+   next population.
+7. The chosen executable parent is admitted or retained according to support evidence and library
+   policy. Only after selection may a blind query measurement be taken once for reporting.
+8. The trial atomically writes task records, summaries, reports, library/topology state, and
+   checkpoint state. Escape, deadlines, declines, failures, and resume preserve this boundary
+   discipline.
+
+The complete method is defined by [`configs/canary.toml`](configs/canary.toml); plain `uv run app`
+uses the reduced [`configs/smoke.toml`](configs/smoke.toml) overlay.
+[`runtime_inventory.json`](runtime_inventory.json) is the exhaustive machine-readable registry,
+config, entry-point, and persistent-path surface.
 
 ## July 15, 2026 canary
 

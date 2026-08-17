@@ -27,7 +27,8 @@ def query_accuracy(genome: Genome, metrics: dict[str, float]) -> float:
 @FITNESS.register("complexity_penalty")
 def complexity_penalty(genome: Genome, metrics: dict[str, float]) -> float:
     # Negative so a larger graph lowers fitness; the weight scales the pressure.
-    return -float(metrics.get("expanded_complexity", genome.complexity()))
+    value = metrics.get("expanded_complexity")
+    return -float(genome.complexity() if value is None else value)
 
 
 @FITNESS.register("hidden_penalty")
@@ -92,7 +93,7 @@ def bounded_negative_query_loss(genome: Genome, metrics: dict[str, float]) -> fl
     return 1.0 / (1.0 + max(float(metrics.get("query_loss", 0.0)), 0.0))
 
 
-# --- weight-robustness components (metrics produced by the weight_samples / hybrid evaluate ops) ---
+# weight-robustness components (metrics produced by the weight_samples / hybrid evaluate ops)
 # All default to 0.0 when the metric is absent so a misconfigured combo degrades instead of crashing.
 
 
@@ -143,8 +144,11 @@ def connection_cost(genome: Genome, metrics: dict[str, float]) -> float:
             total += sum((a - b) ** 2 for a, b in zip(source, target))
     # Geometry prices visible wiring. Referenced inner structure has no coordinates in this shell,
     # so add its recursively expanded cost beyond the already-counted local topology.
-    expanded = float(metrics.get("expanded_complexity", genome.complexity()))
-    shell = float(metrics.get("shell_complexity", genome.complexity()))
+    expanded_value = metrics.get("expanded_complexity")
+    shell_value = metrics.get("shell_complexity")
+    shell_complexity = genome.complexity() if expanded_value is None or shell_value is None else 0
+    expanded = float(shell_complexity if expanded_value is None else expanded_value)
+    shell = float(shell_complexity if shell_value is None else shell_value)
     return -(total + max(0.0, expanded - shell))
 
 
@@ -195,8 +199,5 @@ class FitnessAggregator:
 
     def __call__(self, genome: Any, metrics: dict[str, float]) -> float:
         total = sum(weight * component(genome, metrics) for component, weight in self.components)
-        # A candidate whose forward exploded (NaN/inf loss, e.g. a deep recurrent unroll on a
-        # TIME-axis task) is a nonviable phenotype, exactly like an undecodable genome: it scores
-        # the floor and selection buries it. Letting NaN through poisoned speciation's share
-        # arithmetic and crashed the run (rung 8 ecg, 2026-07-05).
+        # Non-finite phenotypes must not enter speciation's share arithmetic.
         return total if math.isfinite(total) else -1e9

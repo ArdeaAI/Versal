@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import os
@@ -16,17 +15,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
+from versal.utils.files import file_sha256
+
 SCHEMA_VERSION = 1
 CONTENT_SCHEMA_VERSION = 2
 ACTIVE_LOCK_NAME = ".versal-active.lock"
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -217,47 +210,6 @@ def _snapshot_files(run_dir: Path, library_dir: Path) -> list[tuple[str, Path]]:
     return files
 
 
-def build_snapshot(run_dir: Path, library_dir: Path, destination: Path, *, snapshot_id: str, task_cursor: int, status: str) -> dict[str, Any]:
-    """Build one immutable payload and its per-file manifest while the caller holds a task boundary."""
-
-    files = _snapshot_files(run_dir, library_dir)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(destination, "w:gz", compresslevel=6) as archive:
-        for name, path in files:
-            archive.add(path, arcname=name, recursive=False)
-    # Derive member metadata from the immutable payload, not the mutable sources. A file changing
-    # during archive.add can never publish a manifest that describes different bytes than the tar.
-    entries: list[dict[str, Any]] = []
-    with tarfile.open(destination, "r:gz") as archive:
-        for member in archive.getmembers():
-            if not member.isfile():
-                continue
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                raise ValueError(f"snapshot member is unreadable: {member.name}")
-            digest = hashlib.sha256()
-            size = 0
-            for block in iter(lambda: extracted.read(1024 * 1024), b""):
-                size += len(block)
-                digest.update(block)
-            if size != member.size:
-                raise ValueError(f"snapshot member changed while archived: {member.name}")
-            entries.append({"path": member.name, "size": size, "sha256": digest.hexdigest()})
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "snapshot_id": snapshot_id,
-        "created_unix": time.time(),
-        "task_cursor": int(task_cursor),
-        "status": status,
-        "run_name": run_dir.name,
-        "library_name": library_dir.name,
-        "payload": "snapshot.tar.gz",
-        "payload_size": destination.stat().st_size,
-        "payload_sha256": _sha256(destination),
-        "files": entries,
-    }
-
-
 def build_content_snapshot(
     run_dir: Path,
     library_dir: Path,
@@ -277,7 +229,7 @@ def build_content_snapshot(
     for ordinal, (name, source) in enumerate(_snapshot_files(run_dir, library_dir)):
         stable = staging / f"{ordinal:08d}"
         shutil.copyfile(source, stable)
-        digest = _sha256(stable)
+        digest = file_sha256(stable)
         size = stable.stat().st_size
         object_key = f"objects/sha256/{digest[:2]}/{digest}"
         if store.list_keys(object_key):
@@ -302,7 +254,7 @@ def build_content_snapshot(
         "library_name": library_dir.name,
         "payload": "snapshot.tar.gz",
         "payload_size": destination.stat().st_size,
-        "payload_sha256": _sha256(destination),
+        "payload_sha256": file_sha256(destination),
         "files": entries,
         "objects_uploaded": uploaded,
         "objects_reused": reused,
@@ -533,7 +485,7 @@ def restore_snapshot(uri: str, destination: Path, *, run_key: str, snapshot_id: 
     with tempfile.TemporaryDirectory(prefix="versal_restore_") as temporary:
         payload = Path(temporary) / "snapshot.tar.gz"
         store.get_file(f"runs/{run_key}/snapshots/{snapshot_id}/snapshot.tar.gz", payload)
-        actual_payload_hash = _sha256(payload)
+        actual_payload_hash = file_sha256(payload)
         if actual_payload_hash != manifest["payload_sha256"]:
             raise ValueError(f"snapshot payload hash mismatch: expected {manifest['payload_sha256']}, got {actual_payload_hash}")
         if payload.stat().st_size != int(manifest["payload_size"]):
@@ -557,7 +509,7 @@ def restore_snapshot(uri: str, destination: Path, *, run_key: str, snapshot_id: 
             raise ValueError("snapshot member list does not match manifest")
         for entry in manifest["files"]:
             path = extracted / PurePosixPath(entry["path"])
-            if not path.is_file() or path.stat().st_size != int(entry["size"]) or _sha256(path) != entry["sha256"]:
+            if not path.is_file() or path.stat().st_size != int(entry["size"]) or file_sha256(path) != entry["sha256"]:
                 raise ValueError(f"snapshot member verification failed: {entry['path']}")
         if not verify_only:
             if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):

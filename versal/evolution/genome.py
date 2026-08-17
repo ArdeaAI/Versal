@@ -141,7 +141,7 @@ class Genome:
     def complexity(self) -> int:
         """Structural cost: enabled edges plus hidden nodes plus macro placements. The m macro
         output stubs already count as hidden nodes; the +1 per macro prices the placement itself."""
-        return len(self.enabled_connections()) + len(self.hidden_ids) + len(self.macros)
+        return sum(connection.enabled for connection in self.connections) + sum(node.kind is NodeKind.HIDDEN for node in self.nodes.values()) + len(self.macros)
 
     def max_node_id(self) -> int:
         return max(self.nodes) if self.nodes else -1
@@ -193,10 +193,7 @@ def would_create_cycle(genome: Genome, in_id: int, out_id: int) -> bool:
 
     A cycle appears iff `out_id` can already reach `in_id` along enabled forward edges (or they are
     equal). Recurrent edges are time-delayed and never participate. Single-shot form with an
-    early-exit BFS; batch callers (the geometry mutators) use `ForwardReachability`, and
-    `make_acyclic` maintains its own incremental adjacency: wrapping this around a per-call
-    `ForwardReachability` was measured as a constructor/GC storm on the module-pool advance
-    (2026-07-05, the second parity wedge)."""
+    early-exit BFS. Batch callers should reuse `ForwardReachability` to avoid rebuilding the graph."""
     if in_id == out_id:
         return True
     adjacency: dict[int, list[int]] = {}
@@ -337,10 +334,6 @@ def set_connection(genome: Genome, target: ConnectionGene) -> None:
             genome.connections[index] = target
             return
     genome.connections.append(target)
-
-
-def with_connection_weight(conn: ConnectionGene, weight: float) -> ConnectionGene:
-    return replace(conn, weight=weight)
 
 
 def make_acyclic(genome: Genome) -> Genome:

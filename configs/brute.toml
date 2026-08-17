@@ -1,7 +1,7 @@
 extends = "canary.toml"
 
 # Deep capability test for one task family. Change only `rungs` to retarget it; the shared library
-# lets repeated assaults compound. Twenty two-hour tasks cap the run at about 40 hours.
+# lets repeated assaults compound. Two hundred ten-minute tasks cap the run at about 33 hours.
 
 [run]
 experiment = "orchestrated_overmind_brute"
@@ -10,21 +10,21 @@ experiment = "orchestrated_overmind_brute"
 n_samples = 400
 
 [schedule]
-rungs = [1]
-tasks_per_rung = 2000
+rungs = [18]
+tasks_per_rung = 200
 
 [orchestrator]
-tasks = 2000
-max_task_seconds = 7200
-max_total_task_seconds = 7200
+tasks = 200
+max_task_seconds = 400
+max_total_task_seconds = 600
 
   [orchestrator.budgets]
-  depth0 = 2000
-  depth1 = 1000
-  depth2 = 500
-  depth3 = 250
-  depth4 = 125
-  depth5 = 62
-  depth6 = 31
-  depth7 = 15
-  depth8 = 7
+  depth0 = 400
+  depth1 = 360
+  depth2 = 320
+  depth3 = 240
+  depth4 = 160
+  depth5 = 80
+  depth6 = 40
+  depth7 = 20
+  depth8 = 10

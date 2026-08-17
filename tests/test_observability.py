@@ -86,6 +86,26 @@ def test_literal_accuracy_round_trip_distinguishes_zero_from_missing() -> None:
     assert legacy.support_status == "legacy_missing" and "support_accuracy" not in legacy.to_dict()
 
 
+def test_report_candidate_identity_round_trips_separately_from_selected_path() -> None:
+    attempt = Attempt(
+        task="ninapro.b2",
+        depth=0,
+        outcome="evolved",
+        metric=0.98,
+        generations=14,
+        strategy="direct",
+        representation="explicit_flat/cppn",
+        report_metric=0.77,
+        report_strategy="routed",
+        report_representation="routed",
+    )
+
+    restored = Attempt.from_dict(attempt.to_dict())
+
+    assert restored.strategy == "direct" and restored.representation == "explicit_flat/cppn"
+    assert restored.report_strategy == "routed" and restored.report_representation == "routed"
+
+
 def test_diagnostic_observation_round_trips_without_becoming_parent_accuracy() -> None:
     diagnostic = {"score": 0.618, "metric": "router_score", "task": "darcy.h0", "depth": 1, "strategy": "routed", "executable": False}
     attempt = Attempt(
@@ -125,6 +145,33 @@ def test_run_summary_row_carries_sample_metrics(tmp_path: Path, xor_task: Task) 
     trial._record_task(entry, Attempt(task=entry.name, depth=0, outcome="failed", metric=0.5, generations=3), [], 0)
     assert trial.task_records[0]["sample_metrics"] == diagnostics
     assert "sample_metrics" not in trial.task_records[1]
+
+
+def test_task_rows_mark_revisits_and_preserve_report_attribution(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    entry = task_entry(xor_task)
+    attempt = Attempt(
+        task=entry.name,
+        depth=0,
+        outcome="evolved",
+        metric=1.0,
+        generations=2,
+        strategy="direct",
+        representation="explicit_flat/cppn",
+        report_metric=0.75,
+        report_strategy="routed",
+        report_representation="routed",
+    )
+
+    trial._record_task(entry, attempt, [], 0)
+    trial._record_task(entry, attempt, [], 0)
+
+    first, second = trial.task_records
+    assert (first["task_occurrence"], first["is_repeat"]) == (1, False)
+    assert (second["task_occurrence"], second["is_repeat"]) == (2, True)
+    assert first["strategy"] == "direct" and first["representation"] == "explicit_flat/cppn"
+    assert first["report_strategy"] == "routed" and first["report_representation"] == "routed"
 
 
 def test_attempt_size_metrics_round_trip_and_absent_when_empty() -> None:
@@ -247,7 +294,18 @@ def test_run_summary_carries_streaming_pool_provenance_and_loading_metrics(tmp_p
 
     summary = json.loads((trial.run_dir / "run_summary.json").read_text())
     assert summary["dataset_provenance"] == trial.dataset_provenance
-    assert summary["task_pool"] == {"path": "task_pool.json", "schema_version": 1, "ready": True, "entries": 1, "load_seconds": 1.25}
+    assert summary["task_pool"] == {
+        "path": "task_pool.json",
+        "schema_version": 1,
+        "ready": True,
+        "entries": 1,
+        "unique_references": 1,
+        "scheduled_attempts": 10,
+        "revisit_slots": 9,
+        "unique_tasks_attempted": 0,
+        "repeated_attempts": 0,
+        "load_seconds": 1.25,
+    }
 
 
 def test_task_switch_releases_raw_payload_before_worker_barrier(tmp_path: Path, xor_task: Task, monkeypatch) -> None:
@@ -352,7 +410,7 @@ def test_interruption_history_is_separate_and_keeps_task_retryable(tmp_path: Pat
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
     trial.interruptions = []
-    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve network", provisional_support=0.75))
+    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve dense network", provisional_support=0.75))
     entry = task_entry(xor_task)
     trial._record_interruption(entry, task_cursor=0, error=RuntimeError("boom"), elapsed=2.5)
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: RuntimeError: boom")
@@ -437,6 +495,50 @@ def test_new_run_snapshots_exact_config_bytes(tmp_path: Path) -> None:
     assert effective["seed"] == 9 and effective["orchestrator"]["library_dir"] == "override"
     effective_hash = hashlib.sha256((trial.run_dir / "config.effective.json").read_bytes()).hexdigest()
     assert (trial.run_dir / "config.effective.json.sha256").read_text() == f"{effective_hash}  config.effective.json\n"
+    assert trial.config_effective_file_sha256 == effective_hash
+
+
+def test_run_manifest_freezes_starting_code_library_and_pool_identity(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    trial.resume_dir = None
+    trial.pool = [task_entry(xor_task)]
+    trial.library.root.mkdir(parents=True, exist_ok=True)
+    durable = trial.library.root / "grammar" / "grammar.json"
+    durable.parent.mkdir(parents=True)
+    durable.write_text('{"version": 1}\n')
+
+    trial._capture_or_load_run_manifest()
+    original = (trial.run_dir / "run_manifest.json").read_bytes()
+    manifest = json.loads(original)
+
+    assert manifest["schema_version"] == 1
+    assert manifest["code"]["git_commit"] is None or len(manifest["code"]["git_commit"]) == 40
+    assert isinstance(manifest["code"]["git_dirty"], bool)
+    assert manifest["library_start"]["entry_count"] == 0
+    assert manifest["library_start"]["file_count"] == 1
+    assert manifest["task_pool"] == {"unique_references": 1, "scheduled_attempts": 10, "revisit_slots": 9}
+
+    durable.write_text('{"version": 2}\n')
+    trial._capture_or_load_run_manifest()
+    assert (trial.run_dir / "run_manifest.json").read_bytes() == original
+
+    trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="running")
+    summary = json.loads((trial.run_dir / "run_summary.json").read_text())
+    assert summary["run_manifest"]["sha256"] == hashlib.sha256(original).hexdigest()
+
+
+def test_legacy_resume_manifest_does_not_mislabel_current_library_as_start(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _orchestrator(tmp_path)
+    trial = _trial(tmp_path, orchestrator)
+    trial.resume_dir = str(trial.run_dir)
+    trial.pool = [task_entry(xor_task)]
+
+    trial._capture_or_load_run_manifest()
+
+    manifest = json.loads((trial.run_dir / "run_manifest.json").read_text())
+    assert manifest["legacy_resume"] is True
+    assert manifest["library_start"] == {"available": False, "reason": "original run predates immutable provenance"}
 
 
 def test_require_all_rungs_gates_deferred_pool_load(tmp_path: Path, xor_task: Task, monkeypatch) -> None:

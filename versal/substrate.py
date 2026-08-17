@@ -25,9 +25,7 @@ from versal.reference_depth import DEFAULT_MAX_INLINE_DEPTH
 
 
 def _gaussian(value: torch.Tensor) -> torch.Tensor:
-    # A named function, not a lambda: decoded nets store this callable in activation_groups, and
-    # the composition assess pool pickles whole trained nets back from workers (lambdas cannot
-    # pickle by reference; the 2026-07-05 diag_g0 crash).
+    # Worker processes pickle activation callables by reference, so this cannot be a lambda.
     return torch.exp(-value * value)
 
 
