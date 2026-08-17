@@ -117,14 +117,19 @@ _PAD = 0.9
 _CALLOUT_GAP = 1.4  # vertical clearance between the host network and the callout band
 _NETWORK_ANCHOR_INSET = 0.3
 _MAX_COLUMN_NODES = 64  # a layer taller than this wraps into a near-square block of sub-columns
-_MAX_STRAIGHT_EDGES = 60_000  # classic failure-fallback cap; the normal Datashader path includes all
-_MAX_CURVED_EDGES = 2_000  # classic failure-fallback cap; FancyArrowPatch is one artist per edge
-_DENSITY_WIDTH = 2400
-_DENSITY_HEIGHT = 1600
+_MAX_STRAIGHT_EDGES = 60_000  # line-collection ceiling before a scene becomes a density portrait
+_MAX_CURVED_EDGES = 2_000  # FancyArrowPatch is one artist per curve; larger scenes use density
+_DENSITY_WIDTH = 4800
+_DENSITY_HEIGHT = 3200
 _DENSITY_EDGE_CHUNK = 250_000
 _EXPLICIT_EDGE_LIMIT = 512
-_HYBRID_MAX_RASTER_DIMENSION = 2400
-_HYBRID_MAX_RASTER_PIXELS = 2400 * 1600
+_HYBRID_MAX_RASTER_DIMENSION = 4800
+_HYBRID_MAX_RASTER_PIXELS = 4800 * 3200
+_RENDER_DPI = 300
+_MAX_RENDER_PIXELS = 36_000_000
+
+_FEED_EDGE_ROLES = frozenset({"routing-entry", "routing-exit"})
+_ROUTING_EDGE_ROLES = frozenset({"routing-observed", "routing-potential"})
 
 ResolveFn = Callable[[str], LibraryEntry | None]
 
@@ -865,32 +870,45 @@ def _rasterized_spec_edges(
     import pandas as pd
 
     canvas = ds.Canvas(plot_width=max(pixel_width, 2), plot_height=max(pixel_height, 2), x_range=x_range, y_range=y_range)
-    layers: dict[str, Any] = {}
-    rows: dict[str, list[tuple[float, float, float, float, float]]] = {}
+    layers: dict[tuple[str, int], Any] = {}
+    rows: dict[tuple[str, int], list[tuple[float, float, float, float, float]]] = {}
     pending_segments = 0
 
     def flush() -> None:
         nonlocal pending_segments
-        for color, color_rows in rows.items():
+        for visual, color_rows in rows.items():
             if not color_rows:
                 continue
             frame = pd.DataFrame(color_rows, columns=["x0", "y0", "x1", "y1", "weight"])
-            layers[color] = _accumulate_density_lines(canvas, frame, ds, np, layers.get(color))
+            layers[visual] = _accumulate_density_lines(canvas, frame, ds, np, layers.get(visual))
         rows.clear()
         pending_segments = 0
 
     for edge in spec.edges:
+        alpha = max(0.0, min(float(edge.alpha), 1.0))
+        if alpha <= 0.0:
+            continue
         magnitude = edge.magnitude if math.isfinite(edge.magnitude) else 0.0
         # Zero-weight structural edges must remain visible, but never dominate weighted density.
         weight = max(abs(magnitude), 0.05)
         segments = _edge_segments(edge)
-        rows.setdefault(edge.color, []).extend((*segment, weight) for segment in segments)
+        visual = (edge.color, round(alpha * 255))
+        rows.setdefault(visual, []).extend((*segment, weight) for segment in segments)
         pending_segments += len(segments)
         if pending_segments >= _DENSITY_EDGE_CHUNK:
             flush()
     flush()
 
-    shaded = [tf.shade(layer.where(layer > 0.0), cmap=[color, color], how="log", min_alpha=32, alpha=205) for color, layer in layers.items()]
+    shaded = [
+        tf.shade(
+            layer.where(layer > 0.0),
+            cmap=[color, color],
+            how="log",
+            min_alpha=max(1, round(alpha_byte * 0.16)),
+            alpha=alpha_byte,
+        )
+        for (color, alpha_byte), layer in layers.items()
+    ]
     if not shaded:
         return np.zeros((max(pixel_height, 2), max(pixel_width, 2), 4), dtype=np.uint8), 0
     return np.asarray(tf.stack(*shaded, how="over").to_pil()), len(spec.edges)
@@ -933,7 +951,7 @@ def _rasterized_spec_nodes(
     return np.asarray(tf.stack(*shaded, how="over").to_pil())
 
 
-def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) -> None:
+def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool, zorder: float = 2.2) -> None:
     """Crisp semantic overlay for small scenes and a resilient fallback if rasterization fails."""
     from matplotlib import colors as mcolors
     from matplotlib.collections import LineCollection
@@ -946,19 +964,19 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                     (edge.x0, edge.y0),
                     (edge.x1, edge.y1),
                     connectionstyle=f"arc3,rad={edge.curve}",
-                    color=mcolors.to_rgba(edge.color, min(edge.alpha + 0.12, 0.9)),
+                    color=mcolors.to_rgba(edge.color, edge.alpha),
                     linewidth=edge.width,
                     linestyle=edge.style,
                     arrowstyle="-|>",
                     mutation_scale=5.0,
                     shrinkA=1.5,
                     shrinkB=1.5,
-                    zorder=2.2,
+                    zorder=zorder,
                 )
             )
         return
 
-    # Failure fallback only: cap Matplotlib work while retaining an honest note in the caller.
+    # Medium scenes use collections directly; the same caps keep failure fallback bounded.
     straight = [edge for edge in edges if edge.curve == 0.0][:_MAX_STRAIGHT_EDGES]
     curved = [edge for edge in edges if edge.curve != 0.0][:_MAX_CURVED_EDGES]
     for style in ("solid", "dashed"):
@@ -970,7 +988,7 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                     colors=[mcolors.to_rgba(edge.color, edge.alpha) for edge in group],
                     linewidths=[edge.width for edge in group],
                     linestyle=style,
-                    zorder=2,
+                    zorder=zorder,
                 )
             )
     for edge in curved:
@@ -983,7 +1001,7 @@ def _draw_classic_edges(axis: Any, edges: list[SpecEdge], *, directional: bool) 
                 linewidth=edge.width,
                 linestyle=edge.style,
                 arrowstyle="-",
-                zorder=2,
+                zorder=zorder,
             )
         )
 
@@ -1051,8 +1069,8 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
     y_range = (-_PAD, spec.height + _PAD)
     raw_pixel_width = max(64, int(fig_w * figure.dpi))
     raw_pixel_height = max(64, int(fig_h * figure.dpi))
-    max_raster_dimension = 1200 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_DIMENSION
-    max_raster_pixels = 1200 * 800 if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT else _HYBRID_MAX_RASTER_PIXELS
+    max_raster_dimension = _HYBRID_MAX_RASTER_DIMENSION
+    max_raster_pixels = _HYBRID_MAX_RASTER_PIXELS
     raster_scale = min(
         1.0,
         max_raster_dimension / raw_pixel_width,
@@ -1061,14 +1079,65 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
     )
     pixel_width = max(64, int(raw_pixel_width * raster_scale))
     pixel_height = max(64, int(raw_pixel_height * raster_scale))
+    feed_edges = [edge for edge in spec.edges if edge.role in _FEED_EDGE_ROLES]
+    routing_edges = [edge for edge in spec.edges if edge.role in _ROUTING_EDGE_ROLES]
+    legend_edges = [edge for edge in spec.edges if edge.role == "legend"]
+    network_edges = [edge for edge in spec.edges if edge.role not in _FEED_EDGE_ROLES | _ROUTING_EDGE_ROLES and edge.role != "legend"]
+    rendered_edges = 0
+    edge_note = ""
+    straight_count = sum(edge.curve == 0.0 for edge in network_edges)
+    curved_count = len(network_edges) - straight_count
+    rasterize_feeds = len(feed_edges) > _EXPLICIT_EDGE_LIMIT
+    rasterize_network = len(network_edges) > _EXPLICIT_EDGE_LIMIT and (straight_count > _MAX_STRAIGHT_EDGES or curved_count > _MAX_CURVED_EDGES)
     try:
-        edge_image, rendered_edges = _rasterized_spec_edges(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
-        axis.imshow(edge_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2)
-        node_image = _rasterized_spec_nodes(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
-        if node_image is not None:
-            axis.imshow(node_image, extent=(*x_range, *y_range), origin="upper", interpolation="nearest", aspect="auto", zorder=2.6)
-        if len(spec.edges) <= _EXPLICIT_EDGE_LIMIT:
-            _draw_classic_edges(axis, spec.edges, directional=True)
+        feed_image = None
+        rasterized_feeds = 0
+        if rasterize_feeds:
+            feed_image, rasterized_feeds = _rasterized_spec_edges(
+                RenderSpec(edges=feed_edges),
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                x_range=x_range,
+                y_range=y_range,
+            )
+        edge_image = None
+        rasterized_edges = 0
+        if rasterize_network:
+            raster_spec = RenderSpec(edges=network_edges)
+            edge_image, rasterized_edges = _rasterized_spec_edges(
+                raster_spec,
+                pixel_width=pixel_width,
+                pixel_height=pixel_height,
+                x_range=x_range,
+                y_range=y_range,
+            )
+
+        if feed_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(feed_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=1.8)
+            rendered_edges += rasterized_feeds
+        elif feed_edges:
+            _draw_classic_edges(axis, feed_edges, directional=len(feed_edges) <= _EXPLICIT_EDGE_LIMIT, zorder=1.8)
+            rendered_edges += len(feed_edges)
+
+        if len(network_edges) <= _EXPLICIT_EDGE_LIMIT:
+            _draw_classic_edges(axis, network_edges, directional=True, zorder=2.2)
+            rendered_edges += len(network_edges)
+        elif not rasterize_network:
+            _draw_classic_edges(axis, network_edges, directional=False, zorder=2.2)
+            rendered_edges += len(network_edges)
+        elif edge_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(edge_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=2)
+            rendered_edges += rasterized_edges
+
+        if routing_edges:
+            _draw_classic_edges(axis, routing_edges, directional=len(routing_edges) <= _EXPLICIT_EDGE_LIMIT, zorder=2.4)
+            rendered_edges += len(routing_edges)
+        if legend_edges:
+            _draw_classic_edges(axis, legend_edges, directional=True, zorder=3.2)
+            rendered_edges += len(legend_edges)
+
         edge_note = f"all {rendered_edges:,} scene edges included"
     except Exception as error:
         from versal.utils.logging import Logger
@@ -1078,6 +1147,16 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
         _draw_classic_edges(axis, spec.edges, directional=len(spec.edges) <= _EXPLICIT_EDGE_LIMIT)
         edge_note = f"classic fallback showing {rendered_edges:,} of {len(spec.edges):,} scene edges"
         axis.text(0.005, 0.005, "Datashader unavailable; classic fallback", transform=axis.transAxes, fontsize=6, color=THEME["label"], ha="left", va="bottom", zorder=5)
+
+    try:
+        node_image = _rasterized_spec_nodes(spec, pixel_width=pixel_width, pixel_height=pixel_height, x_range=x_range, y_range=y_range)
+        if node_image is not None:
+            interpolation = "nearest" if raster_scale == 1.0 else "bilinear"
+            axis.imshow(node_image, extent=(*x_range, *y_range), origin="upper", interpolation=interpolation, aspect="auto", zorder=2.6)
+    except Exception as error:
+        from versal.utils.logging import Logger
+
+        Logger.get_logger().warning("hybrid Datashader node layer failed: %s: %s", type(error).__name__, error)
 
     pixels_per_unit = min(fig_w * 72 / max(spec.width, 1e-6), fig_h * 72 / max(spec.height, 1e-6))
     base_area = min(max((0.5 * pixels_per_unit) ** 2, 16.0), 700.0)
@@ -1116,17 +1195,28 @@ def draw_spec(axis: Any, spec: RenderSpec, *, title: str | None = None, x_paddin
         axis.set_title(title, fontsize=11, color=THEME["title"])
 
 
-def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int = 150, x_padding: float = _PAD) -> Path:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+def _render_figure_size(spec: RenderSpec, dpi: int) -> tuple[float, float]:
+    """Aspect-aware figure inches with a hard final-canvas memory bound."""
     # Aspect-preserving sizing: clipping each side independently used to hand a tall-narrow spec a
     # square figure, and set_aspect("equal") filled the rest with dead background.
     scale = min(1.0, 30.0 / (0.6 * max(spec.width, spec.height, 1e-6)))
     fig_w = max(spec.width * 0.6 * scale, 4.0)
     fig_h = max(spec.height * 0.6 * scale, 4.0)
+    pixel_count = fig_w * fig_h * dpi * dpi
+    if pixel_count > _MAX_RENDER_PIXELS:
+        pixel_scale = math.sqrt(_MAX_RENDER_PIXELS / pixel_count)
+        fig_w *= pixel_scale
+        fig_h *= pixel_scale
+    return fig_w, fig_h
+
+
+def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int = _RENDER_DPI, x_padding: float = _PAD) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig_w, fig_h = _render_figure_size(spec, dpi)
     temporary = _temporary_sibling(out_path)
     figure, axis = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
     try:
@@ -2485,9 +2575,54 @@ def _overmind_legend_entries(*, traffic_observed: bool = True) -> list[tuple[str
             {"color": THEME["edge_pathway"], "curve": 0.25},
             "routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)",
         ),
-        ("edge", {"color": THEME["edge_entry"]}, "input feed (step-0 gate mass)"),
-        ("edge", {"color": THEME["edge_exit"]}, "output feed (final-step gate mass)"),
+        ("edge", {"color": THEME["edge_entry"], "alpha": 0.6}, "input feed (step-0 gate mass)"),
+        ("edge", {"color": THEME["edge_exit"], "alpha": 0.6}, "output feed (final-step gate mass)"),
     ]
+
+
+def _adaptive_overmind_legend_entries(
+    children: list[_Built],
+    view: OvermindView,
+    *,
+    traffic_observed: bool,
+) -> list[tuple[str, dict[str, Any], str]]:
+    """Return only legend rows represented by the focused current-only portrait."""
+    nodes = [node for child in children for node in child.spec.nodes]
+    edges = [edge for child in children for edge in child.spec.edges]
+    node_roles = {node.role for node in nodes}
+    edge_roles = {edge.role for edge in edges}
+    hidden_colors = {node.color for node in nodes if node.role == "hidden"}
+    labels = {"input", "output"}
+    if "bias" in node_roles:
+        labels.add("bias")
+    if hidden_colors:
+        labels.add("hidden (early layer)")
+    if len(hidden_colors) > 1:
+        labels.add("hidden (deep layer)")
+    if any(node.marker == "D" for node in nodes):
+        labels.add("product gate")
+    if node_roles & {"macro-footprint", "module-footprint"}:
+        labels.add("module ref / macro footprint")
+    if view.vertices:
+        labels.add("network input anchor")
+        labels.update({"input feed (step-0 gate mass)", "output feed (final-step gate mass)"})
+    if "isolated" in node_roles:
+        labels.add("isolated (unused)")
+    if any(child.opaque for child in children):
+        labels.add("retired or unexpanded network")
+    if any(role.startswith("forward") for role in edge_roles):
+        labels.add("forward connection")
+    if "recurrent" in edge_roles:
+        labels.add("recurrent (time-delayed)")
+    if "macro-implied" in edge_roles:
+        labels.add("macro implied wiring")
+    if any(role.startswith("composition-glue") for role in edge_roles):
+        labels.add("composition glue")
+    if "nested-network" in edge_roles:
+        labels.add("nested-network flow")
+    if view.pathways:
+        labels.add("routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)")
+    return [entry for entry in _overmind_legend_entries(traffic_observed=traffic_observed) if entry[2] in labels]
 
 
 def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tuple[str, dict[str, Any], str]]) -> float:
@@ -2511,7 +2646,7 @@ def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tu
                     color=params["color"],
                     style=params.get("style", "solid"),
                     curve=params.get("curve", 0.0),
-                    alpha=0.9,
+                    alpha=params.get("alpha", 0.9),
                     role="legend",
                 )
             )
@@ -2532,6 +2667,7 @@ def build_overmind_spec(
     cell_node_budget: int = 160,
     columns: int = _OVERMIND_COLUMNS,
     legend: bool = True,
+    legend_mode: str = "full",
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
 ) -> RenderSpec:
     """The whole routed model as a top-down flow portrait: input adapters band across the TOP, every
@@ -2598,15 +2734,24 @@ def build_overmind_spec(
     grid_width = max([*row_widths, 8.0])
     grid_height = sum(row_heights) + _ROW_GAP * max(len(rows) - 1, 0)
 
-    legend_entries = _overmind_legend_entries(traffic_observed=view.traffic_observed) if legend else []
+    legend_entries = (
+        _adaptive_overmind_legend_entries(children, view, traffic_observed=view.traffic_observed)
+        if legend and legend_mode == "adaptive"
+        else (_overmind_legend_entries(traffic_observed=view.traffic_observed) if legend else [])
+    )
     legend_height = 2.2 + _LEGEND_ROW_STEP * math.ceil(len(legend_entries) / _LEGEND_COLUMNS)
-    total_height = max(2 * (_BAND_H + _BAND_GAP) + grid_height, legend_height)
+    core_height = 2 * (_BAND_H + _BAND_GAP) + grid_height
+    legend_below = bool(legend_entries) and legend_mode == "adaptive" and grid_width < _LEGEND_WIDTH
+    content_y_shift = legend_height + _ROW_GAP if legend_below else 0.0
+    content_x_shift = (_LEGEND_WIDTH - grid_width) / 2 if legend_below else 0.0
+    total_height = core_height + content_y_shift if legend_below else max(core_height, legend_height)
 
     bottoms: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
     anchors: list[tuple[float, float]] = [(0.0, 0.0)] * len(children)
-    y_cursor = total_height - _BAND_H - _BAND_GAP  # y-up frame: the top rail of the first row
+    content_top = content_y_shift + core_height
+    y_cursor = content_top - _BAND_H - _BAND_GAP  # y-up frame: the top rail of the first row
     for row, row_height, row_width in zip(rows, row_heights, row_widths):
-        x_cursor = (grid_width - row_width) / 2
+        x_cursor = content_x_shift + (grid_width - row_width) / 2
         for i in row:
             box_w, box_h = boxes[i]
             cx, cy = x_cursor + box_w / 2, y_cursor - box_h / 2  # top-aligned: a clean rail for input feeds
@@ -2623,14 +2768,14 @@ def build_overmind_spec(
     def _band(signatures: list[str], y: float, color: str) -> list[tuple[float, float]]:
         placed: list[tuple[float, float]] = []
         for index, signature in enumerate(signatures):
-            x = grid_width * (index + 1) / (len(signatures) + 1)
+            x = content_x_shift + grid_width * (index + 1) / (len(signatures) + 1)
             spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="s", role="input-adapter" if color == THEME["node_input"] else "output-head"))
             spec.texts.append(SpecText(x, y - 0.45, signature, size=6.0, ha="center", va="top"))
             placed.append((x, y))
         return placed
 
-    input_positions = _band(inputs, total_height - 0.5, THEME["node_input"])
-    output_positions = _band(outputs, 0.5, THEME["node_output"])
+    input_positions = _band(inputs, content_top - 0.5, THEME["node_input"])
+    output_positions = _band(outputs, content_y_shift + 0.5, THEME["node_output"])
 
     def _outputs(index: int) -> list[tuple[float, float]]:
         rendered = children[index].output_nodes
@@ -2645,7 +2790,7 @@ def build_overmind_spec(
         vertex = view.vertices[index]
         entry_width = 0.8 if uniform else (_edge_width(vertex.entry_share * 3) if vertex.entry_share > 0.0 else 0.0)
         exit_width = 0.8 if uniform else (_edge_width(vertex.exit_share * 3) if vertex.exit_share > 0.0 else 0.0)
-        alpha = 0.2 if uniform else 0.35
+        alpha = 0.6
         if entry_width > 0.0:
             for x, y in input_positions:
                 spec.edges.append(
@@ -2703,8 +2848,10 @@ def build_overmind_spec(
                 )
             )
 
-    spec.width = grid_width
-    if legend:
+    spec.width = max(grid_width, _LEGEND_WIDTH) if legend_below else grid_width
+    if legend_below:
+        _overmind_legend(spec, 0.0, legend_height - 0.4, legend_entries)
+    elif legend:
         spec.width = grid_width + 2 * _H_GAP + _overmind_legend(spec, grid_width + 2 * _H_GAP, total_height - 0.5, legend_entries)
     spec.height = total_height
     spec.flow_label = (
@@ -2739,7 +2886,7 @@ def render_overmind(
     if not out_path.stem.endswith("_pruned"):
         pruned_path = out_path.with_name(f"{out_path.stem}_pruned{out_path.suffix}")
         pruned = prune_overmind_view(view)
-        pruned_spec = build_overmind_spec(pruned, resolve=resolve, node_budget=node_budget, max_inline_depth=max_inline_depth)
+        pruned_spec = build_overmind_spec(pruned, resolve=resolve, node_budget=node_budget, legend_mode="adaptive", max_inline_depth=max_inline_depth)
         pruned_title = f"overmind current: {len(pruned.vertices)} experts, d_model={view.d_model}, top_k={view.top_k}, steps={view.max_steps}"
         _render_spec_png(pruned_path, pruned_spec, pruned_title, dpi=_OVERMIND_DPI, x_padding=_OVERMIND_X_PADDING)
     return rendered

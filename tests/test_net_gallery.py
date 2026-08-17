@@ -12,7 +12,7 @@ import versal.routing as routing
 from versal.evolution.genome import Genome, genome_to_dict
 from versal.library import MODULE, ModuleLibrary
 from versal.tools import net_gallery
-from versal.tools.net_gallery import render_all_entries
+from versal.tools.net_gallery import refresh_results_run, render_all_entries
 
 _FIXTURE_LIBRARY = Path(__file__).parent / "fixtures" / "library_v1"
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
@@ -47,6 +47,55 @@ def test_render_all_entries_filters_retired(tmp_path: Path, solving_genome: Geno
     assert [row["key"] for row in rows] == [kept]
     rows_all = render_all_entries(library, tmp_path / "renders_all", include_retired=True)
     assert {row["key"] for row in rows_all} == {kept, retired}
+
+
+def test_refresh_results_run_rebuilds_network_and_speciation_from_json(
+    tmp_path: Path,
+    solving_genome: Genome,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from versal import results
+
+    library = ModuleLibrary(tmp_path / "library")
+    key = library.add(entry_type=MODULE, payload=genome_to_dict(solving_genome), io=_IO, provenance={})
+    task = tmp_path / "run" / "task_0003"
+    task.mkdir(parents=True)
+    (task / "stats.json").write_text(json.dumps({"task_cursor": 3, "library": {"net_key": key}}))
+    (task / "checkpoint.json").write_text(json.dumps({"loop_state": {"module_species_history": [{"0": 2}, {"0": 1, "1": 1}]}}))
+    captured: dict[str, Any] = {}
+
+    def capture_network(directory, genome, *, title, library, max_inline_depth):
+        captured["network"] = (directory, len(genome.nodes), title, library.root, max_inline_depth)
+        return directory / "net.png"
+
+    def capture_speciation(directory, history, *, title):
+        captured["speciation"] = (directory, history, title)
+        return directory / "speciation.png"
+
+    monkeypatch.setattr(rendering, "render_network", capture_network)
+    monkeypatch.setattr(results, "render_speciation", capture_speciation)
+
+    rows = refresh_results_run(library, task.parent, max_inline_depth=7)
+
+    assert rows == [{"task": "task_0003", "net": "OK", "speciation": "OK"}]
+    assert captured["network"] == (task, len(solving_genome.nodes), f"orchestrated task 3: module {key}", library.root, 7)
+    assert captured["speciation"] == (task, [{0: 2}, {0: 1, 1: 1}], "module species through task 3")
+
+
+def test_refresh_results_run_preserves_existing_images_when_sources_fail(tmp_path: Path) -> None:
+    library = ModuleLibrary(tmp_path / "library")
+    task = tmp_path / "run" / "task_0001"
+    task.mkdir(parents=True)
+    (task / "stats.json").write_text(json.dumps({"task_cursor": 1, "library": {"net_key": "missing"}}))
+    (task / "checkpoint.json").write_text("not json")
+    (task / "net.png").write_bytes(b"old net")
+    (task / "speciation.png").write_bytes(b"old chart")
+
+    rows = refresh_results_run(library, task.parent)
+
+    assert rows == [{"task": "task_0001", "net": "FAIL:KeyError", "speciation": "FAIL:JSONDecodeError"}]
+    assert (task / "net.png").read_bytes() == b"old net"
+    assert (task / "speciation.png").read_bytes() == b"old chart"
 
 
 class _LibrarySpy:
@@ -116,6 +165,29 @@ def test_cli_explicit_library_overrides_config(
     net_gallery.main()
 
     assert isolated_cli.roots == [explicit]
+
+
+def test_cli_results_run_routes_historical_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli: type[_LibrarySpy],
+) -> None:
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    run_directory = tmp_path / "results" / "run"
+    run_directory.mkdir(parents=True)
+    captured: dict[str, Any] = {}
+
+    def capture(library, run, **kwargs):
+        captured.update(library=library.root, run=run, kwargs=kwargs)
+        return []
+
+    monkeypatch.setattr(net_gallery, "refresh_results_run", capture)
+    monkeypatch.setattr(sys, "argv", ["render", "--library", str(library_root), "--results-run", str(run_directory), "--results-only"])
+
+    net_gallery.main()
+
+    assert captured == {"library": library_root, "run": run_directory, "kwargs": {}}
 
 
 def test_cold_overmind_only_skips_entry_gallery_and_persisted_router(
