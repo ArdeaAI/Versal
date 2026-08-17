@@ -411,6 +411,33 @@ def test_overmind_render_written_on_growth(tmp_path: Path, xor_task: Task, solvi
     assert overmind.stat().st_mtime_ns >= first_mtime  # rewritten on growth
 
 
+def test_overmind_refreshes_when_adapters_and_route_traffic_change(tmp_path: Path, xor_task: Task, solving_genome: Genome, monkeypatch: pytest.MonkeyPatch) -> None:
+    import versal.rendering as rendering
+
+    library = _seed_library(tmp_path, xor_task, solving_genome)
+    captured: list[rendering.OvermindView] = []
+
+    def capture(_render, _path, view, **_kwargs):
+        captured.append(view)
+
+    monkeypatch.setattr(rendering, "submit_render", capture)
+    service = RouterService(library, d_model=16, top_k=1, max_steps=2, image_dir=tmp_path / "lib" / "images")
+    service.sync()
+    assert len(captured) == 1
+    assert captured[-1].input_signatures == [] and captured[-1].output_signatures == []
+
+    view, x, _width = _task_view(service.net, xor_task)
+    view(x)
+    service.record_traffic()
+
+    assert len(captured) == 2
+    assert captured[-1].input_signatures and captured[-1].output_signatures
+    assert captured[-1].traffic_observed is True
+    assert "(100%)" in captured[-1].vertices[0].label
+    service.render_overmind()
+    assert len(captured) == 2  # an unchanged snapshot still stays cached
+
+
 def test_full_overmind_keeps_route_evicted_history_for_pruned_comparison(
     tmp_path: Path, xor_task: Task, solving_genome: Genome, linear_genome: Genome, monkeypatch: pytest.MonkeyPatch
 ) -> None:

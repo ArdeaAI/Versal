@@ -42,7 +42,7 @@ def test_task_panel_preserves_zero_and_explains_missing_query() -> None:
     display.task_finished(16, 18, 16, "deepsea.b2348", _attempt(), solved=False, task_seconds=4.8, new_library_keys=[], library_size=9)
 
     output = stream.getvalue()
-    assert "Reuse" in output and "Evolve network" in output
+    assert "Reuse" in output and "Evolve dense network" in output
     assert "BEST SUPPORT ACCURACY" in output and "0.0000" in output
     assert "HELD-OUT QUERY ACCURACY" in output and "N/A" in output
     assert "deadline arrived before held-out evaluation" in output
@@ -114,8 +114,20 @@ def test_graceful_shutdown_panel_explains_escape_and_missing_evaluation() -> Non
 
 def test_stage_catalog_explains_actions_instead_of_repeating_command_names() -> None:
     assert STAGES["routed"] == ("Route experts", "combine frozen experts and distill an executable pathway")
+    assert STAGES["field"] == ("Evolve spatial field", "grow and train a compact network shared across spatial sites")
+    assert STAGES["direct"] == ("Evolve dense network", "grow and train a task-specific flattened topology")
     assert STAGES["composition"] == ("Compose modules", "wire reusable modules with trainable glue")
     assert STAGES["query"] == ("Held-out query", "score the support-selected executable champion once")
+
+
+def test_reasoned_strategy_skip_does_not_claim_zero_generation_evolution() -> None:
+    display, stream = _render_display()
+    display.stage_result("direct", "skipped", "9,000 flattened outputs exceed the 4,096 safety limit", seconds=0.0)
+
+    output = stream.getvalue()
+    assert "Evolve dense network" in output
+    assert "9,000 flattened outputs exceed the 4,096 safety limit" in output
+    assert "0 generations" not in output
 
 
 def test_logging_defaults_clean_and_verbose_never_enables_raw_debug_records() -> None:

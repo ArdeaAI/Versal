@@ -54,6 +54,7 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
     assert canary["min_fixed_query_samples"] == 32
     assert canary["orchestrator"]["refine"]["mode"] == "always"
+    assert canary["orchestrator"]["evolve"] == ["routed", "grammar", "field", "direct", "composition"]
     assert canary["evolution"]["composition"]["max_initial_glue_values"] == 0
 
     smoke = Config(Config.PROJECT_ROOT / "configs" / "smoke.toml").current

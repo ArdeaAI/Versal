@@ -352,7 +352,7 @@ def test_interruption_history_is_separate_and_keeps_task_retryable(tmp_path: Pat
     orchestrator = _orchestrator(tmp_path)
     trial = _trial(tmp_path, orchestrator)
     trial.interruptions = []
-    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve network", provisional_support=0.75))
+    trial.display = cast(Any, SimpleNamespace(active_stage="Evolve dense network", provisional_support=0.75))
     entry = task_entry(xor_task)
     trial._record_interruption(entry, task_cursor=0, error=RuntimeError("boom"), elapsed=2.5)
     trial._write_run_summary(orchestrator, orchestrator.state, task_cursor=0, status="crashed: RuntimeError: boom")

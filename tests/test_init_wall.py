@@ -157,10 +157,16 @@ def test_direct_strategy_declines_wide_outputs(decomposable_task: Task) -> None:
     config = _loop_config()
     config["orchestrator"] = {"direct": {"max_flat_outputs": 1}}
     strategy = EVOLVE_STRATEGY.get("direct")(config)
+    preflight = strategy.preflight(decomposable_task, None)
     result = strategy(decomposable_task, None, None, budget=3)  # declined before spec/runtime are touched
+    assert preflight.eligible is False
+    assert preflight.reason == "2 flattened outputs exceed the 1 safety limit"
     assert result.metric == 0.0 and result.generations_used == 0
     assert result.champion_genome is None and result.champion_comp is None
-    assert result.champion_metrics["declined_flat_width"] == 2.0
+    assert result.skip_reason == preflight.reason
+    assert result.strategy_metrics["direct_guard_declined"] == 1.0
+    assert result.strategy_metrics["direct_flat_outputs"] == 2.0
+    assert result.strategy_metrics["direct_max_flat_outputs"] == 1.0
 
 
 def test_direct_strategy_guard_defaults_off(decomposable_task: Task) -> None:
@@ -196,7 +202,45 @@ def test_direct_strategy_declines_oversize_init_genes(decomposable_task: Task) -
     result = strategy(decomposable_task, None, None, budget=3)  # declined before spec/runtime are touched
     assert result.metric == 0.0 and result.generations_used == 0
     assert result.champion_genome is None and result.champion_comp is None
-    assert result.champion_metrics["declined_init_genes"] == float((flat_in + 1) * flat_out)
+    assert result.skip_reason == f"{(flat_in + 1) * flat_out} initialization genes exceed the 1 safety limit"
+    assert result.strategy_metrics["direct_guard_declined"] == 1.0
+    assert result.strategy_metrics["direct_init_genes"] == float((flat_in + 1) * flat_out)
+    assert result.strategy_metrics["direct_max_init_genes"] == 1.0
+
+
+def test_arc_grid_uses_compact_field_preflight_instead_of_dense_direct(tmp_path: Path) -> None:
+    from tests.test_hierarchical_loop import _config as _loop_config
+    from versal.dataset.icarus import Axis, Field, TaskKind, TaskMeta, ValueType
+    from versal.evolution.registry import build_loop
+    from versal.field import field_contract, field_feature_width
+    from versal.library import ModuleLibrary
+    from versal.strategy import EVOLVE_STRATEGY, StrategyRuntime
+
+    axes = (Axis.CHANNEL, Axis.HEIGHT, Axis.WIDTH)
+    mask = torch.ones((1, 30, 30), dtype=torch.bool)
+    mask.flatten()[:83] = False
+    input_field = Field(torch.zeros((1, 30, 30), dtype=torch.long), axes, ValueType.CATEGORICAL, 10, None, mask)
+    output_field = Field(torch.zeros((1, 30, 30), dtype=torch.long), axes, ValueType.CATEGORICAL, 10, None, mask.clone())
+    task = Task(TaskMeta(18, TaskKind.MAP, "arc.synthetic", fixed_split=True), [(input_field, output_field)], [])
+
+    config = _loop_config()
+    config["orchestrator"] = {
+        "field": {"pop_size": 2, "assess_workers": 0},
+        "direct": {"max_flat_outputs": 4096, "max_init_genes": 2_000_000},
+    }
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    runtime = StrategyRuntime(loop, library, state, 0.95, lambda item: float(item.metrics.get("support_accuracy", 0.0)), lambda _budget: lambda *_args: False)
+
+    contract = field_contract(task)
+    assert contract is not None
+    assert field_feature_width(contract.input_channels) == 83
+    assert EVOLVE_STRATEGY.get("field")(config).preflight(task, runtime).eligible is True
+    direct = EVOLVE_STRATEGY.get("direct")(config).preflight(task, runtime)
+    assert direct.eligible is False
+    assert direct.metrics == {"direct_guard_declined": 1.0, "direct_flat_outputs": 9000.0, "direct_max_flat_outputs": 4096.0}
 
 
 # --- decompose-first --------------------------------------------------------------------------------
@@ -232,6 +276,24 @@ def test_decompose_first_off_registers_nothing(tmp_path: Path, decomposable_task
     from versal.orchestrator import comp_task_spec
 
     assert orchestrator._wants_decompose_first(decomposable_task, comp_task_spec(decomposable_task)) is False
+
+
+def test_eligible_field_representation_suppresses_decompose_first(tmp_path: Path) -> None:
+    from tests.test_field import _task
+    from versal.orchestrator import comp_task_spec
+
+    task = _task()
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={
+            "evolve": ["field", "direct"],
+            "decompose_first_above": 1,
+            "field": {"pop_size": 2, "assess_workers": 0},
+            "direct": {"max_flat_outputs": 1},
+        },
+    )
+
+    assert orchestrator._wants_decompose_first(task, comp_task_spec(task)) is False
 
 
 def test_adaptive_decompose_first_uses_hardware_envelope(tmp_path: Path, decomposable_task: Task) -> None:

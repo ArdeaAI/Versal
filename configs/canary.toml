@@ -43,14 +43,14 @@ accept_threshold = 0.95
 floor = 0.35
 stall_generations = 28
 stall_epsilon = 0.005
-max_task_seconds = 900
-max_total_task_seconds = 900
+max_task_seconds = 400
+max_total_task_seconds = 600
 max_depth = 8
 quick_eval_top_k = 5
 library_dir = "library"
-# Oversized dense initializations decompose before trying a flat network.
+# Oversized tasks decompose first only when no configured native representation can fit safely.
 decompose_first_above = 2000000
-evolve = ["routed", "grammar", "direct", "composition"] ## "field"
+evolve = ["routed", "grammar", "field", "direct", "composition"]
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 output_slices_max_output_features = 1024
@@ -75,15 +75,15 @@ decompose_leaf_cap = 64
 
   # Deeper subproblems receive progressively smaller evolutionary searches.
   [orchestrator.budgets]
-  depth0 = 240
-  depth1 = 120
-  depth2 = 80
-  depth3 = 40
-  depth4 = 20
-  depth5 = 10
-  depth6 = 5
-  depth7 = 5
-  depth8 = 5
+  depth0 = 400
+  depth1 = 360
+  depth2 = 320
+  depth3 = 240
+  depth4 = 160
+  depth5 = 80
+  depth6 = 40
+  depth7 = 20
+  depth8 = 10
 
   [orchestrator.evolve_budget]
   routed = 0.15

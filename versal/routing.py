@@ -629,7 +629,7 @@ class RouterService:
         self.usage_totals: dict[str, float] = {}
         self.transition_totals: dict[str, dict[str, float]] = {}
         self.step_usage_totals: dict[str, list[float]] = {}
-        self._rendered_signature: tuple[tuple[str, bool], ...] | None = None
+        self._rendered_signature: tuple[Any, ...] | None = None
         self.net = RoutedNet(
             d_model=d_model,
             top_k=top_k,
@@ -761,8 +761,10 @@ class RouterService:
         if expired_edges:
             metrics["router_edges_expired"] = float(expired_edges)
         self.last_lifecycle_metrics = metrics
-        if expired:
-            self.render_overmind()
+        # The portrait visualizes adapters, gate mass, firing steps, and transitions—not merely
+        # vertex membership. Refresh at this task boundary even when no lifecycle event occurred;
+        # the snapshot signature below suppresses a truly unchanged redraw.
+        self.render_overmind()
         return dict(metrics)
 
     def _remove_vertex(self, name: str) -> None:
@@ -835,15 +837,24 @@ class RouterService:
         """Draw historical and current-only eight-column overmind portraits.
 
         Route-evicted experts remain in the full image as retired historical cards while the
-        pruned companion omits them.  Refreshed on any structural lifecycle change; never raises.
+        pruned companion omits them. Refreshed on structural, adapter, or observed-traffic
+        changes; never raises.
         """
         if self.image_dir is None:
             return
         current_keys = {self.net._vertices[name].original_key for name in self.net._vertex_order}
-        signature = tuple((self.net._vertices[name].original_key, name in self.net._retired) for name in self.net._vertex_order) + tuple(
+        vertices = tuple((self.net._vertices[name].original_key, name in self.net._retired) for name in self.net._vertex_order) + tuple(
             (key, True) for key in sorted(self.evicted) if key not in current_keys
         )
-        if not signature:
+        signature: tuple[Any, ...] = (
+            vertices,
+            tuple(sorted(self.net.input_adapter_widths.items())),
+            tuple(sorted(self.net.output_head_widths.items())),
+            tuple(sorted((name, round(value, 12)) for name, value in self.usage_totals.items())),
+            tuple(sorted((name, tuple(round(value, 12) for value in values)) for name, values in self.step_usage_totals.items())),
+            tuple(sorted((source, tuple(sorted((target, round(value, 12)) for target, value in row.items()))) for source, row in self.transition_totals.items())),
+        )
+        if not vertices:
             self._rendered_signature = signature
             return
         if signature == self._rendered_signature:

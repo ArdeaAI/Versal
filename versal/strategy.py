@@ -1,7 +1,7 @@
 """Evolve strategies: HOW the orchestrator's evolve step searches, selectable from config.
 
 The ladder's step 2 used to be hardcoded to the hierarchical composition loop. It is now a
-config-ordered list of registered strategies (`[orchestrator] evolve = ["routed", "grammar", "direct", "composition"]`)
+config-ordered list of registered strategies (`[orchestrator] evolve = ["routed", "grammar", "field", "direct", "composition"]`)
 sharing one depth budget: execution is config order, first strategy to clear the accept threshold
 wins, and a stalled strategy's unspent generations roll into the next allocation.
 
@@ -49,6 +49,7 @@ class StrategyPreflight:
     footprint: StageFootprint | None = None
     decision: StageDecision | None = None
     reason: str | None = None
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -121,6 +122,9 @@ class StrategyResult:
     # Present only for resolution-independent site programs. The genome remains ordinary.
     field_template: dict[str, Any] | None = None
     representation: str | None = None
+    # Human-readable explanation for an intentional zero-generation eligibility/resource skip.
+    # Numeric evidence lives in strategy/resource metrics so durable summaries stay aggregatable.
+    skip_reason: str | None = None
 
     @property
     def has_report_candidate(self) -> bool:
@@ -435,19 +439,46 @@ class FieldStrategy:
 
         contract = field_contract(task)
         if contract is None:
-            return StrategyResult(self.name, 0.0, 0, strategy_metrics={"field_ineligible": 1.0})
+            return StrategyResult(
+                self.name,
+                0.0,
+                0,
+                strategy_metrics={"field_ineligible": 1.0},
+                skip_reason="support is not an aligned spatial mapping",
+            )
         preflight = self.preflight(task, runtime)
         if not preflight.eligible:
             metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
-            return StrategyResult(self.name, 0.0, 0, resource_metrics=metrics, strategy_metrics={"field_preflight_ineligible": 1.0})
+            return StrategyResult(
+                self.name,
+                0.0,
+                0,
+                resource_metrics=metrics,
+                strategy_metrics={"field_preflight_ineligible": 1.0, **preflight.metrics},
+                skip_reason=preflight.reason or "field representation failed resource preflight",
+            )
         all_sites = valid_sites(task.support)
         train_sites = deterministic_sites(all_sites, self.train_sites, salt=f"train:{contract.identity}")
         audit_sites = deterministic_sites(all_sites, self.audit_sites, salt=f"audit:{contract.identity}")
+        compatible_seeds: list[LibraryEntry] = []
+        for entry in seed_entries or []:
+            try:
+                from versal.field import payload_field_contract
+
+                if payload_field_contract(entry.payload) == contract:
+                    compatible_seeds.append(entry)
+            except ValueError:
+                continue
         try:
             training = encode_sites(task, train_sites, contract, chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
             audit = encode_sites(task, audit_sites, contract, chunk_size=self.verify_chunk_size, deadline=runtime.deadline)
         except TimeoutError:
-            return StrategyResult(self.name, 0.0, 0, strategy_metrics={"field_deadline_stage_feature_preparation": 1.0})
+            return StrategyResult(
+                self.name,
+                0.0,
+                0,
+                strategy_metrics={"field_deadline_stage_feature_preparation": 1.0, "field_seed_count": float(len(compatible_seeds))},
+            )
         adapter = FieldAdapter(training, audit, contract, max_inline_depth=self.evolver.max_inline_depth, library=runtime.library)
         self.evolver.library = runtime.library
         self.evolver.deadline_exceeded = runtime.deadline_exceeded
@@ -456,17 +487,11 @@ class FieldStrategy:
 
         def seeded_front(tracker: InnovationTracker) -> list[Genome]:
             candidates: list[Genome] = []
-            for entry in seed_entries or []:
-                try:
-                    from versal.field import payload_field_contract
-
-                    if payload_field_contract(entry.payload) == contract:
-                        candidates.append(_restamp_genome(genome_from_dict(entry.payload), tracker))
-                except ValueError:
-                    continue
+            for entry in compatible_seeds:
+                candidates.append(_restamp_genome(genome_from_dict(entry.payload), tracker))
             return candidates
 
-        state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if seed_entries else None)
+        state = self.evolver.seed_state(adapter, runtime.state.rng, seeded_front=seeded_front if compatible_seeds else None)
         best_full: Assessed | None = None
         generations = 0
         stop = runtime.stall_factory(budget)
@@ -526,13 +551,20 @@ class FieldStrategy:
                     "field_deadline_before_full_verification": 1.0,
                     "field_application_sites": float(len(all_sites)),
                     "field_sampled_sites": float(len(audit_sites)),
+                    "field_seed_count": float(len(compatible_seeds)),
                 },
                 field_template=contract.to_dict(),
                 representation=f"field/{contract.version}",
             )
         if best_full is None:
             metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
-            return StrategyResult(self.name, 0.0, generations, resource_metrics=metrics, strategy_metrics={"field_deadline_before_full_verification": 1.0})
+            return StrategyResult(
+                self.name,
+                0.0,
+                generations,
+                resource_metrics=metrics,
+                strategy_metrics={"field_deadline_before_full_verification": 1.0, "field_seed_count": float(len(compatible_seeds))},
+            )
         resource_metrics = preflight.decision.metrics("field_resource") if preflight.decision is not None else {}
         return StrategyResult(
             strategy=self.name,
@@ -546,6 +578,7 @@ class FieldStrategy:
                 "field_application_sites": float(len(all_sites)),
                 "field_sampled_sites": float(len(audit_sites)),
                 "field_verification_gap": float(best_full.metrics.get("verification_gap", 0.0)),
+                "field_seed_count": float(len(compatible_seeds)),
             },
             field_template=contract.to_dict(),
             representation=f"field/{contract.version}",
@@ -619,12 +652,36 @@ class DirectStrategy:
         n_inputs = math.prod(int(dim) for dim in support_input.data.shape[1:])
         positions = math.prod(int(dim) for dim in support_output.data.shape[1:])
         n_outputs = model_output_features(support_output.descriptor, positions)
+        if self.max_flat_outputs != "adaptive" and 0 < int(self.max_flat_outputs) < n_outputs:
+            limit = int(self.max_flat_outputs)
+            return StrategyPreflight(
+                False,
+                "explicit_flat",
+                reason=f"{n_outputs:,} flattened outputs exceed the {limit:,} safety limit",
+                metrics={
+                    "direct_guard_declined": 1.0,
+                    "direct_flat_outputs": float(n_outputs),
+                    "direct_max_flat_outputs": float(limit),
+                },
+            )
         try:
             init = estimate_initialization(self.evolver.init_kind, n_inputs, n_outputs, **self.evolver.init_params)
         except KeyError as error:
             if runtime.loop.resource_policy.mode == "adaptive":
                 return StrategyPreflight(False, "explicit_flat", reason=str(error))
             return StrategyPreflight(True, "explicit_flat", reason=str(error))
+        if self.max_init_genes != "adaptive" and 0 < int(self.max_init_genes) < init.edges:
+            limit = int(self.max_init_genes)
+            return StrategyPreflight(
+                False,
+                "explicit_flat",
+                reason=f"{init.edges:,} initialization genes exceed the {limit:,} safety limit",
+                metrics={
+                    "direct_guard_declined": 1.0,
+                    "direct_init_genes": float(init.edges),
+                    "direct_max_init_genes": float(limit),
+                },
+            )
         computed = max(0, init.nodes - n_inputs - 1)
         decoded_cells = init.nodes * computed
         # Python genes are a conservative lower-bound proxy (not a claim about exact CPython
@@ -712,22 +769,6 @@ class DirectStrategy:
         seed_genomes: list[Genome] | None = None,
     ) -> StrategyResult:
         resource_metrics: dict[str, float] = {}
-        if self.max_flat_outputs == "adaptive" or self.max_init_genes == "adaptive" or int(self.max_flat_outputs) > 0 or int(self.max_init_genes) > 0:
-            support_input, support_output = support_loader(task)
-            flat_positions = 1
-            for dim in support_output.data.shape[1:]:
-                flat_positions *= int(dim)
-            flat_outputs = model_output_features(support_output.descriptor, flat_positions)
-            if self.max_flat_outputs != "adaptive" and 0 < int(self.max_flat_outputs) < flat_outputs:
-                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_flat_width": float(flat_outputs)})
-            flat_inputs = 1
-            for dim in support_input.data.shape[1:]:
-                flat_inputs *= int(dim)
-            from versal.evolution.init import estimate_initialization
-
-            init_genes = estimate_initialization(self.evolver.init_kind, flat_inputs, flat_outputs, **self.evolver.init_params).edges
-            if self.max_init_genes != "adaptive" and 0 < int(self.max_init_genes) < init_genes:
-                return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"declined_init_genes": float(init_genes)})
         preflight = self.preflight(task, runtime)
         if not preflight.eligible:
             metrics = preflight.decision.metrics("direct_resource") if preflight.decision is not None else {}
@@ -737,7 +778,9 @@ class DirectStrategy:
                 generations_used=0,
                 champion_metrics={"declined_preflight": 1.0, **metrics},
                 resource_metrics=metrics,
-                strategy_metrics={"preflight_ineligible": 1.0},
+                strategy_metrics={"preflight_ineligible": 1.0, **preflight.metrics},
+                representation=preflight.representation,
+                skip_reason=preflight.reason or "dense representation failed resource preflight",
             )
         if preflight.decision is not None:
             resource_metrics.update(preflight.decision.metrics("direct_resource"))

@@ -150,6 +150,49 @@ def test_field_strategy_runs_compact_program_and_defers_blind_query(monkeypatch,
     assert splits.count("query") == 1
 
 
+def test_field_strategy_warm_starts_from_compatible_library_entry(monkeypatch, tmp_path: Path) -> None:
+    from tests.test_field import _task
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width, field_payload
+
+    task = _task()
+    contract = field_contract(task)
+    assert contract is not None
+    config = _loop_config()
+    config["orchestrator"] = {
+        "field": {
+            "pop_size": 2,
+            "elitism": 1,
+            "train_sites": 8,
+            "audit_sites": 8,
+            "verify_top_k": 1,
+            "train": {"kind": "gradient", "steps": 1, "lr": 0.01, "writeback": True},
+            "evaluate": {"kind": "standard"},
+        }
+    }
+    loop = build_loop(config)
+    library = ModuleLibrary(tmp_path / "lib")
+    loop.attach_library(library)
+    state = loop.fresh_state(random.Random(0))
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(1))
+    key = library.add(entry_type=MODULE, payload=field_payload(genome, contract), io=task_io(task), provenance={"accepted_metric": 1.0})
+    entry = library.load(key)
+    strategy = EVOLVE_STRATEGY.get("field")(config)
+    original_seed_state = strategy.evolver.seed_state
+    seeded = False
+
+    def capture_seed_state(*args, **kwargs):
+        nonlocal seeded
+        seeded = kwargs.get("seeded_front") is not None
+        return original_seed_state(*args, **kwargs)
+
+    monkeypatch.setattr(strategy.evolver, "seed_state", capture_seed_state)
+    result = strategy(task, _spec(task), _runtime_for(loop, state, threshold=2.0), budget=1, seed_entries=[entry])
+
+    assert seeded is True
+    assert result.strategy_metrics["field_seed_count"] == 1.0
+
+
 def test_direct_report_evaluates_full_task_once_without_training_and_restores_deadline(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome) -> None:
     from versal.strategy import DirectStrategy
 

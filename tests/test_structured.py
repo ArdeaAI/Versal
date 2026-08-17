@@ -179,7 +179,9 @@ def test_direct_structured_adapter_preserves_head_width_and_blinds_query() -> No
 def test_direct_width_guard_counts_categorical_logits() -> None:
     strategy = DirectStrategy(evolver=cast(Evolver, None), max_flat_outputs=20)
     result = strategy(_swap_shape_task(), cast(CompTaskSpec, None), cast(StrategyRuntime, None), budget=1)
-    assert result.champion_metrics["declined_flat_width"] == 36.0  # 4x3 support canvas, three classes
+    assert result.strategy_metrics["direct_flat_outputs"] == 36.0  # 4x3 support canvas, three classes
+    assert result.strategy_metrics["direct_max_flat_outputs"] == 20.0
+    assert result.skip_reason == "36 flattened outputs exceed the 20 safety limit"
 
 
 def test_task_appropriate_metric_prefers_exact_only_when_present() -> None:

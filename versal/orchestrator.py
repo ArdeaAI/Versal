@@ -472,6 +472,10 @@ class Orchestrator:
             self.counters.update({"total_time_budget_hits": 0})
         if self.loop.resource_policy.mode == "adaptive":
             self.counters.update({"resource_declines": 0, "direct_resource_declines": 0, "composition_resource_declines": 0, "decomposition_resource_declines": 0})
+        direct_table = table.get("direct", {}) or {}
+        fixed_direct_guards = (direct_table.get("max_flat_outputs", 0), direct_table.get("max_init_genes", 0))
+        if any(value != "adaptive" and int(value) > 0 for value in fixed_direct_guards):
+            self.counters["direct_guard_declines"] = 0
         if self.decompose_first_above == "adaptive" or int(self.decompose_first_above) > 0:  # registered only when the policy is on
             self.counters.update({"decompose_first": 0})
         self._failure_stage: str | None = None
@@ -524,6 +528,7 @@ class Orchestrator:
             self._best_diagnostic_observation: dict[str, Any] | None = None
             self._best_parent_result: StrategyResult | None = None
             self._best_parent_report_result: StrategyResult | None = None
+            self._best_parent_field_result: StrategyResult | None = None
             self._decomposition_leaf_count = 1
         if self._shutdown_requested():
             return self._record_shutdown(task, depth)
@@ -631,9 +636,13 @@ class Orchestrator:
                 self._failure_stage = "time_budget"
         elif stopping and depth == 0:
             self._failure_stage = "shutdown_requested"
-        stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
-        if stone_key is not None:
-            self.display.stage_result("persist", "saved", "below-threshold stepping stone retained for a later attempt", depth=depth)
+        stone_keys = self._admit_failure_stepping_stones(result, task, spec) if self.wall_ledger and depth == 0 else []
+        stone_key = stone_keys[0] if stone_keys else None
+        if stone_keys:
+            detail = "below-threshold stepping stone retained for a later attempt"
+            if len(stone_keys) > 1:
+                detail = f"{len(stone_keys)} representation-specific stepping stones retained for later attempts"
+            self.display.stage_result("persist", "saved", detail, depth=depth)
         report_result = self._report_result_for(result, depth)
         if self.blind_query and not stopping:
             report_result = self._attach_report_metrics(report_result, task, report_spec)
@@ -775,7 +784,7 @@ class Orchestrator:
         state = EvolverState([], InnovationTracker.from_genomes([fresh]), random.Random(seed))
         previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
         evolver.deadline = deadline
-        evolver.deadline_exceeded = (lambda: deadline is not None and time.perf_counter() >= deadline)
+        evolver.deadline_exceeded = lambda: deadline is not None and time.perf_counter() >= deadline
         try:
             assessed = evolver.assess(fresh, adapter, state)
             return {} if assessed.module is None else dict(assessed.metrics)
@@ -798,7 +807,7 @@ class Orchestrator:
         evolver = strategy.evolver
         previous_deadline, previous_callback = evolver.deadline, evolver.deadline_exceeded
         evolver.deadline = deadline
-        evolver.deadline_exceeded = (lambda: deadline is not None and time.perf_counter() >= deadline)
+        evolver.deadline_exceeded = lambda: deadline is not None and time.perf_counter() >= deadline
         try:
             assessed = evolver.assess(fresh, adapter, state)
             if assessed.module is None:
@@ -1036,7 +1045,13 @@ class Orchestrator:
                 break
             stage_started = time.perf_counter()
             self.display.stage_started(name)
-            if name == "direct" and seed_entries:
+            if name == "field":
+                from versal.field import field_contract
+
+                contract = field_contract(task)
+                field_seeds = self.library.query_field(contract, limit=self.quick_eval_top_k) if contract is not None else []
+                outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=field_seeds or None)
+            elif name == "direct" and seed_entries:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_entries=seed_entries)
             else:
                 outcome = strategy(task, spec, runtime, budget=allocation, seed_comps=handoff_seeds if name == "composition" else None)
@@ -1057,14 +1072,18 @@ class Orchestrator:
                     if counter in self.counters:
                         self.counters[counter] += int(outcome.strategy_metrics.get(metric, 0.0))
             resource_metrics.update(outcome.resource_metrics)
-            declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
-            if declined and "resource_declines" in self.counters:
+            if outcome.strategy_metrics.get("direct_guard_declined") and "direct_guard_declines" in self.counters:
+                self.counters["direct_guard_declines"] += 1
+            resource_declined = any(key.endswith("_declined") and value > 0.0 for key, value in outcome.resource_metrics.items())
+            skipped = outcome.skip_reason is not None or resource_declined
+            if resource_declined and "resource_declines" in self.counters:
                 self.counters["resource_declines"] += 1
                 counter = f"{name}_resource_declines"
                 if counter in self.counters:
                     self.counters[counter] += 1
             results.append(outcome)
             self._consider_parent_report_result(outcome, depth=getattr(self, "_display_depth", 0))
+            self._consider_parent_field_result(outcome, depth=getattr(self, "_display_depth", 0))
             ladder_metrics.update(outcome.strategy_metrics)
             if name == "routed" and outcome.champion_comp is not None and not self._accepts_result(outcome):
                 fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(outcome.champion_comp.comp))
@@ -1075,8 +1094,8 @@ class Orchestrator:
             if name == "composition" and ladder_metrics.get("handoff_count", 0.0):
                 ladder_metrics["recovery_result"] = float(outcome.metric)
             support, _query, support_status, _query_status = self._quality_of_result(outcome)
-            notes = [f"{outcome.generations_used} generations"]
-            if support_status == "no_executable_champion":
+            notes = [outcome.skip_reason] if outcome.skip_reason is not None else [f"{outcome.generations_used} generations"]
+            if support_status == "no_executable_champion" and not skipped:
                 notes.append("diagnostic only; no executable champion")
             if name == "routed" and "router_score" in outcome.strategy_metrics:
                 notes.append(f"router {outcome.strategy_metrics['router_score']:.3f}")
@@ -1084,11 +1103,11 @@ class Orchestrator:
                     notes.append(f"distilled {outcome.strategy_metrics['distilled_score']:.3f}")
                 if ladder_metrics.get("handoff_count", 0.0):
                     notes.append("executable handoff prepared")
-            if declined:
+            if resource_declined and outcome.skip_reason is None:
                 notes.append("explicit flat substrate cannot fit; continuing with field search/composition" if name == "direct" else "resource guard skipped allocation")
             self.display.stage_result(
                 name,
-                "accepted" if self._accepts_result(outcome) else ("skipped" if declined else "continue"),
+                "accepted" if self._accepts_result(outcome) else ("skipped" if skipped else "continue"),
                 " · ".join(notes),
                 seconds=stage_elapsed,
                 depth=getattr(self, "_display_depth", 0),
@@ -1409,17 +1428,40 @@ class Orchestrator:
     def _wall_stone_seeds(self, task: Task, spec: CompTaskSpec) -> tuple[list[LibraryEntry], list[CompositionGenome]]:
         """The warm start for a fresh assault on a known wall, split by shape for the seeding rails
         (MODULE stones graft into the direct population, COMPOSITION stones seed the comp loop)."""
-        stones = self._wall_stones(task, spec)[: self.wall_seed_top_k]
-        modules = [stone for stone in stones if stone.entry_type == MODULE and "field_template" not in stone.payload]
+        # Field programs have a symbolic, cross-resolution seed rail of their own. Filter them
+        # before applying top-k so a strong field stone cannot crowd the ordinary direct/comp rail.
+        stones = [stone for stone in self._wall_stones(task, spec) if "field_template" not in stone.payload][: self.wall_seed_top_k]
+        modules = [stone for stone in stones if stone.entry_type == MODULE]
         comps = [comp_from_dict(stone.payload) for stone in stones if stone.entry_type == COMPOSITION]
         return modules, comps
+
+    def _wall_stones_for_result(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> list[LibraryEntry]:
+        """Return only stones competing for the candidate's representation-specific niche.
+
+        Field programs compete by symbolic field identity, independent of absolute grid size.
+        Ordinary modules and compositions each keep their own task-shaped lineage. This preserves
+        bounded replacement semantics without letting a minimal composition monopolize every
+        representation that could make progress on the same raw I/O contract.
+        """
+
+        if result.field_template is not None:
+            from versal.field import FieldContract
+
+            try:
+                contract = FieldContract.from_dict(result.field_template)
+            except ValueError:
+                return []
+            return [entry for entry in self.library.query_field(contract) if entry.provenance.get("stepping_stone")]
+        entry_type = COMPOSITION if result.champion_comp is not None else MODULE
+        return [entry for entry in self._wall_stones(task, spec) if entry.entry_type == entry_type and "field_template" not in entry.payload]
 
     def _admit_stepping_stone(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> str | None:
         """Shelve a failed attempt's best champion as a below-bar stepping stone: a dependency
         entry (bypasses the admission policy and signature caps, invisible to `signature_group`)
         that can never be a false lookup hit because quick-eval still gates on the accept bar.
-        One stone per signature lineage: replaced only on a strict lexicographic AND structural
-        win (the refine comparator, reused), so the wall gets chipped, not wallpapered. Free
+        One stone per representation lineage (and per symbolic field identity): replaced only on
+        a strict lexicographic AND structural win (the refine comparator, reused), so the wall gets
+        chipped, not wallpapered. Free
         synergies: stones enter module-pool absorption and the comp ref catalog through `query`,
         and become router vertices at sync (immature circuits in the overmind, by design)."""
         candidate = self._candidate_rank(result)
@@ -1427,7 +1469,7 @@ class Orchestrator:
             return None
         if float(result.champion_metrics.get("support_gain_over_baseline", math.inf)) < self.wall_min_gain_over_baseline:
             return None
-        incumbent_stone = next(iter(self._wall_stones(task, spec)), None)
+        incumbent_stone = next(iter(self._wall_stones_for_result(result, task, spec)), None)
         if incumbent_stone is not None:
             if self._candidate_matches_entry(result, incumbent_stone):
                 return None
@@ -1451,6 +1493,31 @@ class Orchestrator:
             self.counters["wall_stones_admitted"] += 1
         logger.debug("wall ledger shelved stepping stone %s for %s (best %s=%.3f)", key, task.meta.name, self.search_metric, result.metric)
         return key
+
+    def _admit_failure_stepping_stones(self, result: StrategyResult, task: Task, spec: CompTaskSpec) -> list[str]:
+        """Retain the overall loser and the best independently observed field program.
+
+        The ladder returns only one overall result, so without this second rail every losing field
+        population disappears whenever a routed/direct/composition candidate ranks higher. Exact
+        fingerprints are de-duplicated before admission; niche replacement performs the remaining
+        archive bounds.
+        """
+
+        candidates = [result]
+        field_result = getattr(self, "_best_parent_field_result", None)
+        if field_result is not None:
+            candidates.append(field_result)
+        admitted: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            fingerprint = self._candidate_fingerprint(candidate)
+            if fingerprint is None or fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            key = self._admit_stepping_stone(candidate, task, spec)
+            if key is not None and key not in admitted:
+                admitted.append(key)
+        return admitted
 
     # --- ladder steps -------------------------------------------------------------------------------
 
@@ -1755,6 +1822,29 @@ class Orchestrator:
         incumbent_rank = (-math.inf, False) if incumbent is None else (self._report_candidate_value(incumbent), incumbent.has_admissible_champion)
         if incumbent is None or candidate_rank > incumbent_rank:
             self._best_parent_report_result = result
+
+    def _consider_parent_field_result(self, result: StrategyResult, *, depth: int) -> None:
+        """Remember the strongest verified field champion independently of ladder ranking."""
+
+        if depth != 0 or result.field_template is None or result.champion_genome is None or not math.isfinite(result.metric):
+            return
+        incumbent = getattr(self, "_best_parent_field_result", None)
+        candidate_rank = (
+            result.metric,
+            float(result.champion_metrics.get("weight_robustness", 0.0)),
+            -result.champion_genome.complexity(),
+        )
+        incumbent_rank = (
+            (-math.inf, -math.inf, -math.inf)
+            if incumbent is None or incumbent.champion_genome is None
+            else (
+                incumbent.metric,
+                float(incumbent.champion_metrics.get("weight_robustness", 0.0)),
+                -incumbent.champion_genome.complexity(),
+            )
+        )
+        if incumbent is None or candidate_rank > incumbent_rank:
+            self._best_parent_field_result = result
 
     def _report_result_for(self, result: StrategyResult, depth: int) -> StrategyResult:
         if depth == 0:

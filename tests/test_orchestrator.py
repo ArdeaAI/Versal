@@ -108,7 +108,7 @@ def test_cross_validation_failure_blocks_admission_but_keeps_report_candidate(tm
     setattr(
         orchestrator,
         "_fold_evaluator",
-        lambda _result: (lambda _fold, _seed, _deadline: {"query_accuracy": 0.0, "query_loss": 1.0}),
+        lambda _result: lambda _fold, _seed, _deadline: {"query_accuracy": 0.0, "query_loss": 1.0},
     )
 
     validated = orchestrator._cross_validate_result(result, xor_task)
@@ -215,6 +215,31 @@ def test_field_admission_uses_isolated_library_and_persists_metadata(tmp_path: P
     entry = orchestrator.library.load(solution.key)
     assert entry.entry_type == MODULE
     assert entry.payload["field_template"]["version"] == "local_multiscale_v1"
+
+
+def test_evolve_nominates_compatible_field_entries_as_warm_seeds(tmp_path: Path) -> None:
+    from tests.test_field import _task
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width, field_payload
+
+    task = _task()
+    contract = field_contract(task)
+    assert contract is not None
+    orchestrator = _orchestrator(tmp_path, table={"evolve": ["field"], "evolve_budget": {"field": 1.0}, "decompose": []})
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(0))
+    key = orchestrator.library.add(entry_type=MODULE, payload=field_payload(genome, contract), io=task_io(task), provenance={"accepted_metric": 1.0})
+    received: list[str] = []
+
+    def field_strategy(task, spec, runtime, *, budget, seed_entries=None, seed_comps=None):
+        received.extend(entry.key for entry in seed_entries or [])
+        return StrategyResult("field", metric=0.0, generations_used=0, strategy_metrics={"field_seed_count": float(len(seed_entries or []))})
+
+    orchestrator.strategies = [("field", field_strategy)]
+    orchestrator.evolve_shares = {"field": 1.0}
+    result = orchestrator._evolve(task, comp_task_spec(task), budget=1)
+
+    assert received == [key]
+    assert result.strategy_metrics["field_seed_count"] == 1.0
 
 
 def test_shutdown_request_records_graceful_stop_without_deadline_accounting(tmp_path: Path, xor_task: Task) -> None:
@@ -1475,6 +1500,56 @@ def test_wall_ledger_shelves_seeds_and_replaces(tmp_path: Path, xor_task: Task, 
     assert orchestrator.library.is_retired(stone_key)  # one stone per lineage
     assert orchestrator.library.load(new_stone_key).provenance["refined_from"] == stone_key
     assert orchestrator.counters["wall_stones_improved"] == 1
+
+
+def test_wall_ledger_retains_field_and_direct_niches_independently(tmp_path: Path) -> None:
+    """The ladder's overall loser must not erase a useful field population. Each representation
+    gets one bounded stone, and the field stone feeds the next symbolic field search."""
+    from tests.test_field import _task
+    from versal.evolution.init import minimal
+    from versal.field import field_contract, field_feature_width
+
+    task = _task()
+    contract = field_contract(task)
+    assert contract is not None
+    genome = minimal(field_feature_width(contract.input_channels), contract.output_channels, rng=random.Random(0))
+    orchestrator = _orchestrator(
+        tmp_path,
+        table=_wall_table()
+        | {
+            "evolve": ["field", "direct"],
+            "evolve_budget": {"field": 0.5, "direct": 0.5},
+            "budgets": {"depth0": 2},
+        },
+    )
+    field_seed_calls: list[list[str]] = []
+    direct_calls: list[dict] = []
+
+    def field_strategy(task, spec, runtime, *, budget, seed_entries=None, seed_comps=None):
+        field_seed_calls.append([entry.key for entry in seed_entries or []])
+        return StrategyResult(
+            "field",
+            metric=0.6,
+            generations_used=0,
+            champion_genome=genome,
+            champion_metrics={"query_accuracy": 0.6, "weight_robustness": 0.2},
+            field_template=contract.to_dict(),
+        )
+
+    orchestrator.strategies = [("field", field_strategy), ("direct", _fake_direct(0.7, 0.2, genome, direct_calls))]
+    orchestrator.evolve_shares = {"field": 0.5, "direct": 0.5}
+
+    assert orchestrator.solve(task) is None
+    field_stones = [entry for entry in orchestrator.library.query_field(contract) if entry.provenance.get("stepping_stone")]
+    direct_stones = [entry for entry in orchestrator._wall_stones(task, comp_task_spec(task)) if "field_template" not in entry.payload]
+    assert len(field_stones) == len(direct_stones) == 1
+    assert orchestrator.counters["wall_stones_admitted"] == 2
+    assert field_seed_calls[0] == [] and direct_calls[0]["seed_entries"] is None
+
+    assert orchestrator.solve(task) is None
+    assert field_seed_calls[1] == [field_stones[0].key]
+    assert direct_calls[1]["seed_entries"][0].key == direct_stones[0].key
+    assert len(orchestrator.library) == 2  # identical champions do not mint additional stones
 
 
 def test_wall_ledger_below_min_metric_shelves_nothing(tmp_path: Path, xor_task: Task, linear_genome) -> None:
