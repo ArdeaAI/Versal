@@ -38,6 +38,7 @@ from versal.library import COMPOSITION, MODULE, ModuleLibrary, macro_resolver
 from versal.orchestrator import Orchestrator, Solution, attempts_from_dicts, attempts_to_dicts
 from versal.reporting import write_run_report
 from versal.utils.device import capture_hardware_profile
+from versal.utils.files import file_sha256
 from versal.utils.logging import Logger
 from versal.utils.proctor import Proctor
 from versal.utils.runtime_display import RuntimeDisplay
@@ -46,13 +47,6 @@ from versal.utils.status import BOARD
 
 logger = Logger.get_logger()
 console = Logger.get_console()
-
-
-def pool_from_tasks(tasks: list[Any]) -> list[TaskEntry]:
-    """Adapter seam for future task sources (e.g. an ARC harness) that never touch IcarusDataset."""
-    from versal.evolution.multitask import task_entry
-
-    return [task_entry(task) for task in tasks]
 
 
 class OrchestratedTrial(Proctor):
@@ -388,13 +382,7 @@ class OrchestratedTrial(Proctor):
 
     @staticmethod
     def _file_sha256(path: Path) -> str | None:
-        if not path.is_file():
-            return None
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+        return file_sha256(path) if path.is_file() else None
 
     def _library_start_identity(self) -> dict[str, Any]:
         """Hash the durable starting library without copying experiment state into the run."""
@@ -700,7 +688,7 @@ class OrchestratedTrial(Proctor):
         if not state.modules:
             return {}
         node_counts = sorted(len(member.genome.nodes) for member in state.modules)
-        connection_counts = sorted(len(member.genome.enabled_connections()) for member in state.modules)
+        connection_counts = sorted(sum(connection.enabled for connection in member.genome.connections) for member in state.modules)
         return {
             "pool_median_nodes": float(node_counts[len(node_counts) // 2]),
             "pool_max_nodes": float(node_counts[-1]),

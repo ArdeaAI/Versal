@@ -7,4 +7,3 @@ import time
 
 def expired(deadline: float | None) -> bool:
     return deadline is not None and time.perf_counter() >= deadline
-

@@ -19,7 +19,7 @@ def _ctx(*genomes) -> MutationContext:
     return MutationContext(innovations=InnovationTracker.from_genomes(list(genomes)), activations=["tanh"], default_activation="tanh")
 
 
-# --- factored ---------------------------------------------------------------------------------------
+# factored
 
 
 def test_factored_below_threshold_is_minimal_byte_identical() -> None:
@@ -59,7 +59,7 @@ def test_factored_fan_in_scaling_keeps_latents_sane() -> None:
     assert float(out.abs().max()) < 1000.0  # unscaled gauss weights at 10k fan-in would be ~sqrt(10k) larger
 
 
-# --- sparse -----------------------------------------------------------------------------------------
+# sparse
 
 
 def test_sparse_below_threshold_is_minimal_byte_identical() -> None:
@@ -86,7 +86,7 @@ def test_sparse_members_use_pair_derived_innovations() -> None:
     assert all(conn.innovation == conn.in_id * total + conn.out_id for conn in genome.connections)
 
 
-# --- prune_and_regrow -------------------------------------------------------------------------------
+# prune_and_regrow
 
 
 def test_prune_and_regrow_holds_density_and_stays_acyclic() -> None:
@@ -147,7 +147,7 @@ def test_prune_and_regrow_never_targets_macro_stubs() -> None:
     assert all(conn.out_id != stub_id for conn in child.connections)
 
 
-# --- direct wide-output guard -----------------------------------------------------------------------
+# direct wide-output guard
 
 
 def test_direct_strategy_declines_wide_outputs(decomposable_task: Task) -> None:
@@ -243,7 +243,7 @@ def test_arc_grid_uses_compact_field_preflight_instead_of_dense_direct(tmp_path:
     assert direct.metrics == {"direct_guard_declined": 1.0, "direct_flat_outputs": 9000.0, "direct_max_flat_outputs": 4096.0}
 
 
-# --- decompose-first --------------------------------------------------------------------------------
+# decompose-first
 
 
 def test_decompose_first_runs_before_any_flat_parent_attempt(tmp_path: Path, decomposable_task: Task) -> None:

@@ -246,9 +246,7 @@ def deterministic_sites(sites: list[FieldSite], count: int, *, salt: str) -> lis
     return ranked[:count]
 
 
-def encode_sites(
-    task: Task, sites: list[FieldSite], contract: FieldContract, *, chunk_size: int = 32768, deadline: float | None = None
-) -> EncodedTask:
+def encode_sites(task: Task, sites: list[FieldSite], contract: FieldContract, *, chunk_size: int = 32768, deadline: float | None = None) -> EncodedTask:
     """Gather only nominated sites. No task-wide im2col tensor is constructed."""
 
     feature_parts: list[torch.Tensor] = []

@@ -234,10 +234,7 @@ class IcarusStreamingSource:
         row = self._read_payload_row(local_shard, ref.row_index)
         task = deserialize_task(row)
         if task.meta.name != ref.name or task.meta.rung != ref.rung:
-            raise RuntimeError(
-                f"task reference no longer matches its row: expected rung {ref.rung} {ref.name!r}, "
-                f"found rung {task.meta.rung} {task.meta.name!r}"
-            )
+            raise RuntimeError(f"task reference no longer matches its row: expected rung {ref.rung} {ref.name!r}, found rung {task.meta.rung} {task.meta.name!r}")
 
         # Row indices restart in every Parquet shard.  Include the immutable shard locator so two
         # tasks at row zero do not receive the same support/query permutation merely by collision.

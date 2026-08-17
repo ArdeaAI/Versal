@@ -82,8 +82,7 @@ def _stacked_sample_metrics(net: "GraphNet", columns: torch.Tensor | None, adapt
     return per_sample
 
 
-# The stacked path's break-even node count on the compact-column substrate (T2, 2026-07-04:
-# 0.56x/0.68x/0.83x/1.04x/1.14x at widths 16/64/256/784/3072). "auto" turns it on from here up.
+# The offline benchmark found stacked sampling worthwhile only for larger compact graphs.
 STACKED_AUTO_MIN_NODES = 768
 
 

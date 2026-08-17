@@ -1,28 +1,10 @@
-"""The routed substrate: a learned sparse mixture-of-experts over frozen library entries.
+"""Sparse routing over frozen library experts.
 
-The library already holds the vertices (immutable module/composition entries); this module adds
-the learned edges. Every vertex talks to a shared d_model residual bus through trainable per-vertex
-adapters (the composition-glue idea applied once per vertex instead of once per edge, so growth is
-an append, never a resize), and a task-conditioned gate selects a sparse top-k of experts per
-routing step. Routing is iterated for a bounded number of steps, so module-to-module pathways,
-including cycles, emerge as gate selections across steps, unrolled exactly like RefineGraphNet
-unrolls refinement passes: termination is structural, never a convergence hope.
-
-Integration is a single EVOLVE_STRATEGY named "routed" (registered in `versal/strategy.py`): the
-orchestrator ladder, lookup, decompose, and the other strategies are untouched, so baseline vs
-routed is a pure config A/B.
-
-THE DSL CONTRACT: the library is the DSL and every solved thing must become a routable vertex in
-it. A routed win therefore only COUNTS when its dominant routing pathway distills into a
-CompositionGenome over the fired library entries and that composition verifies at the accept bar
-(glue-fit through the ordinary `assess_composition` rail); the verified composition is what gets
-admitted, becoming a new vertex at the next sync. A win that lives only in adapter weights is
-adapter bypass, reported as a miss so the evolutionary strategies run and grow the library
-instead. With `[orchestrator.routed] distill = false` the pre-contract behavior remains: winners
-are solved-but-not-shelved records (RoutedSolution), the executable state living in the router.
+Experts communicate through a shared residual bus for a bounded number of steps. Routed wins are
+admissible only after their dominant pathway distills to a verified ``CompositionGenome``; router
+state alone remains report-only unless distillation is disabled explicitly.
 """
 
-import hashlib
 import json
 import math
 import os
@@ -57,6 +39,7 @@ from versal.evolution.loop import AssessedComposition, CompositionGenome, CompTa
 from versal.library import COMPOSITION, MODULE, LibraryEntry, ModuleLibrary, macro_resolver, structural_fingerprint, task_io
 from versal.reference_depth import DEFAULT_MAX_INLINE_DEPTH, configured_max_inline_depth
 from versal.substrate import SubstrateModule, decode_module
+from versal.utils.files import file_sha256
 from versal.utils.logging import Logger
 from versal.utils.resources import format_bytes
 
@@ -64,14 +47,6 @@ logger = Logger.get_logger()
 
 ROUTER_FORMAT_VERSION = 2
 _TRAIN_HISTORY_CAP = 200
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def migrate_router_library(source: Path | str, output: Path | str) -> dict[str, Any]:
@@ -85,7 +60,7 @@ def migrate_router_library(source: Path | str, output: Path | str) -> dict[str, 
     meta = json.loads(meta_path.read_text())
     if int(meta.get("format_version", 0)) != 1:
         raise ValueError("router migration requires a format-v1 source")
-    source_hashes = {path.name: _file_sha256(path) for path in (meta_path, state_path)}
+    source_hashes = {path.name: file_sha256(path) for path in (meta_path, state_path)}
     shutil.copytree(source_path, output_path)
     target_router = output_path / "router"
     state = torch.load(state_path, weights_only=True)
@@ -134,7 +109,7 @@ def migrate_router_library(source: Path | str, output: Path | str) -> dict[str, 
     meta_tmp = target_router / ".router_meta.json.tmp"
     meta_tmp.write_text(json.dumps(migrated, indent=2) + "\n")
     os.replace(meta_tmp, target_router / "router_meta.json")
-    if source_hashes != {path.name: _file_sha256(path) for path in (meta_path, state_path)}:
+    if source_hashes != {path.name: file_sha256(path) for path in (meta_path, state_path)}:
         shutil.rmtree(output_path)
         raise RuntimeError("source router changed during migration")
     return {
@@ -185,8 +160,7 @@ class RouterVertex:
 
 
 def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> RouterVertex | None:
-    """Decode/assemble an entry into a frozen expert, or None when it cannot serve as one here
-    (temporal, undecodable): the same tolerance `_quick_metric` extends to library candidates."""
+    """Decode an entry into a frozen expert, returning ``None`` when it is incompatible."""
     if _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
         return None
     in_width, out_width = _entry_widths(entry)
@@ -295,7 +269,7 @@ class RoutedNet(nn.Module):
         self.last_trace: torch.Tensor | None = None  # [batch, steps_run, out_width] when collected
         self.last_expected_steps: float = 0.0  # halting: mean expected steps (the ponder diagnostic)
 
-    # --- vertex table -------------------------------------------------------------------------------
+    # vertex table
 
     def register_vertex(self, vertex: RouterVertex, *, embedding: torch.Tensor | None = None, lazy: bool = False) -> None:
         key = vertex.sanitized_key
@@ -380,7 +354,7 @@ class RoutedNet(nn.Module):
         self.last_gate_stats.pop(key, None)
         return True
 
-    # --- lazy per-signature surfaces ------------------------------------------------------------------
+    # lazy per-signature surfaces
 
     def ensure_input_adapter(self, signature: str, width: int) -> str:
         key = sanitize_key(f"{signature}:{width}")
@@ -413,11 +387,6 @@ class RoutedNet(nn.Module):
             self.shard_loader("input", input_key)
         if head_key not in self.output_heads and head_key in self.output_head_widths and self.shard_loader is not None:
             self.shard_loader("output", head_key)
-
-    # --- routing --------------------------------------------------------------------------------------
-
-    def _live_mask(self) -> torch.Tensor:
-        return torch.tensor([name not in self._retired for name in self._vertex_order], dtype=torch.bool)
 
     def route(self, x: torch.Tensor, *, input_key: str, head_key: str, task_embed: torch.Tensor, collect_trace: bool = False) -> torch.Tensor:
         """Bounded bus updates, then the head readout. Cycles in the module graph are legal (A at
@@ -935,7 +904,7 @@ class RouterService:
         self.train_history.append(row)
         del self.train_history[:-_TRAIN_HISTORY_CAP]
 
-    # --- persistence ----------------------------------------------------------------------------------
+    # persistence
 
     def _meta(self) -> dict[str, Any]:
         vertex_keys = [self.net._vertices[name].original_key for name in self.net._vertex_order]
@@ -1204,7 +1173,7 @@ class RoutedStrategy:
 
     @staticmethod
     def _metrics_view(metrics: dict[str, float]) -> AssessedComposition:
-        # The established stand-in shape (`_quick_metric` precedent) so runtime.metric_of just works.
+        # StrategyRuntime reads the common ``metrics`` attribute from this lightweight view.
         return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=metrics.get("support_accuracy", 0.0), net=None)
 
     @staticmethod
@@ -1360,7 +1329,7 @@ class RoutedStrategy:
         self._replay.append((spec.encoded, input_key, head_key, support_input))
         del self._replay[: -self.replay_tasks]
 
-    # --- distillation: the DSL contract ---------------------------------------------------------------
+    # distillation: the DSL contract
 
     def _resolve_win(
         self,

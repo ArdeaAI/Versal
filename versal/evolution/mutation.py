@@ -686,7 +686,7 @@ def tweak_refine_steps(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     return child
 
 
-# --- geometry-biased operators -------------------------------------------------------------------
+# geometry-biased operators
 # These read the axis-coordinates the multi-task substrate stamps on input/hidden nodes and bias
 # growth toward LOCAL structure (receptive fields, repeated motifs). `coordinate_distance` returns
 # inf across incomparable banks/axis-signatures, so a binary bit and a continuous coordinate never
@@ -733,10 +733,7 @@ def add_local_connection(genome: Genome, ctx: MutationContext, *, rng: random.Ra
     targets = [node_id for node_id in (*child.hidden_ids, *child.output_ids) if node_id not in child.macro_output_ids]
     candidates: list[tuple[int, int]] = []
     weights: list[float] = []
-    # This full pair sweep (every input x every target on a stamped grid) was THE image-rung wedge:
-    # per-pair has_connection/would_create_cycle scans measured 4.9s PER CALL at width 3072 on the
-    # main thread. Precompute once; the sweep itself is preserved verbatim (same candidate order,
-    # same weights, same rng draws), so evolution is bitwise-identical.
+    # Reuse edge and reachability indexes across the full pair sweep; candidate and RNG order matter.
     existing = {(conn.in_id, conn.out_id) for conn in child.connections if not conn.recurrent}
     reach = ForwardReachability(child)
     for source in sources:

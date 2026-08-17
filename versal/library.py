@@ -161,18 +161,6 @@ def is_field_entry(entry: "LibraryEntry") -> bool:
     return entry.entry_type == MODULE and is_field_payload(entry.payload)
 
 
-def module_representation(entry_or_payload: "LibraryEntry | dict[str, Any]") -> str:
-    payload = entry_or_payload.payload if isinstance(entry_or_payload, LibraryEntry) else entry_or_payload
-    if "field_template" not in payload:
-        return "flat"
-    # Validation is deliberately eager: unknown versions fail closed everywhere that central
-    # representation detection is used.
-    from versal.field import payload_field_contract
-
-    payload_field_contract(payload)
-    return "field"
-
-
 @dataclass
 class LibraryEntry:
     """One admitted solution. `payload` is a genome dict (module) or a composition dict."""
@@ -210,11 +198,6 @@ class LibraryEntry:
             provenance=data["provenance"],
             stats=data.get("stats", {"use_count": 0, "max_attributed_fitness": 0.0}),
         )
-
-
-def _canonical_key(entry_type: str, level: int, payload: dict[str, Any]) -> str:
-    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
-    return f"{entry_type[0]}{level}_{digest}"
 
 
 def payload_refs(entry_type: str, payload: dict[str, Any]) -> set[str]:
@@ -415,16 +398,13 @@ class ModuleLibrary:
             "behavior": list(provenance.get("behavior", [])),  # QD niche descriptor (archive policy)
             "stats": entry.stats,
             "representation": "field" if is_field_payload(payload) else entry_type,
-            "field_identity": (
-                hashlib.sha1(json.dumps(payload["field_template"], sort_keys=True).encode()).hexdigest()[:16] if is_field_payload(payload) else None
-            ),
+            "field_identity": (hashlib.sha1(json.dumps(payload["field_template"], sort_keys=True).encode()).hexdigest()[:16] if is_field_payload(payload) else None),
         }
         self._write_index()
         return key
 
     def _refresh_on_dedupe(self, key: str, provenance: dict[str, Any]) -> None:
-        """B7: a re-admission is fresh evidence; ranking fields take the max, the original
-        provenance is kept, and a bounded readmission history records the new context."""
+        """Merge stronger re-admission evidence while preserving original provenance."""
         summary = self._index[key]
         summary["accepted_metric"] = max(float(summary.get("accepted_metric", 0.0)), float(provenance.get("accepted_metric", 0.0)))
         summary["weight_robustness"] = max(float(summary.get("weight_robustness", 0.0)), float(provenance.get("weight_robustness", 0.0)))
@@ -486,11 +466,7 @@ class ModuleLibrary:
         """Cross-resolution nominations by symbolic field identity; absolute H/W never participate."""
 
         identity = contract.identity
-        matches = [
-            summary
-            for summary in self._index.values()
-            if summary.get("field_identity") == identity and (include_retired or not summary.get("retired", False))
-        ]
+        matches = [summary for summary in self._index.values() if summary.get("field_identity") == identity and (include_retired or not summary.get("retired", False))]
         # Old indexes did not carry representation summaries. Load only module rows and recover
         # identity lazily without rewriting the historical index.
         for summary in self._index.values():

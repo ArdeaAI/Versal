@@ -18,6 +18,19 @@ from versal.strategy import EVOLVE_STRATEGY, CompositionStrategy, GrammarStrateg
 from versal.substrate import SubstrateModule
 
 
+def test_strategy_facade_reexports_implementation_types() -> None:
+    from versal.strategy import DirectStrategy, FieldStrategy
+    from versal.strategy_composition import CompositionStrategy as CompositionImplementation
+    from versal.strategy_direct import DirectStrategy as DirectImplementation
+    from versal.strategy_field import FieldStrategy as FieldImplementation
+    from versal.strategy_grammar import GrammarStrategy as GrammarImplementation
+
+    assert CompositionStrategy is CompositionImplementation
+    assert DirectStrategy is DirectImplementation
+    assert FieldStrategy is FieldImplementation
+    assert GrammarStrategy is GrammarImplementation
+
+
 def _runtime_for(loop: HierarchicalLoop, state: HierarchicalState, threshold: float) -> StrategyRuntime:
     from versal.library import ModuleLibrary
 

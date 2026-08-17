@@ -46,7 +46,7 @@ DEFAULT_PER_ENTRY_CAP = 50_000
 MAX_MOTIF_SIZE = 5  # the canonicalizer is exact brute force; past 5 nodes the permutation space explodes
 
 
-# --- graph extraction -------------------------------------------------------------------------------
+# graph extraction
 
 
 def module_motif_graph(payload: dict[str, Any]) -> tuple[dict[int, NodeLabel], dict[tuple[int, int], int]]:
@@ -115,7 +115,7 @@ def composition_motif_graph(payload: dict[str, Any]) -> tuple[dict[int, NodeLabe
     return labels, edges
 
 
-# --- canonicalization -------------------------------------------------------------------------------
+# canonicalization
 
 
 @dataclass(frozen=True)
@@ -161,7 +161,7 @@ def motif_fingerprint(graph: MotifGraph) -> str:
     return hashlib.sha1(serialized.encode()).hexdigest()[:16]
 
 
-# --- enumeration (ESU / Wernicke) --------------------------------------------------------------------
+# enumeration (ESU / Wernicke)
 
 
 def enumerate_connected_subgraphs(skeleton: Mapping[int, set[int]], k: int, cap: int) -> tuple[list[frozenset[int]], bool]:
@@ -206,7 +206,7 @@ def _skeleton(labels: Mapping[int, NodeLabel], edges: Mapping[tuple[int, int], i
     return adjacency
 
 
-# --- census -----------------------------------------------------------------------------------------
+# census
 
 
 @dataclass

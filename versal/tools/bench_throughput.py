@@ -1,64 +1,7 @@
-"""Throughput micro-benchmarks. Run: uv run benchmark
+"""Offline throughput micro-benchmarks for substrate, training, mutation, and library I/O.
 
-T2: serial fill/restore weight-sample evaluation vs the stacked BatchedGraphNet fast path.
-T3: per-genome decode / gradient-train / hybrid-eval cost at image-rung widths (784/3072) under
-    worker conditions (1 thread, support batch 320). Tracks the compact-column substrate.
-T4: population-batched training vs the serial loop per device (cpu/mps/cuda) + numeric drift.
-T5: assess_many end-to-end, pooled per-genome path vs the hybrid (device batch + pool) path.
-    The go/no-go for `[orchestrator.direct.train] batched` on the current machine.
-L1/L2/L3: library I/O against a temp-dir synthetic library at N entries: per-call add() and
-    bump_stats() cost (each rewrites index.json in full), repeated load() of the same keys
-    (the entry-cache metric), and query() latency.
-
-Fully offline (synthetic tasks/payloads); numbers go into commit messages, not committed artifacts.
-
-MEASURED RESULTS (M4 Max, torch 2.12, 2026-07-04; T7 2026-07-05):
-  THE SECOND PARITY WEDGE (same day, self-inflicted, fixed): wrapping `would_create_cycle` around
-  a per-call ForwardReachability turned `make_acyclic` (per module child per generation,
-  loop.py) into a constructor/GC storm: run forensics showed parity/two_spirals spending
-  849s/831s of ~860s tasks in the COMPOSITION stage. Fix: restored the early-exit BFS body, plus
-  make_acyclic got a topological_order fast path + an incremental-adjacency repair. Measured at a
-  mature 525-gene module: 0.06 ms/call (~4 ms per 64-child generation); the ORIGINAL per-edge
-  rebuild would have been ~3-6 s/generation at that size, so the fast path also removes a latent
-  scaling wall. Decisions are reference-pinned in tests/test_mutation_equivalence.py.
-  T7 mutation pipeline (the image-rung WEDGE fix): pre-fix ONE add_local_connection call was
-  0.3s at width 784 / 4.9s at 3072 (per-pair has_connection scan + adjacency-rebuild BFS across
-  the full source x target sweep, on the MAIN thread), ~6 firing calls/generation = minutes per
-  CIFAR generation and an 8h wedged task. Post-fix (per-call existing-edge set +
-  ForwardReachability memo, bitwise-identical children): full 64-child pipeline = 23.6 ms/gen at
-  784, 144 ms/gen at 3072 (~200x at 3072). tests/test_mutation_equivalence.py pins equivalence
-  and a 1s speed guard. Numpy-vectorizing the pair sweep was CONSIDERED AND DROPPED by
-  measurement (2026-07-05, rung-11 scale, 108300 inputs x 100 outputs): minimal init is a 10.8M
-  bipartite gene list (7s to build, GBs per genome), so post-fix mutation cost there (~4s/call)
-  is O(E) preprocessing over those genes, not the sweep, and the rung is unrunnable at population
-  scale regardless: it belongs to the inputs-x-outputs init regime wall (rungs 11-14), an
-  algorithm-level design problem, not a code-speed one.
-  T3 compact-column substrate (dense [n,n] at 9116b08 -> slim [n,h]; grown genomes, h=13, 20 train
-  steps, batch 320, 1 thread): width 784 train 399.6 -> 30.0 ms (13.3x), hybrid eval 7.6 -> 5.9 ms;
-  width 3072 train 464.4 -> 81.4 ms (5.7x), hybrid eval 45.8 -> 17.3 ms (2.6x). Forward and
-  feedforward training are BITWISE equal to the dense layout; recurrent-substrate training matches
-  to 1 ulp (backward reduction grouping; see tests/test_substrate_slim.py).
-  T4/T5 hybrid population training (slim substrate era): drift <= 1.5e-4 everywhere. T4 vs a
-  1-thread serial loop at P=48/20 steps: cpu 1.09x (784) / 0.86x (3072); mps 1.14x (784) / 2.59x
-  (3072). T5 END-TO-END vs the 12-worker pool (P=48, 120 steps): width 784 pooled 1481-1556 ms vs
-  hybrid-mps 1800-1838 ms; width 3072 pooled 4468 ms vs hybrid-mps 6069 ms (re-measured
-  2026-07-05 post-mutation-fix). The pool WINS at both image widths on M4 Max (h~13 keeps the GPU
-  dispatch-bound), so the overmind config ships `batched = false`. The `min_batch_nodes` width
-  floor exists so a machine where the device DOES win (LatticeCUDA, or once structures grow wide)
-  can batch only above the measured break-even; re-run T4/T5 there before flipping.
-  T2 stacked sample-eval on the compact layout: 0.56x/0.68x/0.83x at widths 16/64/256, breaks even
-  at image widths (1.04x @784, 1.14x @3072). `batched_samples = "auto"` engages it at >= 768 nodes
-  (STACKED_AUTO_MIN_NODES); dense-era truth was 0.44x/0.33x/0.20x (full-width level math).
-  Library I/O BEFORE the entry cache + deferred stats: add/bump per call 1.2/1.2 ms at 100 entries,
-  2.7/2.8 at 300, 8.4/8.6 at 1000 (the O(entries) full index rewrite dominates); load 0.05 ms/call
-  flat (uncached re-read), query(limit=8) 0.5/0.6/0.9 ms at 100/300/1000.
-  AFTER: load 0.003 ms/call (cached), query(limit=8) 0.05/0.15/0.49 ms, bump_stats ~0.00 ms/call
-  (deferred; flush_stats pays one index write per task). add() keeps the immediate O(entries)
-  rewrite by design: structural admissions are rare and must be durable.
-Removed: the T1 thread-parallel assess bench. The path itself was removed 2026-07-04; it measured
-0.51x at 2 workers down to 0.12x at 12 (2026-06-11, tiny dispatch-bound kernels). See git history.
-The throughput lever that DOES pay is the partitioned gradient_batched trainer on direct
-populations: 1.5x CPU / 2.1x MPS at pop 48 (measured in phase 3, dense layout).
+Run ``uv run benchmark``. Results are reported by the caller rather than committed as
+machine-independent performance claims.
 """
 
 import argparse

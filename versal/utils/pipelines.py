@@ -101,9 +101,7 @@ class Pipeline:
         # process streams, otherwise every transient redraw becomes a remote console event.
         # Full stream capture remains an opt-in escape hatch for non-interactive jobs.
         capture_streams = bool(self.config.get("clearml_capture_streams", False))
-        auto_connect_streams: bool | dict[str, bool] = (
-            True if capture_streams else {"stdout": False, "stderr": False, "logging": True}
-        )
+        auto_connect_streams: bool | dict[str, bool] = True if capture_streams else {"stdout": False, "stderr": False, "logging": True}
         self.task = Task.init(
             project_name=self.project_name,
             task_name=task_name,
@@ -132,16 +130,14 @@ class Pipeline:
     def run_task(self) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         if self.queue == "local" or not self.clearml_run:
-            for trial in self.trials:
-                results.append(trial.run())
+            results.extend(trial.run() for trial in self.trials)
         else:
             # A non-local queue is only reachable when clearml_run is true, so the task exists.
             assert self.task is not None
             # Enqueue to the remote agent and exit the local process; the cloned run
             # re-executes from the top and reaches the trial loop on the agent.
             self.task.execute_remotely(queue_name=self.queue, clone=True, exit_process=True)
-            for trial in self.trials:
-                results.append(trial.run())
+            results.extend(trial.run() for trial in self.trials)
 
         if self.task is not None:
             self.task.close()

@@ -58,15 +58,11 @@ def encode(task: Task, encoder: Level0Encoder) -> EncodedTask:
 
 
 def fit_query_target(encoded: EncodedTask) -> EncodedTask:
-    """Fit the encoded query target (and its mask) to the support target's position count.
+    """Fit query targets to the support-sized model head.
 
-    Tasks with per-example natural sizes (the psicov class: per-protein LxL distance maps) encode
-    support and query targets at different widths, but every model head in the system is sized by
-    the SUPPORT target, so an unfitted query target crashes the first evaluation (2026-07-06 smoke
-    run, rung 14: mse over 245,025 predictions vs a 167,281 target). Padding enters under a True
-    mask, so padded positions carry zero loss and zero accuracy weight; a wider query target is
-    cropped, scoring the overlap. Same-width tasks return the same object, byte-identical. The
-    encoder cannot own this fit because icarus.py is vendored, so it lives at the consumer layer."""
+    Padding is masked out; wider targets are cropped to the shared overlap. The adjustment lives
+    here because the encoder is vendored.
+    """
     if encoded.query_target is None:
         return encoded
     target, mask, descriptor = encoded.query_target

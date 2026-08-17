@@ -36,7 +36,7 @@ _HID_TANH = ("hidden", "tanh", "sum", "")
 _HID_GATE = ("hidden", "tanh", "product", "")
 
 
-# --- canonicalization -------------------------------------------------------------------------------
+# canonicalization
 
 
 def test_canonical_form_is_permutation_invariant() -> None:
@@ -59,7 +59,7 @@ def test_canonical_form_distinguishes_direction_and_edge_kind() -> None:
     assert len({chain, fan_in, recurrent_link}) == 3
 
 
-# --- ESU enumeration --------------------------------------------------------------------------------
+# ESU enumeration
 
 
 def _brute_force(adjacency: dict[int, set[int]], k: int) -> set[frozenset[int]]:
@@ -104,7 +104,7 @@ def test_esu_matches_brute_force_on_random_graph() -> None:
         assert len(subsets) == len(set(subsets))  # each connected set emitted exactly once
 
 
-# --- extraction -------------------------------------------------------------------------------------
+# extraction
 
 
 def _connection(source: int, target: int, *, enabled: bool = True, recurrent: bool = False) -> dict[str, Any]:
@@ -163,7 +163,7 @@ def test_composition_graph_ref_classes() -> None:
     assert edges[(0, 2)] == FORWARD_EDGE and edges[(2, 3)] == FORWARD_EDGE
 
 
-# --- census -----------------------------------------------------------------------------------------
+# census
 
 _GADGET_LABELS: list[NodeLabel] = [_IN, _HID_TANH, _HID_GATE, _OUT]
 _GADGET_EDGES = [(0, 1, FORWARD_EDGE), (1, 2, FORWARD_EDGE), (0, 2, FORWARD_EDGE), (2, 3, FORWARD_EDGE)]
@@ -269,7 +269,7 @@ def test_diversity_class_grouping() -> None:
     assert diversity_class(canonical_form([stub, _HID_ID], [(0, 1, FORWARD_EDGE)])) == "macro"
 
 
-# --- reuse census -----------------------------------------------------------------------------------
+# reuse census
 
 
 def test_reuse_census_reverse_reference_index(tmp_path: Path) -> None:
@@ -290,7 +290,7 @@ def test_reuse_census_handles_legacy_v1_index() -> None:
     assert all("reference_count" in row for row in rows)
 
 
-# --- CLI core + atlas -------------------------------------------------------------------------------
+# CLI core + atlas
 
 
 def test_run_census_cli_core_writes_json(tmp_path: Path) -> None:
@@ -347,7 +347,7 @@ def test_render_motif_atlas_empty_note_smoke(tmp_path: Path) -> None:
     assert noted.exists() and noted.stat().st_size > 0
 
 
-# --- provenance stamp + small-library trust ---------------------------------------------------------
+# provenance stamp + small-library trust
 
 
 def test_run_census_meta_pure_core_and_fingerprint(tmp_path: Path) -> None:

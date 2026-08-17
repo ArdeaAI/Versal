@@ -796,10 +796,7 @@ def _assess_in_worker(
     fitness: FitnessAggregator,
     deadline: float | None = None,
 ) -> tuple[Genome, dict[str, float], float]:
-    """Decode, train, and evaluate one genome in a worker process. Returns the plain-data triple
-    (trained genome, metrics, fitness); the main process re-decodes the module from the genome.
-    An undecodable genome floors here instead of raising: a worker exception would kill the WHOLE
-    pool.map and with it the run (the two_spirals macro-nesting crash of 2026-07-04)."""
+    """Assess in a worker and floor undecodable genomes instead of aborting the process pool."""
     from versal.utils.deadline import expired
 
     if expired(deadline):

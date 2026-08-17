@@ -8,7 +8,6 @@ so it is safe to run against a live, crashed, resumed, or historical experiment 
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 import math
@@ -17,6 +16,8 @@ import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
+
+from versal.utils.files import file_sha256
 
 REPORT_SCHEMA_VERSION = 1
 RUNG_FIELDS = (
@@ -46,14 +47,6 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _tasks(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -238,7 +231,7 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
     for name in ("run_summary.json", "run_manifest.json", "config.toml", "config.effective.json", "task_pool.json"):
         path = run_dir / name
         if path.is_file():
-            provenance_files.append({"path": name, "sha256": _sha256(path), "size": path.stat().st_size})
+            provenance_files.append({"path": name, "sha256": file_sha256(path), "size": path.stat().st_size})
     library_metadata: dict[str, Any] | None = None
     if library is not None:
         index_path = library.resolve() / "index.json"
@@ -248,8 +241,8 @@ def build_run_report(run_dir: Path, library: Path | None = None) -> dict[str, An
         library_metadata = {
             "path": str(library.resolve()),
             "index_entries": len(index) if isinstance(index, list) else None,
-            "index_sha256": _sha256(index_path) if index_path.is_file() else None,
-            "motifs_sha256": _sha256(motifs_path) if motifs_path.is_file() else None,
+            "index_sha256": file_sha256(index_path) if index_path.is_file() else None,
+            "motifs_sha256": file_sha256(motifs_path) if motifs_path.is_file() else None,
             "motif_count": len(motifs.get("motifs", [])) if isinstance(motifs, dict) and isinstance(motifs.get("motifs"), list) else None,
             "field_entries": sum(row.get("representation") == "field" for row in index) if isinstance(index, list) else None,
             "field_exclusions": ["flat_grafting", "flat_macros", "live_flat_module_pool", "grammar_induction", "motif_claims"],
@@ -398,8 +391,7 @@ def _markdown(report: dict[str, Any]) -> str:
         ),
         "",
     ]
-    for item in report["provenance"]["files"]:
-        lines.append(f"- `{item['path']}`: `{item['sha256']}` ({item['size']:,} bytes)")
+    lines.extend(f"- `{item['path']}`: `{item['sha256']}` ({item['size']:,} bytes)" for item in report["provenance"]["files"])
     dataset = report["provenance"].get("dataset")
     if isinstance(dataset, dict):
         revision = dataset.get("revision") or "local"

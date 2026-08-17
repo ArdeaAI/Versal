@@ -157,10 +157,7 @@ def build_pool_report(
     try:
         if task_manifest is not None:
             references = [StreamingTaskRef.from_dict(row) for row in task_manifest.get("tasks", [])]
-            skipped = [
-                SkippedRung(rung=int(row["rung"]), error_type=str(row["error_type"]), message=str(row["message"]))
-                for row in task_manifest.get("skipped_rungs", [])
-            ]
+            skipped = [SkippedRung(rung=int(row["rung"]), error_type=str(row["error_type"]), message=str(row["message"])) for row in task_manifest.get("skipped_rungs", [])]
             return PoolReport(entries=[reference_entry(reference) for reference in references], skipped=skipped, provenance=provenance, materializer=materializer)
 
         entries: list[TaskEntry] = []

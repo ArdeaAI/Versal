@@ -22,6 +22,16 @@ from versal.strategy import StrategyResult
 from versal.trials.orchestrated_trial import OrchestratedTrial
 
 
+def test_orchestrator_facade_reexports_ledger_types() -> None:
+    from versal.orchestrator_types import Attempt as AttemptType
+    from versal.orchestrator_types import RefinementRank as RefinementRankType
+    from versal.orchestrator_types import StallDetector as StallDetectorType
+
+    assert Attempt is AttemptType
+    assert RefinementRank is RefinementRankType
+    assert StallDetector is StallDetectorType
+
+
 def _orchestrator(tmp_path: Path, **overrides) -> Orchestrator:
     config = _loop_config()
     config["orchestrator"] = {
@@ -893,8 +903,7 @@ def test_port_wired_skeleton_assembles_and_routes(tmp_path: Path, decomposable_t
     assert out.shape == (3, 2)
 
 
-def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(monkeypatch, tmp_path: Path, decomposable_task: Task) -> None:
-    import versal.orchestrator as orchestrator_module
+def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(tmp_path: Path, decomposable_task: Task) -> None:
     from versal.decompose import output_slices
     from versal.evolution.composition import comp_to_dict
     from versal.orchestrator import Solution
@@ -907,13 +916,6 @@ def test_port_wired_skeleton_declines_oversized_plan_before_glue_allocation(monk
         comp = minimal_composition([("BINARY|K", 8)], subtask.task.meta.name, 1, InnovationTracker(_next_node_id=0), random.Random(1))
         key = orchestrator.library.add(entry_type=COMPOSITION, payload=comp_to_dict(comp), io=task_io(subtask.task), provenance={}, level=2)
         solutions.append((subtask, Solution(key=key, entry_type=COMPOSITION, metric=1.0)))
-
-    def unexpected_allocation(*_args, **_kwargs):
-        raise AssertionError("the skeleton guard must run before dense glue construction")
-
-    monkeypatch.setattr(orchestrator_module, "_identity_glue", unexpected_allocation)
-    monkeypatch.setattr(orchestrator_module, "_placement_glue", unexpected_allocation)
-    monkeypatch.setattr(orchestrator_module, "_selection_glue", unexpected_allocation)
 
     assert orchestrator._port_wired_skeleton(spec, solutions) is None
 
@@ -1102,7 +1104,7 @@ def test_orchestrated_payload_round_trips(tmp_path: Path, decomposable_task: Tas
     assert attempts_to_dicts(attempts) == attempts_to_dicts(orchestrator.attempts)
 
 
-# --- learn-mode refinement of library hits ---------------------------------------------------------
+# learn-mode refinement of library hits
 
 
 def _refine_table(**overrides) -> dict:

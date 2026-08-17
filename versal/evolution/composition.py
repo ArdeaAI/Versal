@@ -126,7 +126,7 @@ class CompositionGenome:
         return self.enabled_edges()
 
     def complexity(self) -> int:
-        return len(self.enabled_edges()) + len(self.module_ids)
+        return sum(edge.enabled for edge in self.edges) + sum(node.kind is CompNodeKind.MODULE for node in self.nodes.values())
 
     def has_edge(self, in_id: int, out_id: int) -> bool:
         return any(edge.in_id == in_id and edge.out_id == out_id for edge in self.edges)
@@ -229,7 +229,7 @@ def comp_from_dict(data: dict[str, Any]) -> CompositionGenome:
     return CompositionGenome(nodes=nodes, edges=edges)
 
 
-# --- assembly --------------------------------------------------------------------------------------
+# assembly
 
 
 class CompositionAssemblyError(Exception):
@@ -371,11 +371,6 @@ def _nested_context(inner_comp: CompositionGenome, outer: AssemblyContext) -> As
         instance_cache={},  # nested scope: sharing is per composition, not across nesting levels
         expansion_stack=outer.expansion_stack,  # shared: the cycle/depth guard spans the whole tree
     )
-
-
-def input_width_of(comp: CompositionGenome) -> int:
-    """The flat input width a composition consumes (sum of non-bias INPUT widths, id order)."""
-    return sum(comp.nodes[node_id].out_width for node_id in comp.input_ids if comp.nodes[node_id].ref != BIAS_REF)
 
 
 class ComposedNet(SubstrateModule):
@@ -524,14 +519,6 @@ def _glue_from_tensor(values: torch.Tensor, *, storage: str) -> GlueValues:
     return tuple(float(value) for value in flat.tolist())
 
 
-def coerce_glue_storage(values: GlueValues, storage: str) -> GlueValues:
-    """Convert deterministic hand-built glue without changing its numeric values."""
-
-    if storage == "f32":
-        return values if isinstance(values, array) else array("f", values)
-    return tuple(values)
-
-
 def edge_storage_value_count(edge: CompEdgeGene) -> int:
     """Float-equivalent resident estimate including expanded gather/scatter index buffers."""
 
@@ -560,7 +547,7 @@ def writeback_composition(comp: CompositionGenome, net: ComposedNet) -> Composit
     return child
 
 
-# --- seeding and mutation ---------------------------------------------------------------------------
+# seeding and mutation
 
 
 @dataclass(frozen=True)
