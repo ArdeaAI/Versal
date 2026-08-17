@@ -107,7 +107,64 @@ def test_expired_deadline_stops_ladder_after_first_strategy(tmp_path: Path, xor_
     attempt = orchestrator.attempts[-1]
     assert attempt.outcome == "failed" and attempt.failure_stage == "time_budget"
     assert attempt.metric == 0.5  # the best loser is still returned and recorded
+    assert attempt.support_status == "no_executable_champion"
+    assert attempt.query_status == "no_executable_champion"
     assert orchestrator.counters["time_budget_hits"] == 1
+
+
+def test_decompose_first_timeout_reports_parent_router_when_later_grammar_has_no_payload(tmp_path: Path, xor_task: Task) -> None:
+    orchestrator = _blind_direct_orchestrator(
+        tmp_path,
+        table={
+            "max_depth": 1,
+            "max_task_seconds": 3600,
+            "decompose_first_above": 1,
+            "search_metric": "support_accuracy",
+            "accept_metric": "support_accuracy",
+            "accept_threshold": 0.95,
+            "budgets": {"depth0": 2, "depth1": 1},
+        },
+    )
+    candidate = object()
+    evaluated: list[object] = []
+
+    class RoutedReportStub:
+        def __call__(self, *_args, **_kwargs) -> StrategyResult:
+            return StrategyResult(
+                strategy="routed",
+                metric=0.57,
+                generations_used=1,
+                report_candidate_routed=candidate,
+                report_candidate_metrics={"support_accuracy": 0.57, "support_loss": 0.43},
+                champion_metrics={"support_accuracy": 0.57, "support_loss": 0.43},
+                representation="routed",
+            )
+
+        def evaluate_report(self, routed_candidate, task, _spec, _library) -> dict[str, float]:
+            assert routed_candidate is candidate and task is xor_task
+            assert orchestrator._time_deadline_exceeded()
+            evaluated.append(routed_candidate)
+            return {"query_accuracy": 0.4, "query_loss": 0.6}
+
+    def grammar_without_payload(*_args, **_kwargs) -> StrategyResult:
+        orchestrator._solve_deadline = time.perf_counter() - 1.0
+        return StrategyResult("grammar", metric=0.99, generations_used=1, champion_metrics={"grammar_productions": 0.0})
+
+    orchestrator.strategies = [("routed", RoutedReportStub()), ("grammar", grammar_without_payload)]
+    orchestrator.evolve_shares = {"routed": 0.5, "grammar": 0.5}
+    setattr(orchestrator, "_wants_decompose_first", lambda *_args, **_kwargs: True)
+    setattr(orchestrator, "_decompose_and_recurse", lambda *_args, **_kwargs: None)
+
+    assert orchestrator.solve(xor_task) is None
+
+    attempt = orchestrator.attempts[-1]
+    assert evaluated == [candidate]
+    assert attempt.strategy == "routed"
+    assert attempt.failure_stage == "time_budget"
+    assert attempt.support_accuracy == pytest.approx(0.57)
+    assert attempt.query_accuracy == pytest.approx(0.4)
+    assert attempt.support_status == "evaluated"
+    assert attempt.query_status == "evaluated"
 
 
 def test_expired_total_budget_is_recorded_without_starting_new_work(tmp_path: Path, xor_task: Task, monkeypatch) -> None:

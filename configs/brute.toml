@@ -15,16 +15,16 @@ tasks_per_rung = 200
 
 [orchestrator]
 tasks = 200
-max_task_seconds = 240
-max_total_task_seconds = 480
+max_task_seconds = 400
+max_total_task_seconds = 600
 
   [orchestrator.budgets]
-  depth0 = 200
-  depth1 = 100
-  depth2 = 60
-  depth3 = 50
-  depth4 = 40
-  depth5 = 30
-  depth6 = 20
-  depth7 = 10
+  depth0 = 400
+  depth1 = 360
+  depth2 = 320
+  depth3 = 240
+  depth4 = 160
+  depth5 = 80
+  depth6 = 40
+  depth7 = 20
   depth8 = 10

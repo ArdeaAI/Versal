@@ -1196,6 +1196,38 @@ class RoutedStrategy:
         # The established stand-in shape (`_quick_metric` precedent) so runtime.metric_of just works.
         return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=metrics.get("support_accuracy", 0.0), net=None)
 
+    @staticmethod
+    def _report_candidate(
+        service: RouterService,
+        view: RoutedTaskView,
+        *,
+        metric: float,
+        zero_shot: bool,
+        steps_used: int,
+        metrics: dict[str, float],
+    ) -> RoutedSolution:
+        return RoutedSolution(
+            router_version=service.version,
+            input_key=view.input_key,
+            head_key=view.head_key,
+            zero_shot=zero_shot,
+            zero_shot_metric=float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0)),
+            trained_metric=float(metric),
+            steps_used=steps_used,
+            expert_usage=dict(view.net.last_gate_stats),
+        )
+
+    def evaluate_report(self, candidate: RoutedSolution, task: Task, spec: CompTaskSpec, library: ModuleLibrary) -> dict[str, float]:
+        """Evaluate one frozen-by-checkpoint routed state on the full task without training."""
+
+        from versal.evaluation import evaluate
+
+        service = self._service(library)
+        support_input, _descriptor = spec.encoded.support_input
+        view = RoutedTaskView(service.net, input_key=candidate.input_key, head_key=candidate.head_key, support_input=support_input)
+        with torch.no_grad():
+            return dict(evaluate(view, spec.encoded, spec.encoder))
+
     def __call__(
         self,
         task: Task,
@@ -1336,6 +1368,8 @@ class RoutedStrategy:
         """A router-space win becomes a real win only if its pathway survives as a composition."""
         from versal.strategy import StrategyResult, comp_size_metrics
 
+        report_candidate = self._report_candidate(service, view, metric=metric, zero_shot=zero_shot, steps_used=steps_used, metrics=metrics)
+
         if not self.distill:
             return self._result(task, service, view, metrics, metric, zero_shot=zero_shot, steps_used=steps_used, generations_used=generations_used, runtime=runtime)
 
@@ -1363,6 +1397,8 @@ class RoutedStrategy:
                 metric=float(distilled_metric),
                 generations_used=generations_used,
                 champion_comp=assessed,
+                report_candidate_routed=report_candidate,
+                report_candidate_metrics=dict(metrics),
                 champion_metrics=stamped,
                 size_metrics=comp_size_metrics(assessed.comp),
                 resource_metrics=dict(self._last_distill_resource_metrics),
@@ -1373,6 +1409,7 @@ class RoutedStrategy:
                     "distillation_gap": float(metric - distilled_metric),
                     "handoff_count": 0.0,
                 },
+                representation="routed",
             )
 
         # Adapter bypass or a pathway below the solve bar: what the system can KEEP is the metric
@@ -1396,6 +1433,8 @@ class RoutedStrategy:
             metric=float(distilled_metric),
             generations_used=generations_used,
             champion_comp=assessed,
+            report_candidate_routed=report_candidate,
+            report_candidate_metrics=dict(metrics),
             champion_metrics=stamped,
             size_metrics=comp_size_metrics(assessed.comp) if assessed is not None else {},
             resource_metrics=dict(self._last_distill_resource_metrics),
@@ -1406,6 +1445,7 @@ class RoutedStrategy:
                 "distillation_gap": float(metric - distilled_metric),
                 "handoff_count": 0.0,
             },
+            representation="routed",
         )
 
     def _dominant_pathway(self, view: RoutedTaskView) -> list[list[str]]:
@@ -1533,16 +1573,7 @@ class RoutedStrategy:
     ) -> Any:
         from versal.strategy import StrategyResult
 
-        solution = RoutedSolution(
-            router_version=service.version,
-            input_key=view.input_key,
-            head_key=view.head_key,
-            zero_shot=zero_shot,
-            zero_shot_metric=float(metrics.get("routed_zero_shot_metric", metric if zero_shot else 0.0)),
-            trained_metric=float(metric),
-            steps_used=steps_used,
-            expert_usage=dict(view.net.last_gate_stats),
-        )
+        solution = self._report_candidate(service, view, metric=metric, zero_shot=zero_shot, steps_used=steps_used, metrics=metrics)
         accepted = runtime.accepted(self._metrics_view(metrics))
         service.record_task(
             {
@@ -1563,8 +1594,11 @@ class RoutedStrategy:
             metric=float(metric),
             generations_used=generations_used,
             champion_routed=solution if (accepted or not self.distill) else None,
+            report_candidate_routed=solution,
+            report_candidate_metrics=dict(metrics),
             champion_metrics=stamped,
             strategy_metrics={**service.last_lifecycle_metrics, "router_score": float(metric), "handoff_count": 0.0},
+            representation="routed",
         )
 
 

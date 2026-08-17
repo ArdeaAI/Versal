@@ -238,12 +238,17 @@ def test_routed_undistillable_win_reports_miss(tmp_path: Path, xor_task: Task, s
         persist=False,
         distill_usage_floor=2.0,  # no expert can clear a floor above 1.0: the pathway is always empty
     )
-    result = strategy(xor_task, comp_task_spec(xor_task), orchestrator._runtime(), budget=1)
+    result = strategy(xor_task, comp_task_spec(xor_task, include_query=False), orchestrator._runtime(), budget=1)
     assert result.metric == 0.0 and result.champion_comp is None and result.champion_routed is None
     assert result.champion_metrics["routed_undistillable"] == 1.0
     assert result.champion_metrics["routed_metric"] >= 0.2  # the router-space win is kept as a diagnostic
     assert "support_accuracy" not in result.champion_metrics
+    assert result.report_candidate_routed is not None
+    assert result.report_candidate_metrics["support_accuracy"] >= 0.2
+    assert result.has_report_candidate
     assert not orchestrator._accepts_result(result)
+    reported = strategy.evaluate_report(result.report_candidate_routed, xor_task, comp_task_spec(xor_task), orchestrator.library)
+    assert "query_accuracy" in reported and math.isfinite(reported["query_accuracy"])
 
 
 def test_routed_below_bar_distillation_keeps_only_payload_metrics(monkeypatch, tmp_path: Path, xor_task: Task, solving_genome: Genome) -> None:

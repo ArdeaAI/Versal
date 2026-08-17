@@ -89,6 +89,11 @@ class StrategyResult:
     # these candidates have not cleared the verification/admission contract.
     report_candidate_comp: AssessedComposition | None = None
     report_candidate_genome: Genome | None = None
+    # Router-space state can execute the task even when it cannot satisfy the reusable DSL
+    # contract. Keep that state on the report-only rail so blind held-out evaluation can still
+    # measure progress without making it admissible or persistable as a task solution.
+    report_candidate_routed: Any | None = None
+    report_candidate_metrics: dict[str, float] = field(default_factory=dict)
     champion_metrics: dict[str, float] = field(default_factory=dict)
     # Held-out metrics are kept on a separate rail. They are reporting only and must never affect
     # admission, refinement, robustness ranking, or the next task's search state.
@@ -117,7 +122,13 @@ class StrategyResult:
     def has_report_candidate(self) -> bool:
         """Whether a support-selected payload is available for held-out reporting."""
 
-        return self.champion_comp is not None or self.champion_genome is not None or self.report_candidate_comp is not None or self.report_candidate_genome is not None
+        return (
+            self.champion_comp is not None
+            or self.champion_genome is not None
+            or self.report_candidate_comp is not None
+            or self.report_candidate_genome is not None
+            or self.report_candidate_routed is not None
+        )
 
     @property
     def has_admissible_champion(self) -> bool:

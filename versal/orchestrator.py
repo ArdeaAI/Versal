@@ -21,6 +21,7 @@ import math
 import time
 from array import array
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from versal.dataset.icarus import Level0Encoder, Task, encode_task
@@ -225,7 +226,7 @@ def _task_metrics(metrics: dict[str, float]) -> dict[str, float]:
 
 
 def _task_metrics_of(result: StrategyResult) -> dict[str, float]:
-    return _task_metrics(dict(result.champion_metrics) | dict(result.report_metrics))
+    return _task_metrics(dict(result.champion_metrics) | dict(result.report_candidate_metrics) | dict(result.report_metrics))
 
 
 def _finite_accuracy(metrics: dict[str, float], key: str, *, loss_key: str | None = None) -> float | None:
@@ -490,6 +491,7 @@ class Orchestrator:
             self._failure_op = None
             self._best_diagnostic_observation: dict[str, Any] | None = None
             self._best_parent_result: StrategyResult | None = None
+            self._best_parent_report_result: StrategyResult | None = None
             self._decomposition_leaf_count = 1
         if self._shutdown_requested():
             return self._record_shutdown(task, depth)
@@ -548,10 +550,11 @@ class Orchestrator:
             result = self._remember_or_recover_parent_result(result, depth)
             support_timed_out = self._time_deadline_exceeded()
         assert result is not None and support_timed_out is not None
+        report_result = self._report_result_for(result, depth)
         if self.blind_query and not self._shutdown_requested():
-            result = self._attach_report_metrics(result, task, report_spec)
-            _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_report_candidate:
+            report_result = self._attach_report_metrics(report_result, task, report_spec)
+            _support, query, _support_status, query_status = self._quality_of_result(report_result)
+            if report_result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
         stopping = self._shutdown_requested()
         if not support_timed_out and not stopping and self._accepts_result(result):
@@ -563,8 +566,8 @@ class Orchestrator:
                 depth=depth,
             )
             self.counters["accepts"] += 1
-            self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key))
-            return self._solution_from_result(result, key)
+            self._record(self._attempt_from_result(result, task=name, depth=depth, outcome="evolved", library_key=key, report_result=report_result))
+            return self._solution_from_result(result, key, report_result=report_result)
 
         # The held-out pass is intentionally allowed to overrun the support deadline. Such an
         # overrun blocks new decomposition work, but it must not relabel completed support search
@@ -599,6 +602,9 @@ class Orchestrator:
         stone_key = self._admit_stepping_stone(result, task, spec) if self.wall_ledger and depth == 0 else None
         if stone_key is not None:
             self.display.stage_result("persist", "saved", "below-threshold stepping stone retained for a later attempt", depth=depth)
+        report_result = self._report_result_for(result, depth)
+        if self.blind_query and not stopping:
+            report_result = self._attach_report_metrics(report_result, task, report_spec)
         self._record(
             self._attempt_from_result(
                 result,
@@ -609,6 +615,8 @@ class Orchestrator:
                 decompose_op=self._failure_op if depth == 0 else None,
                 failure_stage=self._failure_stage if depth == 0 else None,
                 query_status="time_limit_before_evaluation" if timed_out else ("shutdown_before_evaluation" if stopping else None),
+                report_result=report_result,
+                suppress_query=stopping,
             )
         )
         logger.debug("orchestrator gave up on %s at depth %d (best %s=%.3f via %s)", name, depth, self.search_metric, result.metric, result.strategy)
@@ -618,6 +626,17 @@ class Orchestrator:
         """Evaluate the selected support-search payload once on held-out query data."""
 
         if result.report_attempted or not result.has_report_candidate:
+            return result
+        if result.report_candidate_routed is not None:
+            reporter = dict(self.strategies).get("routed")
+            evaluate_report = getattr(reporter, "evaluate_report", None)
+            if not callable(evaluate_report):
+                return result
+            result.report_attempted = True
+            try:
+                result.report_metrics = dict(evaluate_report(result.report_candidate_routed, task, report_spec, self.library))
+            except TimeoutError:
+                result.report_metrics = {}
             return result
         composition_candidate = result.champion_comp or result.report_candidate_comp
         if composition_candidate is not None:
@@ -696,6 +715,7 @@ class Orchestrator:
             self._failure_stage = "shutdown_requested"
         recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
         if recovered is not None:
+            report_result = self._report_result_for(recovered, depth)
             attempt = self._attempt_from_result(
                 recovered,
                 task=task.meta.name,
@@ -703,6 +723,8 @@ class Orchestrator:
                 outcome="failed",
                 failure_stage="shutdown_requested" if depth == 0 else None,
                 query_status="shutdown_before_evaluation",
+                report_result=report_result,
+                suppress_query=True,
             )
         else:
             attempt = Attempt(
@@ -729,9 +751,12 @@ class Orchestrator:
             self.counters["total_time_budget_hits"] += 1
             self._failure_stage = "time_budget"
         recovered = getattr(self, "_best_parent_result", None) if depth == 0 else None
+        if recovered is None and depth == 0:
+            recovered = getattr(self, "_best_parent_report_result", None)
         if recovered is not None:
-            if self.blind_query and not self._shutdown_requested() and not recovered.report_attempted:
-                recovered = self._attach_report_metrics(recovered, task, comp_task_spec(task, structured_grid=self.structured_grid))
+            report_result = self._report_result_for(recovered, depth)
+            if self.blind_query and not self._shutdown_requested() and not report_result.report_attempted:
+                report_result = self._attach_report_metrics(report_result, task, comp_task_spec(task, structured_grid=self.structured_grid))
             attempt = self._attempt_from_result(
                 recovered,
                 task=task.meta.name,
@@ -739,6 +764,7 @@ class Orchestrator:
                 outcome="failed",
                 failure_stage="time_budget",
                 query_status="time_limit_before_evaluation",
+                report_result=report_result,
             )
         else:
             attempt = Attempt(
@@ -883,6 +909,7 @@ class Orchestrator:
                 if counter in self.counters:
                     self.counters[counter] += 1
             results.append(outcome)
+            self._consider_parent_report_result(outcome, depth=getattr(self, "_display_depth", 0))
             ladder_metrics.update(outcome.strategy_metrics)
             if name == "routed" and outcome.champion_comp is not None and not self._accepts_result(outcome):
                 fingerprint = structural_fingerprint(COMPOSITION, comp_to_dict(outcome.champion_comp.comp))
@@ -924,7 +951,7 @@ class Orchestrator:
         # not be distilled) must not displace a real support-selected payload that can receive the
         # mandatory held-out report. When every strategy declined, the metric remains useful.
         if self.blind_query:
-            best = max(results, key=lambda item: (item.has_report_candidate, item.metric))
+            best = max(results, key=lambda item: (item.has_report_candidate, self._report_candidate_value(item)))
         else:
             best = max(results, key=lambda item: item.metric)
         best.resource_metrics = dict(resource_metrics)
@@ -1470,13 +1497,14 @@ class Orchestrator:
         result = self._evolve(task, spec, retry_budget, seed_comps=seeds)
         result = self._remember_or_recover_parent_result(result, depth)
         support_timed_out = self._time_deadline_exceeded()
-        report_attempted_before = result.report_attempted
+        report_result = self._report_result_for(result, depth)
+        report_attempted_before = report_result.report_attempted
         if self.blind_query and not self._shutdown_requested():
-            result = self._attach_report_metrics(result, task, comp_task_spec(task, structured_grid=self.structured_grid))
-            report_started = not report_attempted_before and result.report_attempted
+            report_result = self._attach_report_metrics(report_result, task, comp_task_spec(task, structured_grid=self.structured_grid))
+            report_started = not report_attempted_before and report_result.report_attempted
             self._last_decompose_report_overrun = report_started and not support_timed_out and self._time_deadline_exceeded()
-            _support, query, _support_status, query_status = self._quality_of_result(result)
-            if result.has_report_candidate:
+            _support, query, _support_status, query_status = self._quality_of_result(report_result)
+            if report_result.has_report_candidate:
                 self.display.query_result(query, query_status, depth=depth)
         if not support_timed_out and not self._shutdown_requested() and self._accepts_result(result):
             key = self._admit_result(result, task, spec, depth, decompose_op=chosen_name)
@@ -1496,9 +1524,17 @@ class Orchestrator:
                 depth=depth,
             )
             self.counters["accepts"] += 1
-            attempt = self._attempt_from_result(result, task=task.meta.name, depth=depth, outcome="decomposed", library_key=key, decompose_op=chosen_name)
+            attempt = self._attempt_from_result(
+                result,
+                task=task.meta.name,
+                depth=depth,
+                outcome="decomposed",
+                library_key=key,
+                decompose_op=chosen_name,
+                report_result=report_result,
+            )
             self._record(attempt)
-            return self._solution_from_result(result, key)
+            return self._solution_from_result(result, key, report_result=report_result)
         # Every part solved but the wired parent still missed the bar.
         self.counters["decompose_parent_failed"] += 1
         self._failure_stage = "parent_re_evolve"
@@ -1519,6 +1555,7 @@ class Orchestrator:
 
         if depth != 0:
             return result
+        self._consider_parent_report_result(result, depth=depth)
         incumbent = getattr(self, "_best_parent_result", None)
         result_retainable = result.has_report_candidate if self.blind_query else result.has_admissible_champion
         if incumbent is None:
@@ -1538,6 +1575,31 @@ class Orchestrator:
             return result
         if incumbent_retainable:
             return incumbent
+        return result
+
+    def _report_candidate_value(self, result: StrategyResult) -> float:
+        """Rank the executable reporting rail by its own support-search score."""
+
+        if not result.has_report_candidate:
+            return -math.inf
+        metrics = result.report_candidate_metrics or result.champion_metrics
+        return self._metric(SimpleNamespace(metrics=metrics))
+
+    def _consider_parent_report_result(self, result: StrategyResult, *, depth: int) -> None:
+        """Remember the highest-support parent payload independently of admission ranking."""
+
+        if depth != 0 or not result.has_report_candidate:
+            return
+        incumbent = getattr(self, "_best_parent_report_result", None)
+        candidate_rank = (self._report_candidate_value(result), result.has_admissible_champion)
+        incumbent_rank = (-math.inf, False) if incumbent is None else (self._report_candidate_value(incumbent), incumbent.has_admissible_champion)
+        if incumbent is None or candidate_rank > incumbent_rank:
+            self._best_parent_report_result = result
+
+    def _report_result_for(self, result: StrategyResult, depth: int) -> StrategyResult:
+        if depth == 0:
+            self._consider_parent_report_result(result, depth=depth)
+            return getattr(self, "_best_parent_report_result", None) or result
         return result
 
     def _subtasks_promising(self, subtasks: list[Subtask], parent_depth: int = 0) -> bool:
@@ -1917,12 +1979,15 @@ class Orchestrator:
 
         if not result.has_admissible_champion and not result.has_report_candidate:
             return None, None, "no_executable_champion", "no_executable_champion"
-        support = _finite_accuracy(result.champion_metrics, "support_accuracy")
-        if result.has_admissible_champion:
+        support_metrics = result.report_candidate_metrics or result.champion_metrics
+        support = _finite_accuracy(support_metrics, "support_accuracy")
+        if result.report_candidate_routed is not None:
+            support_status = "evaluated" if support is not None else "evaluation_unavailable"
+        elif result.has_admissible_champion:
             support_status = "evaluated" if support is not None else "evaluation_unavailable"
         else:
             support_status = "support_verification_incomplete"
-        query_metrics = result.report_metrics if self.blind_query else result.champion_metrics
+        query_metrics = result.report_metrics if self.blind_query else support_metrics
         query = _finite_accuracy(query_metrics, "query_accuracy", loss_key="query_loss")
         if query is not None:
             query_status = "evaluated"
@@ -1944,8 +2009,18 @@ class Orchestrator:
         failure_stage: str | None = None,
         refine_generations: int = 0,
         query_status: str | None = None,
+        report_result: StrategyResult | None = None,
+        suppress_query: bool = False,
     ) -> Attempt:
-        support, query, support_status, observed_query_status = self._quality_of_result(result)
+        quality_result = report_result or result
+        support, query, support_status, observed_query_status = self._quality_of_result(quality_result)
+        if suppress_query:
+            query = None
+            observed_query_status = query_status or "shutdown_before_evaluation"
+        elif support_status == "no_executable_champion":
+            observed_query_status = "no_executable_champion"
+        elif query is None and not quality_result.report_attempted and query_status is not None:
+            observed_query_status = query_status
         size_metrics = dict(result.size_metrics)
         rank = self._candidate_rank(result)
         if rank is not None:
@@ -1972,23 +2047,24 @@ class Orchestrator:
             size_metrics=size_metrics,
             resource_metrics=dict(result.resource_metrics),
             strategy_metrics=dict(result.strategy_metrics),
-            report_metric=self._result_report_value(result),
-            task_metrics=_task_metrics_of(result),
+            report_metric=None if suppress_query else self._result_report_value(quality_result),
+            task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,
-            query_status=query_status if query is None and not result.report_attempted and query_status is not None else observed_query_status,
-            representation=result.representation,
+            query_status=observed_query_status,
+            representation=quality_result.representation or result.representation,
         )
 
-    def _solution_from_result(self, result: StrategyResult, key: str | None) -> Solution:
-        support, query, support_status, query_status = self._quality_of_result(result)
+    def _solution_from_result(self, result: StrategyResult, key: str | None, *, report_result: StrategyResult | None = None) -> Solution:
+        quality_result = report_result or result
+        support, query, support_status, query_status = self._quality_of_result(quality_result)
         return Solution(
             key=key,
             entry_type=self._entry_type_of(result),
             metric=result.metric,
-            report_metric=self._result_report_value(result),
-            task_metrics=_task_metrics_of(result),
+            report_metric=self._result_report_value(quality_result),
+            task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,

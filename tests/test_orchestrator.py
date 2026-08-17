@@ -484,6 +484,35 @@ def test_parent_recovery_retains_the_strongest_reportable_payload(tmp_path: Path
     assert orchestrator._remember_or_recover_parent_result(weaker, depth=0) is first
 
 
+def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(tmp_path: Path, solving_genome) -> None:
+    orchestrator = _orchestrator(
+        tmp_path,
+        table={"blind_query": True, "search_metric": "support_accuracy", "accept_metric": "support_accuracy", "accept_threshold": 0.75},
+    )
+    router = StrategyResult(
+        "routed",
+        metric=0.1,
+        generations_used=1,
+        report_candidate_routed=object(),
+        report_candidate_metrics={"support_accuracy": 0.9},
+        champion_metrics={"routed_metric": 0.9},
+    )
+    reusable = StrategyResult(
+        "direct",
+        metric=0.8,
+        generations_used=1,
+        champion_genome=solving_genome,
+        champion_metrics={"support_accuracy": 0.8},
+    )
+
+    orchestrator._consider_parent_report_result(router, depth=0)
+    orchestrator._consider_parent_report_result(reusable, depth=0)
+
+    assert orchestrator._report_result_for(reusable, depth=0) is router
+    assert orchestrator._accepts_result(reusable)
+    assert not orchestrator._accepts_result(router)
+
+
 def test_accepted_parent_is_not_masked_by_a_stronger_report_only_incumbent(tmp_path: Path, solving_genome) -> None:
     orchestrator = _orchestrator(tmp_path, table={"accept_metric": "support_accuracy", "accept_threshold": 0.95})
     report_only = StrategyResult(
