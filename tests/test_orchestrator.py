@@ -573,7 +573,9 @@ def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(
         generations_used=1,
         report_candidate_routed=object(),
         report_candidate_metrics={"support_accuracy": 0.9},
+        report_metrics={"query_accuracy": 0.4, "query_loss": 0.6},
         champion_metrics={"routed_metric": 0.9},
+        representation="routed",
     )
     reusable = StrategyResult(
         "direct",
@@ -581,6 +583,7 @@ def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(
         generations_used=1,
         champion_genome=solving_genome,
         champion_metrics={"support_accuracy": 0.8},
+        representation="explicit_flat/cppn",
     )
 
     orchestrator._consider_parent_report_result(router, depth=0)
@@ -589,6 +592,10 @@ def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(
     assert orchestrator._report_result_for(reusable, depth=0) is router
     assert orchestrator._accepts_result(reusable)
     assert not orchestrator._accepts_result(router)
+    attempt = orchestrator._attempt_from_result(reusable, task="xor", depth=0, outcome="evolved", report_result=router)
+    assert attempt.strategy == "direct" and attempt.representation == "explicit_flat/cppn"
+    assert attempt.report_strategy == "routed" and attempt.report_representation == "routed"
+    assert attempt.support_accuracy == pytest.approx(0.9) and attempt.query_accuracy == pytest.approx(0.4)
 
 
 def test_accepted_parent_is_not_masked_by_a_stronger_report_only_incumbent(tmp_path: Path, solving_genome) -> None:

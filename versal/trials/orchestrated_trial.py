@@ -14,6 +14,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -82,6 +83,8 @@ class OrchestratedTrial(Proctor):
         self.task_pool_load_seconds = 0.0
         self.task_pool_ready = False
         self.dataset_provenance: dict[str, Any] = {"source": str(config["dataset"]), "revision": None}
+        self.run_manifest: dict[str, Any] | None = None
+        self.config_effective_file_sha256: str | None = None
 
         loop = build_loop(config)
         if not isinstance(loop, HierarchicalLoop):
@@ -138,6 +141,7 @@ class OrchestratedTrial(Proctor):
             self.shutdown.start()
             self._write_run_summary(None, state, task_cursor, status="loading_tasks")
             self._load_task_pool()
+            self._capture_or_load_run_manifest()
             orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
             orchestrator.attempts = attempts
             if counters:
@@ -276,10 +280,7 @@ class OrchestratedTrial(Proctor):
         self.task_pool_ready = False
         schedule_cfg = self.config.get("schedule", {})
         prior_manifest = self._read_task_pool_manifest() if self.resume_dir else None
-        console.print(
-            "[bold cyan]Preparing task pool[/bold cyan] · selecting small, revision-pinned rows from each rung; "
-            "task tensors load only when scheduled"
-        )
+        console.print("[bold cyan]Preparing task pool[/bold cyan] · selecting small, revision-pinned rows from each rung; task tensors load only when scheduled")
         started = time.perf_counter()
         report = build_pool_report(
             source=self.config["dataset"],
@@ -326,9 +327,11 @@ class OrchestratedTrial(Proctor):
         self._snapshot_effective_config()
         self._write_task_pool_manifest()
         self.task_pool_ready = True
+        revisit_slots = max(0, self.tasks_to_run - len(self.pool))
+        revisit_detail = f" · {self.tasks_to_run} scheduled attempts include {revisit_slots} revisit slot(s)" if revisit_slots else ""
         console.print(
-            f"[green]Task pool ready[/green] · {len(self.pool)} lightweight references across "
-            f"{len({entry.rung for entry in self.pool})} rung(s) in {self.task_pool_load_seconds:.1f}s"
+            f"[green]Task pool ready[/green] · {len(self.pool)} unique lightweight references across "
+            f"{len({entry.rung for entry in self.pool})} rung(s) in {self.task_pool_load_seconds:.1f}s{revisit_detail}"
         )
 
     def _read_task_pool_manifest(self) -> dict[str, Any] | None:
@@ -350,10 +353,7 @@ class OrchestratedTrial(Proctor):
         return value
 
     def _write_task_pool_manifest(self) -> None:
-        task_rows = [
-            entry.reference.to_dict() if entry.reference is not None else {"rung": entry.rung, "name": entry.name, "eager": True}
-            for entry in self.pool
-        ]
+        task_rows = [entry.reference.to_dict() if entry.reference is not None else {"rung": entry.rung, "name": entry.name, "eager": True} for entry in self.pool]
         payload = {
             "schema_version": 1,
             "complete": True,
@@ -365,9 +365,7 @@ class OrchestratedTrial(Proctor):
                 "seed": int(self.config.get("seed", 0)),
             },
             "tasks": task_rows,
-            "skipped_rungs": [
-                {"rung": skipped.rung, "error_type": skipped.error_type, "message": skipped.message} for skipped in self.skipped_rungs
-            ],
+            "skipped_rungs": [{"rung": skipped.rung, "error_type": skipped.error_type, "message": skipped.message} for skipped in self.skipped_rungs],
         }
         self._write_atomic_json(self.run_dir / "task_pool.json", payload)
 
@@ -387,6 +385,127 @@ class OrchestratedTrial(Proctor):
             except FileNotFoundError:
                 pass
             raise
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str | None:
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _library_start_identity(self) -> dict[str, Any]:
+        """Hash the durable starting library without copying experiment state into the run."""
+
+        root = self.library.root.resolve()
+        files: list[Path] = []
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root)
+                if relative.name.startswith(".") or relative.parts[0] in {"images", "encoded_cache"}:
+                    continue
+                files.append(path)
+        digest = hashlib.sha256()
+        total_bytes = 0
+        for path in sorted(files, key=lambda candidate: candidate.relative_to(root).as_posix()):
+            relative = path.relative_to(root).as_posix()
+            file_digest = self._file_sha256(path)
+            if file_digest is None:
+                continue
+            size = path.stat().st_size
+            total_bytes += size
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update(str(size).encode())
+            digest.update(b"\0")
+            digest.update(file_digest.encode())
+            digest.update(b"\n")
+        keys = sorted(self.library.keys())
+        return {
+            "path": str(root),
+            "entry_count": len(keys),
+            "keys": keys,
+            "content_sha256": digest.hexdigest(),
+            "file_count": len(files),
+            "bytes": total_bytes,
+        }
+
+    @staticmethod
+    def _code_identity() -> dict[str, Any]:
+        root = Path(__file__).resolve().parents[2]
+
+        def git(*args: str) -> str | None:
+            try:
+                completed = subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except (OSError, subprocess.CalledProcessError):
+                return None
+            return completed.stdout.strip()
+
+        commit = git("rev-parse", "HEAD")
+        status = git("status", "--porcelain", "--untracked-files=normal")
+        return {"git_commit": commit, "git_dirty": None if status is None else bool(status)}
+
+    def _capture_or_load_run_manifest(self) -> None:
+        """Create the immutable code/library identity once; a resume must never recapture it."""
+
+        path = self.run_dir / "run_manifest.json"
+        if path.is_file():
+            value = json.loads(path.read_text())
+            if not isinstance(value, dict) or int(value.get("schema_version", 0)) != 1:
+                raise ValueError(f"unsupported run manifest: {path}")
+            self.run_manifest = value
+            return
+        pool_size = len(self.pool)
+        if getattr(self, "resume_dir", None):
+            manifest = {
+                "schema_version": 1,
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "legacy_resume": True,
+                "code": {"git_commit": None, "git_dirty": None, "reason": "original run predates immutable provenance"},
+                "config": {
+                    "path": self.config.get("config_path", ""),
+                    "sha256": self._file_sha256(self.run_dir / "config.toml") or self.config.get("config_sha256", ""),
+                    "effective_sha256": self._file_sha256(self.run_dir / "config.effective.json") or self.config.get("config_effective_sha256", ""),
+                },
+                "library_start": {"available": False, "reason": "original run predates immutable provenance"},
+                "task_pool": {
+                    "unique_references": pool_size,
+                    "scheduled_attempts": self.tasks_to_run,
+                    "revisit_slots": max(0, self.tasks_to_run - pool_size),
+                },
+            }
+            self._write_atomic_json(path, manifest)
+            self.run_manifest = manifest
+            return
+        manifest = {
+            "schema_version": 1,
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "code": self._code_identity(),
+            "config": {
+                "path": self.config.get("config_path", ""),
+                "sha256": self._file_sha256(self.run_dir / "config.toml") or self.config.get("config_sha256", ""),
+                "effective_sha256": self._file_sha256(self.run_dir / "config.effective.json") or self.config.get("config_effective_sha256", ""),
+            },
+            "library_start": self._library_start_identity(),
+            "task_pool": {
+                "unique_references": pool_size,
+                "scheduled_attempts": self.tasks_to_run,
+                "revisit_slots": max(0, self.tasks_to_run - pool_size),
+            },
+        }
+        self._write_atomic_json(path, manifest)
+        self.run_manifest = manifest
 
     def _materialize_task(self, entry: TaskEntry, orchestrator: Orchestrator) -> tuple[Task, float]:
         report = self.pool_report
@@ -599,9 +718,12 @@ class OrchestratedTrial(Proctor):
         *,
         task_load_seconds: float = 0.0,
     ) -> None:
+        occurrence = 1 + sum(record.get("rung") == entry.rung and record.get("task") == entry.name for record in self.task_records)
         record = {
             "rung": entry.rung,
             "task": entry.name,
+            "task_occurrence": occurrence,
+            "is_repeat": occurrence > 1,
             "outcome": attempt.outcome if attempt is not None else "unknown",
             "metric": attempt.metric if attempt is not None else 0.0,
             "strategy": attempt.strategy if attempt is not None else None,
@@ -625,6 +747,12 @@ class OrchestratedTrial(Proctor):
             record["size_metrics"] = dict(attempt.size_metrics)
         if attempt is not None and getattr(attempt, "report_metric", None) is not None:
             record["report_metric"] = float(attempt.report_metric)
+        if attempt is not None and getattr(attempt, "report_strategy", None) is not None:
+            record["report_strategy"] = str(attempt.report_strategy)
+        if attempt is not None and getattr(attempt, "report_representation", None) is not None:
+            record["report_representation"] = str(attempt.report_representation)
+        if attempt is not None and getattr(attempt, "representation", None) is not None:
+            record["representation"] = str(attempt.representation)
         if attempt is not None and getattr(attempt, "task_metrics", None):
             record["task_metrics"] = dict(attempt.task_metrics)
         if attempt is not None and getattr(attempt, "resource_metrics", None):
@@ -656,12 +784,19 @@ class OrchestratedTrial(Proctor):
         counters. Written every task and on crash, so a run is never an empty directory again.
         Tolerates `orchestrator=None` so a crash during orchestrator construction is still recorded."""
         outcomes = Counter(record["outcome"] for record in self.task_records)
+        seen_tasks: set[tuple[Any, Any]] = set()
+        repeated_attempts = 0
+        for record in self.task_records:
+            identity = (record.get("rung"), record.get("task"))
+            repeated_attempts += int(bool(record.get("is_repeat")) if "is_repeat" in record else identity in seen_tasks)
+            seen_tasks.add(identity)
+        unique_tasks_attempted = len(seen_tasks)
         summary = {
             "run_dir": str(self.run_dir),
             "status": status,
             "config_path": self.config.get("config_path", ""),
             "config_sha256": self.config.get("config_sha256", ""),
-            "config_effective_sha256": self.config.get("config_effective_sha256", ""),
+            "config_effective_sha256": getattr(self, "config_effective_file_sha256", None) or self.config.get("config_effective_sha256", ""),
             "config_sources": list(self.config.get("config_sources", [])),
             "seed": int(self.config.get("seed", 0)),
             "library_dir": str(self.library.root),
@@ -682,9 +817,21 @@ class OrchestratedTrial(Proctor):
                 "schema_version": 1,
                 "ready": bool(getattr(self, "task_pool_ready", False)),
                 "entries": len(getattr(self, "pool", [])),
+                "unique_references": len(getattr(self, "pool", [])),
+                "scheduled_attempts": self.tasks_to_run,
+                "revisit_slots": max(0, self.tasks_to_run - len(getattr(self, "pool", []))) if getattr(self, "task_pool_ready", False) else 0,
+                "unique_tasks_attempted": unique_tasks_attempted,
+                "repeated_attempts": repeated_attempts,
                 "load_seconds": float(getattr(self, "task_pool_load_seconds", 0.0)),
             },
         }
+        manifest = getattr(self, "run_manifest", None)
+        if manifest is not None:
+            summary["run_manifest"] = {
+                "path": "run_manifest.json",
+                "schema_version": manifest.get("schema_version", 1),
+                "sha256": self._file_sha256(self.run_dir / "run_manifest.json"),
+            }
         hardware_profile = getattr(self, "hardware_profile", None)
         if hardware_profile is not None:
             summary["hardware_profile"] = hardware_profile
@@ -747,6 +894,7 @@ class OrchestratedTrial(Proctor):
         effective = json.dumps(self.config, indent=2, sort_keys=True, default=str) + "\n"
         effective_payload = effective.encode("utf-8")
         effective_hash = hashlib.sha256(effective_payload).hexdigest()
+        self.config_effective_file_sha256 = effective_hash
         (self.run_dir / "config.effective.json").write_bytes(effective_payload)
         (self.run_dir / "config.effective.json.sha256").write_text(f"{effective_hash}  config.effective.json\n")
 

@@ -538,6 +538,11 @@
       "path": "<run_dir>/config.effective.json.sha256"
     },
     {
+      "access": "read-write",
+      "condition": "immutable starting code, library, config, and task-pool identity; loaded unchanged on resume",
+      "path": "<run_dir>/run_manifest.json"
+    },
+    {
       "access": "write",
       "condition": "[library] fresh_per_task freezes the starting state for the no-memory control",
       "path": "<run_dir>/frozen_library/"

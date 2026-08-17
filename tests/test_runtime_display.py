@@ -43,7 +43,7 @@ def test_task_panel_preserves_zero_and_explains_missing_query() -> None:
 
     output = stream.getvalue()
     assert "Reuse" in output and "Evolve dense network" in output
-    assert "BEST SUPPORT ACCURACY" in output and "0.0000" in output
+    assert "BEST REPORTABLE SUPPORT ACCURACY" in output and "0.0000" in output
     assert "HELD-OUT QUERY ACCURACY" in output and "N/A" in output
     assert "deadline arrived before held-out evaluation" in output
     assert "Timing" in output and "Route experts" in output
@@ -77,7 +77,7 @@ def test_recursive_diagnostic_never_becomes_parent_support() -> None:
 
     output = stream.getvalue()
     assert "subtask support 0.6180" in output
-    assert "BEST SUPPORT ACCURACY" in output and "N/A" in output
+    assert "BEST REPORTABLE SUPPORT ACCURACY" in output and "N/A" in output
     assert "Best diagnostic" in output and "darcy_flow.b3.h0" in output
     assert "none — no executable parent champion" in output
 
@@ -117,7 +117,25 @@ def test_stage_catalog_explains_actions_instead_of_repeating_command_names() -> 
     assert STAGES["field"] == ("Evolve spatial field", "grow and train a compact network shared across spatial sites")
     assert STAGES["direct"] == ("Evolve dense network", "grow and train a task-specific flattened topology")
     assert STAGES["composition"] == ("Compose modules", "wire reusable modules with trainable glue")
-    assert STAGES["query"] == ("Held-out query", "score the support-selected executable champion once")
+    assert STAGES["query"] == ("Held-out query", "score the best support-reportable executable candidate once")
+
+
+def test_task_panel_separates_selected_and_held_out_paths_and_explains_failed_distillation() -> None:
+    display, stream = _render_display(width=180)
+    attempt = _attempt(
+        query_accuracy=0.4,
+        query_status="evaluated",
+        report_strategy="routed",
+        report_representation="routed",
+        strategy_metrics={"router_score": 1.0, "distilled_score": 0.0},
+    )
+
+    display.task_finished(8, 18, 8, "ecg.b755", attempt, solved=False, task_seconds=340.0, new_library_keys=[], library_size=13)
+
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", stream.getvalue()).split())
+    assert "Selected path Evolve dense network" in plain
+    assert "Held-out evaluated path Route experts" in plain
+    assert "live router candidate did not distill" in plain
 
 
 def test_reasoned_strategy_skip_does_not_claim_zero_generation_evolution() -> None:

@@ -51,7 +51,8 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
     assert canary["clearml_capture_streams"] is False
     assert canary["schedule"]["rungs"] == "all"
     assert canary["orchestrator"]["max_depth"] == 8
-    assert canary["orchestrator"]["max_task_seconds"] == canary["orchestrator"]["max_total_task_seconds"] == 900
+    assert canary["orchestrator"]["max_task_seconds"] == 400
+    assert canary["orchestrator"]["max_total_task_seconds"] == 600
     assert canary["min_fixed_query_samples"] == 32
     assert canary["orchestrator"]["refine"]["mode"] == "always"
     assert canary["orchestrator"]["evolve"] == ["routed", "grammar", "field", "direct", "composition"]

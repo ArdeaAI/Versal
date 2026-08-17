@@ -120,6 +120,11 @@ class Attempt:
     resource_metrics: dict[str, float] = field(default_factory=dict)
     # Optional held-out report, emitted only by the blind-query protocol after candidate selection.
     report_metric: float | None = None
+    # The support/query rails can intentionally come from a stronger live executable than the
+    # persistable winner. Keep their producer explicit so reports never attribute router quality
+    # to a direct/field/composition result merely because that result won admission.
+    report_strategy: str | None = None
+    report_representation: str | None = None
     task_metrics: dict[str, float] = field(default_factory=dict)
     strategy_metrics: dict[str, float] = field(default_factory=dict)
     validation_status: str = "not_run"
@@ -163,6 +168,10 @@ class Attempt:
             data["resource_metrics"] = self.resource_metrics
         if self.report_metric is not None:
             data["report_metric"] = self.report_metric
+        if self.report_strategy is not None:
+            data["report_strategy"] = self.report_strategy
+        if self.report_representation is not None:
+            data["report_representation"] = self.report_representation
         if self.task_metrics:
             data["task_metrics"] = self.task_metrics
         if self.strategy_metrics:
@@ -204,6 +213,8 @@ class Attempt:
             size_metrics=dict(data.get("size_metrics", {})),
             resource_metrics=dict(data.get("resource_metrics", {})),
             report_metric=float(data["report_metric"]) if data.get("report_metric") is not None else None,
+            report_strategy=str(data["report_strategy"]) if data.get("report_strategy") is not None else None,
+            report_representation=str(data["report_representation"]) if data.get("report_representation") is not None else None,
             task_metrics={str(key): float(value) for key, value in data.get("task_metrics", {}).items()},
             strategy_metrics={str(key): float(value) for key, value in data.get("strategy_metrics", {}).items()},
             validation_status=str(data.get("validation_status", "not_run")),
@@ -1156,6 +1167,8 @@ class Orchestrator:
                 library_key=hit.key,
                 refine_generations=refine_generations,
                 report_metric=hit.report_metric,
+                report_strategy="lookup",
+                report_representation=("field" if hit.key is not None and "field_template" in self.library.load(hit.key).payload else hit.entry_type),
                 task_metrics=dict(hit.task_metrics),
                 support_accuracy=hit.support_accuracy,
                 query_accuracy=hit.query_accuracy,
@@ -2321,12 +2334,14 @@ class Orchestrator:
             validation_status=result.validation_status,
             validation_metrics=dict(result.validation_metrics),
             report_metric=None if suppress_query else self._result_report_value(quality_result),
+            report_strategy=quality_result.strategy if quality_result.has_report_candidate else None,
+            report_representation=(quality_result.representation or quality_result.strategy) if quality_result.has_report_candidate else None,
             task_metrics=_task_metrics_of(quality_result),
             support_accuracy=support,
             query_accuracy=query,
             support_status=support_status,
             query_status=observed_query_status,
-            representation=quality_result.representation or result.representation,
+            representation=result.representation or result.strategy,
         )
 
     def _solution_from_result(self, result: StrategyResult, key: str | None, *, report_result: StrategyResult | None = None) -> Solution:
