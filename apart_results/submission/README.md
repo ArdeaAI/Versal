@@ -3,6 +3,7 @@
 This directory is the local backup for the Versal Digital Minds Research Sprint submission.
 
 - `versal_digital_minds_sprint.pdf` is the final eight-page paper.
+- `versal_quick_slideshow.pptx` is the eight-slide visual presentation.
 - `source/` contains the manuscript, native Icarus rung table, claim audit, evidence manifest, build files, and proposed quick ablation.
 - `figures/` contains every figure used in the paper in its available PDF and PNG forms.
 - `ablation/` contains the small matched persistence-probe configurations for later execution.
@@ -22,3 +23,5 @@ uv run python paper/tools/verify_evidence.py --manifest ai/for_apart/evidence_ma
 ```
 
 Final PDF SHA-256: `f8fe39e84c302273dc8a72221b42747e0520531ba13c01eb1b9beabf798b7d81`
+
+Final slideshow SHA-256: `795225148445aa5c1710390060ca14d961c989e5f7ef2984b5d9453b7a73c465`
