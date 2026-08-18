@@ -1,5 +1,7 @@
 # Versal (Versatile Evolution of Reusable Structure for Adaptive Learning)
 
+![alt text](paper/images/evolved_net.png "Evolved Neural Network")
+
 **Toward task-general intelligence with persistent, compounding neuroevolution.**
 
 Human intelligence is not a single faculty, and intelligence itself is neither uniquely human nor
