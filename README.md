@@ -4,6 +4,8 @@ Versal is a Python 3.12 research system for evolutionary neural architecture sea
 for network and composition structure, trains candidate weights with gradient descent, and keeps
 accepted structures in a persistent library so later tasks can reuse or extend them.
 
+![alt text](paper/images/evolved_net.png "Evolved Neural Network")
+
 **Toward task-general intelligence with persistent, compounding neuroevolution.**
 
 Human intelligence is not a single faculty, and intelligence itself is neither uniquely human nor
