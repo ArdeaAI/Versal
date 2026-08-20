@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 import subprocess
 import unicodedata
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIR = REPO_ROOT / "ai" / "for_apart"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SOURCE_DIR = Path(__file__).resolve().parent
+BUNDLE_DIR = SOURCE_DIR.parent
 DRAFT = SOURCE_DIR / "draft.md"
 FILTER = SOURCE_DIR / "submission_filter.lua"
 HEADER = SOURCE_DIR / "submission_header.tex"
-OUTPUT = REPO_ROOT / "output" / "pdf" / "versal_digital_minds_sprint.pdf"
-BACKUP_DIR = REPO_ROOT / "apart_results" / "submission"
-BACKUP = BACKUP_DIR / OUTPUT.name
+OUTPUT = BUNDLE_DIR / "versal_digital_minds_sprint.pdf"
 
 FORBIDDEN_CHARACTERS = {
     "\u2010",
@@ -76,7 +74,6 @@ def sha256(path: Path) -> str:
 def main() -> None:
     validate_source()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
     run(
         "pandoc",
@@ -88,7 +85,7 @@ def main() -> None:
         f"--lua-filter={FILTER}",
         f"--include-in-header={HEADER}",
         "--shift-heading-level-by=-1",
-        f"--resource-path={SOURCE_DIR}",
+        f"--resource-path={BUNDLE_DIR}",
         "-V",
         "papersize=letter",
         "-V",
@@ -101,9 +98,7 @@ def main() -> None:
         str(OUTPUT),
     )
     validate_pdf()
-    shutil.copy2(OUTPUT, BACKUP)
     print(f"wrote {OUTPUT.relative_to(REPO_ROOT)}")
-    print(f"backed up {BACKUP.relative_to(REPO_ROOT)}")
     print(f"sha256 {sha256(OUTPUT)}")
 
 

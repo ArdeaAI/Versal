@@ -126,9 +126,9 @@ def gradient_scheduled(
     deadline: float | None = None,
 ) -> tuple[Genome, SubstrateModule]:
     # Warmup + cosine decay: fixed-lr Adam stalls in oscillatory loss regions that a decaying rate
-    # anneals through. Measured on the CPPN-generator landscape (ai/trial/probe_6): the same
-    # topology goes 0.55 (fixed lr) -> 0.92+ (scheduled) query, which made trainability, not
-    # search, gate E's binding constraint. rng-free like every train op (the batching contract).
+    # anneals through. In the original CPPN-generator probe, the same topology moved from 0.55
+    # (fixed lr) to 0.92+ (scheduled) query, showing that trainability—not structure search—was
+    # the binding constraint. rng-free like every train op (the batching contract).
     parameters = _trainable_parameters(module)
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module

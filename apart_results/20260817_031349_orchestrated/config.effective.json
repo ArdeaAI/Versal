@@ -9,7 +9,7 @@
   "config_sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d",
   "config_sources": [
     {
-      "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/configs/canary.toml",
+      "path": "configs/canary.toml",
       "sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d"
     }
   ],

@@ -4,8 +4,8 @@
 outputs, no hidden nodes. On a non-linearly-separable task like XOR this seed cannot win, so
 selection pressure forces structural growth.
 
-`cppn` is the generative seed (gate-E fork, ai/gate_e.md): each member samples its own tiny
-random pair-query generator f(source_coord, target_coord) -> (weight, expression) and compiles
+`cppn` is the generative seed: each member samples its own tiny random pair-query generator
+f(source_coord, target_coord) -> (weight, expression) and compiles
 it into an ordinary explicit genome; the expression gate yields SPARSE, spatially patterned
 connectivity instead of the dense bipartite (the rungs 11-14 init-wall lever), and the search
 then proceeds on the flat genome exactly as with `minimal`. The generator is a process-level

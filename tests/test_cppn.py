@@ -1,4 +1,4 @@
-"""Critical-path tests for the connective-CPPN spike (ai/cppn_spike_plan.md Phase 0/1).
+"""Critical-path tests for the connective-CPPN generative-encoding experiment.
 
 The existence test IS gate E0: a hand-built Fourier-in-c generator (complexity ~43, vs the m3
 stone's 903), weights trained by the ordinary gradient op at the pinned (seed, lr, steps), must
@@ -19,7 +19,7 @@ from versal.evolution.registry import build_evolver
 from versal.evolution.train import gradient
 from versal.substrate import decode as decode_graphnet
 
-# The pinned existence fixture (established best-of-8 in the Phase-0 harness; see the plan).
+# The pinned existence fixture established by the original best-of-eight harness.
 _FIXTURE = {"m": 3, "seed": 6}
 _FIXTURE_TRAIN = {"steps": 3000, "lr": 0.03}
 

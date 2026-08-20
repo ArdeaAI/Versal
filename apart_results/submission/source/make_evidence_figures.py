@@ -6,7 +6,7 @@
 
 Run from the repository root:
 
-    uv run python ai/for_apart/make_evidence_figures.py
+    uv run python apart_results/submission/source/make_evidence_figures.py
 """
 
 from __future__ import annotations
@@ -27,17 +27,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FIGURE_DIR = REPO_ROOT / "ai" / "for_apart" / "figures"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+FIGURE_DIR = REPO_ROOT / "apart_results" / "submission" / "figures"
 
-CURRENT_SUMMARY = REPO_ROOT / "results" / "20260817_031349_orchestrated" / "run_summary.json"
-HISTORICAL_SUMMARY = REPO_ROOT / "ai" / "archive" / "20260706_flagship" / "results" / "run_summary.json"
-XOR_SUMMARY = REPO_ROOT / "ai" / "archive" / "20260816_02_hackathon" / "results" / "20260816_185653_orchestrated" / "run_summary.json"
+CURRENT_SUMMARY = REPO_ROOT / "apart_results" / "20260817_031349_orchestrated" / "run_summary.json"
+HISTORICAL_SUMMARY = REPO_ROOT / "apart_results" / "evidence" / "historical" / "20260706_flagship" / "run_summary.json"
+XOR_SUMMARY = REPO_ROOT / "apart_results" / "evidence" / "historical" / "20260816_xor" / "run_summary.json"
 
 SOURCE_HASHES = {
-    CURRENT_SUMMARY: "deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43",
-    HISTORICAL_SUMMARY: "04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288",
-    XOR_SUMMARY: "3f4071a5e649b1488781bd61643f3f5f03e320ab718b1d7a13aaed0c4564b0e7",
+    CURRENT_SUMMARY: "d7f25295ba8c40a5a7bbf704612ae8c8d1f00656331e17a1b341ad414b885c51",
+    HISTORICAL_SUMMARY: "6a880b1ba6e1a94040ab577a18d2042fb04b3253c0f135f8f029eac81039e1f2",
+    XOR_SUMMARY: "17a358bde5f130884251b38208b080dffb15f2965918b4fba0254cab14cb8ce1",
 }
 
 FAMILY_LABELS = {

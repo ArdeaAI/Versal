@@ -59,7 +59,7 @@ Otherwise stop and report that the quick probe did not activate or cleanly measu
 
 ### Gate outcome on 2026-08-17
 
-The full-memory seed-0 arm was stopped after attempt 6. Its cold cycle admitted four durable entries, so the memory lever activated, but attempts 3 and 6 both reached the task deadline. Because the arm had already exceeded the predeclared allowance of one deadline hit, completing the matched arm could not make the seed-0 pair pass the gate. No ablation result was added to the manuscript; the interrupted artifacts remain under `results/ablations/quick_reuse_20260817` and `results/20260817_052826_orchestrated` for diagnosis or a deliberately revised future protocol.
+The full-memory seed-0 arm was stopped after attempt 6. Its cold cycle admitted four durable entries, so the memory lever activated, but attempts 3 and 6 both reached the task deadline. Because the arm had already exceeded the predeclared allowance of one deadline hit, completing the matched arm could not make the seed-0 pair pass the gate. No ablation result was added to the manuscript; the interrupted diagnostic artifacts are not part of this public bundle.
 
 ## Paper claim gate
 

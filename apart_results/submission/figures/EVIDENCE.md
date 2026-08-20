@@ -3,7 +3,7 @@
 Generate both publication figures from the repository root:
 
 ```bash
-uv run python ai/for_apart/make_evidence_figures.py
+uv run python apart_results/submission/source/make_evidence_figures.py
 ```
 
 The script verifies the SHA-256 digest of every source before reading it and asserts the headline
@@ -18,8 +18,8 @@ cross-rung task-appropriate held-out mean is 0.6099. The right panel plots total
 log scale. Orange triangles mark rungs containing deadline-limited attempts and their labels show
 the count out of two. All 36 held-out queries were evaluated; 15 attempts reached their task budget.
 
-Source: `results/20260817_031349_orchestrated/run_summary.json`, SHA-256
-`deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43`.
+Source: `apart_results/20260817_031349_orchestrated/run_summary.json`, SHA-256
+`d7f25295ba8c40a5a7bbf704612ae8c8d1f00656331e17a1b341ad414b885c51`.
 
 ## `persistence_xor.pdf` / `.png`
 
@@ -36,7 +36,7 @@ one fixed task, not 200 independent solves or a multi-seed convergence result.
 
 Sources:
 
-- `ai/archive/20260706_flagship/results/run_summary.json`, SHA-256
-  `04838c39f752fa423cac70f796faf349511eed3682c45bdf71349c0bb8198288`.
-- `ai/archive/20260816_02_hackathon/results/20260816_185653_orchestrated/run_summary.json`, SHA-256
-  `3f4071a5e649b1488781bd61643f3f5f03e320ab718b1d7a13aaed0c4564b0e7`.
+- `apart_results/evidence/historical/20260706_flagship/run_summary.json`, SHA-256
+  `6a880b1ba6e1a94040ab577a18d2042fb04b3253c0f135f8f029eac81039e1f2`.
+- `apart_results/evidence/historical/20260816_xor/run_summary.json`, SHA-256
+  `17a358bde5f130884251b38208b080dffb15f2965918b4fba0254cab14cb8ce1`.

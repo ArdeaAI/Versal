@@ -10,7 +10,7 @@ This file separates publishable observations from interpretations that the avail
 - **Publish:** the library moved from 0 to 18 indexed records (17 live) and contained level-3 compositions.
 - **Do not infer:** benchmark superiority, statistical reliability, curriculum-independent performance, or a solve rate from outcome labels.
 
-Evidence: `results/20260817_031349_orchestrated/run_summary.json` (`deeafeb…155e43`), `run_manifest.json` (`dd78ea…98389b`), `config.effective.json` (`7abb6a…44ef6`), `task_pool.json` (`9fd250…ade72`), and `library_canary_clean_seed0/index.json` (`11b1d6…19143`).
+Evidence: `apart_results/20260817_031349_orchestrated/run_summary.json` (`d7f252…885c51`), its run manifest, effective config, and task pool, plus `apart_results/library_canary_clean_seed0/index.json` (`11b1d6…19143`).
 
 ## Cosmic field reuse
 
@@ -20,14 +20,14 @@ Evidence: `results/20260817_031349_orchestrated/run_summary.json` (`deeafeb…15
 - **Do not publish:** `cross_resolution_reuse_count = 1`. The generated counter is a false positive because stored field metadata changes the `io` dictionary used by the comparison.
 - **Do not attribute:** the original `cosmic.b432` task’s 0.9924 query score to the newly admitted field; that task’s report champion was routed.
 
-Evidence: `library_canary_clean_seed0/entries/m1_3c8730a6e281.json` (`a951e4…119ad`) plus the two Cosmic task rows in the clean run summary.
+Evidence: `apart_results/library_canary_clean_seed0/entries/m1_3c8730a6e281.json` (`a951e4…119ad`) plus the two Cosmic task rows in the clean run summary.
 
 ## Historical persistence
 
 - **Publish as historical observation:** the July 6 cold, rungs 1-6 run recorded 217 hits and 17 refinements in 400 encounters; excluding XOR, 168/333 encounters were hits or refinements. Its retained library reached level 5.
 - **Do not infer:** causal speedup or improved generalization. There is no matched no-memory arm, task identity and outcome confound runtime, and the run predates current metric/admission semantics.
 
-Evidence: `ai/archive/20260706_flagship/results/run_summary.json` (`04838c…8288`) and `library/index.json` (`b63e85…f6ea6`).
+Evidence: `apart_results/evidence/historical/20260706_flagship/run_summary.json` (`6a880b…9e1f2`) and its copied `index.json` (`b63e85…f6ea6`).
 
 ## XOR reproducibility and compression
 
@@ -36,7 +36,7 @@ Evidence: `ai/archive/20260706_flagship/results/run_summary.json` (`04838c…828
 - **Do not publish:** 200 independent solves, multi-seed replication, mathematical minimality, or an active sine implementation.
 - **Reason:** the final five-node payload was not preserved; renders omit activation identity; the preserved accepted XOR entries containing sine have sine off the active input-output path.
 
-Evidence: `ai/archive/20260816_02_hackathon/results/20260816_185653_orchestrated/run_summary.json` (`3f4071…4b0e7`) and the archived task render.
+Evidence: `apart_results/evidence/historical/20260816_xor/run_summary.json` (`17a358…cb8ce1`) and the copied `net.png` render.
 
 ## Digital-mind framing
 

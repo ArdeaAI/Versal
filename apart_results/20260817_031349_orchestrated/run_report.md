@@ -2,12 +2,12 @@
 
 ## Provenance
 
-This report was derived from `/Users/sinjhin/WS/A/subworkdir/VERSAL/results/20260817_031349_orchestrated` using report schema 1. It reads only the durable summary, pinned configs and task manifest, and optional library metadata.
+This report was derived from `apart_results/20260817_031349_orchestrated` using report schema 1. It reads only the durable summary, pinned configs and task manifest, and optional library metadata.
 
-- `run_summary.json`: `deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43` (102,272 bytes)
-- `run_manifest.json`: `dd78eade854d5bbe935079d7f6a66ff6c0744f0e3643a59b8b73c2ce1a98389b` (781 bytes)
+- `run_summary.json`: `d7f25295ba8c40a5a7bbf704612ae8c8d1f00656331e17a1b341ad414b885c51` (102,240 bytes)
+- `run_manifest.json`: `b9bccf8df7e18135ec68e5d8e7d0e41660b239a35e0e123ba037d3d1a4cdc358` (757 bytes)
 - `config.toml`: `26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d` (9,751 bytes)
-- `config.effective.json`: `7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6` (10,721 bytes)
+- `config.effective.json`: `2c66926c431eb12415b283b55c9b957c9eeb044fa937cbd31da60728fbd7a713` (10,683 bytes)
 - `task_pool.json`: `9fd250d93c05b1747ae78d540717bc30c9d5278da9dad103e7c879eef48ade72` (7,884 bytes)
 - Dataset `Ardea/Icarus-dataset` at revision `412029ed1b86072a08f47102959d3ebdc9dee766`; selection `shard_round_robin_v1`.
 - Code commit `043e1e253d2345515ae70ee15b55c012b7e2bfc7`; clean worktree.

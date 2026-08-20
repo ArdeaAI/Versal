@@ -1,7 +1,7 @@
 """run_matrix: the multi-seed experiment driver plus the per-rung tier scorecard.
 
     uv run run_matrix --config configs/canary.toml --seeds 0,1,2 --cold
-    uv run run_matrix --scorecard results/20260706_024726_orchestrated
+    uv run run_matrix --scorecard results/<run>
 
 One arm = (config, seed, cold or shared library). Arms execute sequentially as subprocesses of the
 ordinary app entry point (crash isolation: a dead arm still leaves its run_summary.json and the

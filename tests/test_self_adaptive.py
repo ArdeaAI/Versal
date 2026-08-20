@@ -1,4 +1,4 @@
-"""Lever F: self-adaptive per-genome operator rates (ai/two_spirals_second_plan.md 2.1).
+"""Tests for self-adaptive per-genome operator rates.
 
 Each genome carries its own operator probabilities as genes; the adaptive pipeline perturbs them
 log-normally (ES perturb-and-inherit) and applies operators at the genome's own rates, so the
