@@ -1,9 +1,9 @@
-"""The lever-E spike runner (ai/cppn_spike_plan.md Phase 2): evolve a CPPN generator on two-spirals.
+"""Experimental runner that evolves a CPPN generator on two-spirals.
 
 Arms: `cppn` (the generative encoding, sin or tanh detector bank) and `direct` (the in-harness
 control: the ordinary flat encoding under the IDENTICAL config, operators, palette, and gradient
 budget, so a stalled CPPN arm reads as generator-space hardness rather than a weak harness).
-The inline config is pinned here, per the plan: sin/gaussian in the palette (build_evolver's
+The inline config is pinned here: sin/gaussian in the palette (build_evolver's
 fallback excludes them), the flat recipe with explicit probs, sequential assessment (no pool
 side effects), and the rung3-recipe trainer (200 steps + weight decay) so a stall means search.
 
@@ -186,7 +186,7 @@ def run_arm(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Lever-E CPPN spike runner (ai/cppn_spike_plan.md)")
+    parser = argparse.ArgumentParser(description="Experimental CPPN generator runner for two-spirals")
     parser.add_argument("--arm", choices=("cppn", "direct"), default="cppn")
     parser.add_argument("--phenotype-activation", choices=("sin", "tanh"), default="sin")
     parser.add_argument("--hidden", type=int, default=64)

@@ -30,13 +30,13 @@
     "files": [
       {
         "path": "run_summary.json",
-        "sha256": "deeafeb90e790fbc8f72fc1bfadc10d07eebf95e5f2cb41d9647b5d3dd155e43",
-        "size": 102272
+        "sha256": "d7f25295ba8c40a5a7bbf704612ae8c8d1f00656331e17a1b341ad414b885c51",
+        "size": 102240
       },
       {
         "path": "run_manifest.json",
-        "sha256": "dd78eade854d5bbe935079d7f6a66ff6c0744f0e3643a59b8b73c2ce1a98389b",
-        "size": 781
+        "sha256": "b9bccf8df7e18135ec68e5d8e7d0e41660b239a35e0e123ba037d3d1a4cdc358",
+        "size": 757
       },
       {
         "path": "config.toml",
@@ -45,8 +45,8 @@
       },
       {
         "path": "config.effective.json",
-        "sha256": "7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6",
-        "size": 10721
+        "sha256": "2c66926c431eb12415b283b55c9b957c9eeb044fa937cbd31da60728fbd7a713",
+        "size": 10683
       },
       {
         "path": "task_pool.json",
@@ -67,16 +67,16 @@
       "index_sha256": "11b1d630705157f063a7096decfa73f5ae60ccacc3d0980924895dc5bf519143",
       "motif_count": null,
       "motifs_sha256": null,
-      "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/library_canary_clean_seed0"
+      "path": "apart_results/library_canary_clean_seed0"
     },
-    "run_dir": "/Users/sinjhin/WS/A/subworkdir/VERSAL/results/20260817_031349_orchestrated",
+    "run_dir": "apart_results/20260817_031349_orchestrated",
     "start_manifest": {
       "code": {
         "git_commit": "043e1e253d2345515ae70ee15b55c012b7e2bfc7",
         "git_dirty": false
       },
       "config": {
-        "effective_sha256": "7abb6aae5ef02da457dc374d375b94c9a0cc4b73ab14c3c7cb30538d40f44ef6",
+        "effective_sha256": "2c66926c431eb12415b283b55c9b957c9eeb044fa937cbd31da60728fbd7a713",
         "path": "configs/canary.toml",
         "sha256": "26e698cc2708a92eadebff326fab0b8ff6eaa12252ec04e3204684510fb30f9d"
       },
@@ -87,7 +87,7 @@
         "entry_count": 0,
         "file_count": 0,
         "keys": [],
-        "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/library_canary_clean_seed0"
+        "path": "apart_results/library_canary_clean_seed0"
       },
       "schema_version": 1,
       "task_pool": {

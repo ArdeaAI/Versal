@@ -6,7 +6,7 @@
 
 Run from the repository root:
 
-    uv run python ai/for_apart/make_system_figures.py
+    uv run python apart_results/submission/source/make_system_figures.py
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "ai" / "for_apart" / "figures"
-DEFAULT_LIBRARY = REPO_ROOT / "library_canary_clean_seed0"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "apart_results" / "submission" / "figures"
+DEFAULT_LIBRARY = REPO_ROOT / "apart_results" / "library_canary_clean_seed0"
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "canary.toml"
 
 INK = "#172033"

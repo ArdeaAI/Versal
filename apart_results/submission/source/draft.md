@@ -205,7 +205,7 @@ The work does not include deployment, environmental action, self-replication, re
 
 ### A.3 Reproducibility record
 
-The primary evidence comes from `results/20260817_031349_orchestrated` and `library_canary_clean_seed0`. The run used code commit `043e1e253d2345515ae70ee15b55c012b7e2bfc7` with a clean worktree, seed 0, Icarus revision `412029ed1b86072a08f47102959d3ebdc9dee766`, and an empty starting library. SHA-256 digests are pinned for the run summary, manifest, effective configuration, task pool, manuscript, scripts, and figure outputs in the accompanying evidence manifest.
+The primary evidence is published in `apart_results/20260817_031349_orchestrated` and `apart_results/library_canary_clean_seed0`. The run used code commit `043e1e253d2345515ae70ee15b55c012b7e2bfc7` with a clean worktree, seed 0, Icarus revision `412029ed1b86072a08f47102959d3ebdc9dee766`, and an empty starting library. SHA-256 digests are pinned for the run summary, manifest, effective configuration, task pool, manuscript, scripts, and figure outputs in the accompanying evidence manifest.
 
 ## LLM Usage Statement
 

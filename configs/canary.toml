@@ -1,5 +1,5 @@
-# Complete local methodology: one task from every rung with every search, reuse, and
-# decomposition mechanism enabled. Intended for an M4 Max and roughly a 1-2 hour run.
+# Complete local methodology: two tasks from every rung with every search, reuse, and
+# decomposition mechanism enabled.
 
 [run]
 project = "versal"

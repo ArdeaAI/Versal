@@ -11,12 +11,12 @@ n_samples = 400
 
 [schedule]
 rungs = [18]
-tasks_per_rung = 200
+tasks_per_rung = 20
 
 [orchestrator]
-tasks = 200
-max_task_seconds = 400
-max_total_task_seconds = 600
+tasks = 20
+max_task_seconds = 540
+max_total_task_seconds = 620
 
   [orchestrator.budgets]
   depth0 = 400

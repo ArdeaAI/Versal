@@ -13,15 +13,15 @@ The clean canary run and its final library are stored beside this directory as `
 From the repository root, rebuild the paper with:
 
 ```text
-uv run python ai/for_apart/build_submission.py
+uv run python apart_results/submission/source/build_submission.py
 ```
 
 Verify the pinned evidence with:
 
 ```text
-uv run python paper/tools/verify_evidence.py --manifest ai/for_apart/evidence_manifest.json
+uv run python paper/tools/verify_evidence.py --manifest apart_results/submission/source/evidence_manifest.json
 ```
 
-Final PDF SHA-256: `f8fe39e84c302273dc8a72221b42747e0520531ba13c01eb1b9beabf798b7d81`
+Final PDF SHA-256: `69dcda5ac4025028bcfbfa647564fe7b5606d7f207ec6387f15405bdd41a6bc9`
 
 Final slideshow SHA-256: `795225148445aa5c1710390060ca14d961c989e5f7ef2984b5d9453b7a73c465`

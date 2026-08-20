@@ -1,16 +1,16 @@
 {
-  "run_dir": "results/20260816_185653_orchestrated",
+  "run_dir": "apart_results/evidence/historical/20260816_xor",
   "status": "done",
   "config_path": "configs/brute.toml",
   "config_sha256": "9ccc0a37010a6409938e666fde3f1f1c5a1ae0a1ba0a10b5c3d91e6ad220b4a3",
   "config_effective_sha256": "1b41ae2b4694a759c167d035f0863a2bae5d0b661f1d7ddb440cdf8523b8c265",
   "config_sources": [
     {
-      "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/configs/canary.toml",
+      "path": "configs/canary.toml",
       "sha256": "4654a7b5ffe1a1f3f80ea728061e00fe9d140793f06197536bd9de66cdb5e6c2"
     },
     {
-      "path": "/Users/sinjhin/WS/A/subworkdir/VERSAL/configs/brute.toml",
+      "path": "configs/brute.toml",
       "sha256": "9ccc0a37010a6409938e666fde3f1f1c5a1ae0a1ba0a10b5c3d91e6ad220b4a3"
     }
   ],

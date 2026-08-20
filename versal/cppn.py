@@ -1,4 +1,4 @@
-"""Connective-CPPN spike substrate (ai/cppn_spike_plan.md): a generative encoding prototype.
+"""Connective-CPPN substrate: a generative encoding prototype.
 
 The evolved genome IS a CPPN: an ordinary `Genome` (1 input + bias -> 4 outputs) run through the
 ordinary `GraphNet`. The phenotype is a bank of `H` detectors at coordinates evenly spaced on
@@ -12,9 +12,9 @@ cached at decode. A decode-time cache breaks the second Adam step (backward thro
 which `Evolver.assess` does not catch) and silently fakes the `weight_samples` generator
 diagnostic (the sweep fills CPPN weights; a cached phenotype would never change).
 
-v0 scope, per the plan: the detector bank hard-codes input arity 2 (the two-spirals x, y); `H`
-and the phenotype activation are run parameters, not genes; depth and the general pair-query form
-are behind gate E.
+Prototype scope: the detector bank hard-codes input arity 2 (the two-spirals x, y); `H` and the
+phenotype activation are run parameters, not genes; depth and the general pair-query form are not
+implemented.
 """
 
 import math
