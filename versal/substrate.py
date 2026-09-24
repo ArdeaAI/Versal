@@ -69,6 +69,8 @@ class SubstrateModule(nn.Module):
     between the same node pair never collide.
     """
 
+    optimizer_steps: int = 0
+
     @property
     def has_edges(self) -> bool:
         raise NotImplementedError

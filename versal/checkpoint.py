@@ -25,7 +25,9 @@ def deserialize_rng(data: dict[str, Any]) -> random.Random:
 
 def write_checkpoint(directory: Path, payload: dict[str, Any]) -> Path:
     path = directory / "checkpoint.json"
-    path.write_text(json.dumps(payload, indent=2))
+    temporary = directory / "checkpoint.json.tmp"
+    temporary.write_text(json.dumps(payload, indent=2))
+    temporary.replace(path)
     return path
 
 
@@ -34,11 +36,19 @@ def read_checkpoint(directory: Path) -> dict[str, Any]:
 
 
 def build_orchestrated_payload(
-    *, task_cursor: int, rng: random.Random, scheduler: Any, speciator: Any, loop_state: dict[str, Any], attempts: list[dict[str, Any]], counters: dict[str, int]
+    *,
+    task_cursor: int,
+    rng: random.Random,
+    scheduler: Any,
+    speciator: Any,
+    loop_state: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    counters: dict[str, int],
+    search_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The orchestrated run's between-task resumable state. The library is file-persistent and
     append-only, so it checkpoints itself; an in-flight task simply restarts from its lookup step."""
-    return {
+    payload = {
         "task_cursor": task_cursor,
         "rng": serialize_rng(rng),
         "schedule": scheduler.state_dict(),
@@ -47,6 +57,12 @@ def build_orchestrated_payload(
         "attempts": attempts,
         "counters": counters,
     }
+    if search_state is not None:
+        from versal.strategy_sessions import capture_torch_rng
+
+        payload["search_state"] = search_state
+        payload["torch_rng"] = capture_torch_rng()
+    return payload
 
 
 def latest_task_checkpoint_dir(run_directory: Path) -> Path | None:

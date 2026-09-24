@@ -243,18 +243,27 @@ def same_topology(left: TopologyRecord, right: TopologyRecord) -> bool:
 
 
 def task_content_fingerprint(task: Task) -> str:
-    from versal.dataset.icarus import support_loader
-    from versal.library import task_io
-
-    digest = hashlib.sha256(json.dumps(task_io(task), sort_keys=True, separators=(",", ":")).encode())
-    for field_value in support_loader(task):
-        tensor = torch.as_tensor(field_value.data).detach().cpu().contiguous()
-        digest.update(str(tensor.dtype).encode())
-        digest.update(json.dumps(list(tensor.shape)).encode())
-        digest.update(tensor.numpy().tobytes())
-        descriptor = field_value.descriptor
-        digest.update(str(descriptor.value_type.value).encode())
-        digest.update(json.dumps([axis.value for axis in descriptor.axes]).encode())
+    """
+    Identify exact support and its complete contract, without inspecting query labels.
+    """
+    digest = hashlib.sha256(json.dumps({"version": 2, "kind": task.meta.kind.value, "fixed_split": task.meta.fixed_split}).encode())
+    for pair in task.support:
+        for field_value in pair:
+            contract = {
+                "axes": [axis.value for axis in field_value.axes],
+                "value_type": field_value.value_type.value,
+                "n_classes": field_value.n_classes,
+                "value_range": field_value.value_range,
+            }
+            digest.update(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode())
+            for value in (field_value.data, field_value.mask):
+                if value is None:
+                    digest.update(b"null")
+                    continue
+                tensor = torch.as_tensor(value).detach().cpu().contiguous()
+                digest.update(str(tensor.dtype).encode())
+                digest.update(json.dumps(list(tensor.shape)).encode())
+                digest.update(tensor.numpy().tobytes())
     return digest.hexdigest()
 
 

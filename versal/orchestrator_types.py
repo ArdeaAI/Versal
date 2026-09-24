@@ -41,6 +41,14 @@ class Attempt:
     support_status: str = "legacy_missing"
     query_status: str = "legacy_missing"
     representation: str | None = None
+    candidate_id: str | None = None
+    reported_candidate_id: str | None = None
+    acceptance_reason: str | None = None
+    acceptance_value: float | None = None
+    acceptance_threshold: float | None = None
+    selected_support_accuracy: float | None = None
+    phase: str | None = None
+    strategy_work: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -92,6 +100,11 @@ class Attempt:
             )
         if self.representation is not None:
             data["representation"] = self.representation
+        for name in ("candidate_id", "reported_candidate_id", "acceptance_reason", "acceptance_value", "acceptance_threshold", "selected_support_accuracy", "phase"):
+            if (value := getattr(self, name)) is not None:
+                data[name] = value
+        if self.strategy_work:
+            data["strategy_work"] = self.strategy_work
         return data
 
     @classmethod
@@ -125,6 +138,14 @@ class Attempt:
             support_status=str(data.get("support_status", "legacy_missing")),
             query_status=str(data.get("query_status", "legacy_missing")),
             representation=str(data["representation"]) if data.get("representation") is not None else None,
+            candidate_id=data.get("candidate_id"),
+            reported_candidate_id=data.get("reported_candidate_id"),
+            acceptance_reason=data.get("acceptance_reason"),
+            acceptance_value=data.get("acceptance_value"),
+            acceptance_threshold=data.get("acceptance_threshold"),
+            selected_support_accuracy=data.get("selected_support_accuracy"),
+            phase=data.get("phase"),
+            strategy_work=dict(data.get("strategy_work", {})),
         )
 
 
@@ -159,6 +180,8 @@ def refinement_improves(candidate: RefinementRank, incumbent: RefinementRank, *,
     solution and never treats an equal candidate as an improvement.
     """
     if not (math.isfinite(candidate.metric) and math.isfinite(candidate.robustness)):
+        return False
+    if incumbent.metric == 1.0 and candidate.metric < 1.0:
         return False
     if candidate.metric > incumbent.metric + metric_epsilon:
         return True

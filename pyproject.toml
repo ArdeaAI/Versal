@@ -33,6 +33,7 @@ ablation_suite = "versal.tools.ablation_suite:main"
 experiment_archive = "versal.tools.experiment_archive:main"
 router_migrate = "versal.tools.router_migrate:main"
 runtime_inventory = "versal.tools.runtime_inventory:main"
+xor_repro = "versal.tools.xor_repro:main"
 
 [build-system]
 requires = ["hatchling"]

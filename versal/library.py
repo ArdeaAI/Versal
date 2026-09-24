@@ -408,10 +408,19 @@ class ModuleLibrary:
         summary = self._index[key]
         summary["accepted_metric"] = max(float(summary.get("accepted_metric", 0.0)), float(provenance.get("accepted_metric", 0.0)))
         summary["weight_robustness"] = max(float(summary.get("weight_robustness", 0.0)), float(provenance.get("weight_robustness", 0.0)))
-        if provenance.get("validation_status") == "passed":
-            summary["validation_status"] = "passed"
+        if provenance.get("validation_status") in {"passed", "exhaustive"}:
+            summary["validation_status"] = provenance["validation_status"]
             summary["cv_pass_fraction"] = max(float(summary.get("cv_pass_fraction", 0.0)), float(provenance.get("cv_pass_fraction", 0.0)))
         entry = self.load(key)
+        if not provenance.get("dependency") and not provenance.get("stepping_stone"):
+            promoted = bool(entry.provenance.get("stepping_stone") or entry.provenance.get("dependency"))
+            entry.provenance.pop("stepping_stone", None)
+            entry.provenance.pop("dependency", None)
+            if promoted:
+                entry.provenance.update({name: value for name, value in provenance.items() if name not in {"task", "rung", "depth", "strategy"}})
+            summary["dependency"] = False
+            summary["retired"] = False
+            summary.pop("retired_reason", None)
         history = entry.provenance.setdefault("readmissions", [])
         history.append({k: provenance.get(k) for k in ("task", "rung", "depth", "accepted_metric", "weight_robustness", "validation_status", "cv_pass_fraction")})
         del history[:-10]  # cap file growth
@@ -547,6 +556,10 @@ class ModuleLibrary:
         is preserved because only provably-unreferenced tombstones go."""
         marked = {key for key, summary in self._index.items() if not summary.get("retired", False)}
         marked.update(key for key in protect if key in self._index)
+        search_index = self.root / "search" / "index.json"
+        if search_index.exists():
+            for record in json.loads(search_index.read_text()).values():
+                marked.update(key for key in record.get("protect", []) if key in self._index)
         frontier = list(marked)
         while frontier:
             key = frontier.pop()

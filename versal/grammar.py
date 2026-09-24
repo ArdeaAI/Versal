@@ -323,6 +323,8 @@ def _lineage_root(key: str, entries: dict[str, LibraryEntry]) -> str:
     while current not in path:
         path.append(current)
         entry = entries.get(current)
+        if entry is not None and entry.provenance.get("search_lineage"):
+            return str(entry.provenance["search_lineage"])
         parent = entry.provenance.get("refined_from") if entry is not None else None
         if not isinstance(parent, str) or not parent:
             return current
@@ -476,13 +478,17 @@ def induce_grammar(
     all_entries = {key: library.load(key) for key in library.keys()}
     selected_keys = [str(row["key"]) for row in library.summaries(include_retired=include_retired)]
     selected_keys.sort()
+    roots = {key: _lineage_root(key, all_entries) for key in selected_keys}
+    # An interleaved task can publish many snapshots from one lineage. Enumeration cannot
+    # discover independent support in that case, regardless of graph size or motif count.
+    eligible_keys = selected_keys if len(set(roots.values())) >= min_lineage_support else []
     groups: dict[tuple[str, str, tuple[BoundaryPort, ...]], list[_Occurrence]] = {}
-    for key in selected_keys:
+    for key in eligible_keys:
         entry = all_entries[key]
         if entry.entry_type == MODULE and "field_template" in entry.payload:
             continue
         sizes = module_sizes if entry.entry_type == MODULE else composition_sizes
-        root = _lineage_root(key, all_entries)
+        root = roots[key]
         for occurrence in _entry_occurrences(entry, sizes, per_entry_cap, root):
             group_key = (entry.entry_type, motif_fingerprint(occurrence.motif), occurrence.ports)
             groups.setdefault(group_key, []).append(occurrence)

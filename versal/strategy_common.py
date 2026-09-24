@@ -40,6 +40,7 @@ class StrategyRuntime:
     shutdown_requested: Callable[[], bool] | None = None
     topology_tabu: "TopologyTabuSession | None" = None
     deadline: float | None = None
+    search_lineage: str | None = None
 
     def accepted(self, item: Any) -> bool:
         return self.accepts(item) if self.accepts is not None else self.metric_of(item) >= self.accept_threshold
@@ -77,6 +78,10 @@ class StrategyResult:
     field_template: dict[str, Any] | None = None
     representation: str | None = None
     skip_reason: str | None = None
+    candidate_id: str | None = None
+    phase: str | None = None
+    strategy_work: dict[str, dict[str, float]] = field(default_factory=dict)
+    refinement_generations: int = 0
 
     @property
     def has_report_candidate(self) -> bool:

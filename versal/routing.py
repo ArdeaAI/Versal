@@ -5,11 +5,14 @@ admissible only after their dominant pathway distills to a verified ``Compositio
 state alone remains report-only unless distillation is disabled explicitly.
 """
 
+import copy
+import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import tempfile
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -241,6 +244,7 @@ class RoutedNet(nn.Module):
         self.edge_dim = edge_dim
         self.lazy_residency = lazy_residency
         self.shard_loader: Any | None = None
+        self._report_directory: tempfile.TemporaryDirectory[str] | None = None
         self.expert_loader: Any | None = None
         self.vertex_in_adapters = nn.ModuleDict()
         self.vertex_out_adapters = nn.ModuleDict()
@@ -511,7 +515,9 @@ class RoutedTaskView(nn.Module):
 
 @dataclass(frozen=True)
 class RoutedSolution:
-    """A RECORD of a routed win, not an executable payload: the state lives in the persisted router."""
+    """
+    A routed candidate with an optional frozen executable snapshot for held-out reporting.
+    """
 
     router_version: int
     input_key: str
@@ -521,6 +527,67 @@ class RoutedSolution:
     trained_metric: float
     steps_used: int
     expert_usage: dict[str, float] = field(default_factory=dict)
+    snapshot: Any = field(default=None, repr=False, compare=False)
+    identity: str | None = None
+
+
+def frozen_router(net: RoutedNet) -> RoutedNet:
+    """
+    Copy trained parameters and freeze lazy shards for later held-out reporting.
+    """
+    memo: dict[int, Any] = {}
+    visited: set[int] = set()
+
+    def detach(value: Any) -> None:
+        if id(value) in visited:
+            return
+        visited.add(id(value))
+        if isinstance(value, torch.Tensor) and not isinstance(value, nn.Parameter):
+            memo[id(value)] = value.detach().clone()
+        elif isinstance(value, dict):
+            for item in value.values():
+                detach(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                detach(item)
+        elif isinstance(value, nn.Module):
+            detach(value.__dict__)
+
+    detach(net)
+    owner = getattr(net.shard_loader, "__self__", None)
+    if owner is not None:
+        # Expert payloads are immutable library entries; copying the whole library cache would
+        # duplicate unrelated populations. The mutable routing service itself is copied.
+        memo[id(owner.library)] = owner.library
+    snapshot = copy.deepcopy(net, memo)
+    copied_owner = getattr(snapshot.shard_loader, "__self__", None)
+    if copied_owner is not None:
+        if copied_owner.persist_dir is not None and copied_owner.persist_dir.exists():
+            directory = tempfile.TemporaryDirectory(prefix="versal-router-report-")
+            destination = Path(directory.name)
+            for source in copied_owner.persist_dir.rglob("*.pt"):
+                target = destination / source.relative_to(copied_owner.persist_dir)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(source, target)  # live saves atomically replace shards, preserving this inode
+                except OSError:
+                    shutil.copy2(source, target)
+            copied_owner.persist_dir = destination
+            snapshot._report_directory = directory
+        loader = snapshot.shard_loader
+        assert loader is not None
+        random_state = torch.get_rng_state().numpy().tobytes()
+
+        def load_frozen(kind: str, key: str) -> None:
+            seed = int.from_bytes(hashlib.sha256(random_state + f"{kind}:{key}".encode()).digest()[:8], "big")
+            with torch.random.fork_rng(devices=[]):
+                # Lazy adapters initialize on CPU. Global manual_seed would also reset
+                # CUDA/MPS streams during held-out reporting, outside this CPU RNG guard.
+                torch.random.default_generator.manual_seed(seed)
+                loader(kind, key)
+
+        snapshot.shard_loader = load_frozen
+    return snapshot
 
 
 def mean_firing_step(step_masses: list[float]) -> float | None:
@@ -616,7 +683,7 @@ class RouterService:
         if persist_dir is not None and (persist_dir / "router_meta.json").exists():
             self._load(persist_dir)
 
-    def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True) -> int:
+    def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True, render: bool = True) -> int:
         revived = 0
         for key, record in list(self.evicted.items()):
             summary = self.library.summary(key)
@@ -638,7 +705,8 @@ class RouterService:
         for name in self.net._vertex_order:
             self.route_life.setdefault(name, self.route_patience_tasks)
         self.last_lifecycle_metrics = {"router_vertices_revived": float(revived)} if revived else {}
-        self.render_overmind()  # the internal signature guard catches additions, revival, and retirement
+        if render:
+            self.render_overmind()  # the signature guard catches additions, revival, and retirement
         return added
 
     def note_pending_embedding(self, fingerprint: str, embedding: torch.Tensor) -> None:
@@ -990,12 +1058,26 @@ class RouterService:
     def _load_expert(self, key: str) -> None:
         vertex = self.net._vertices[key]
         entry = self.library.load(vertex.original_key)
-        loaded = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
+        # Reconstructing frozen weights must not move a task's training random stream.
+        with torch.random.fork_rng(devices=[]):
+            loaded = build_vertex(entry, self.library, max_inline_depth=self.max_inline_depth)
         if loaded is None or (loaded.in_width, loaded.out_width) != (vertex.in_width, vertex.out_width):
             raise KeyError(f"library expert {vertex.original_key!r} no longer matches its router descriptor")
         vertex.module = loaded.module
 
     def _load_shard(self, kind: str, key: str) -> None:
+        """
+        Rehydrate saved weights without consuming random initialization draws.
+        """
+        folder = {"vertex": "vertices", "input": "inputs", "output": "outputs"}.get(kind, kind)
+        path = self.persist_dir / "shards" / folder / f"{key}.pt" if self.persist_dir is not None else None
+        if path is not None and path.is_file():
+            with torch.random.fork_rng(devices=[]):
+                self._materialize_shard(kind, key)
+        else:
+            self._materialize_shard(kind, key)
+
+    def _materialize_shard(self, kind: str, key: str) -> None:
         if kind == "vertex":
             vertex = self.net._vertices[key]
             input_adapter = _bottleneck_linear(self.net.d_model, vertex.in_width, self.net.adapter_rank)
@@ -1141,6 +1223,7 @@ class RoutedStrategy:
     route_patience_tasks: int = 24
     route_activity_floor: float = 0.01
     route_traffic_decay: float = 0.95
+    render: bool = True
     name: str = "routed"
     service: RouterService | None = None
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
@@ -1162,7 +1245,7 @@ class RoutedStrategy:
                 edge_bias=self.edge_bias,
                 persist_dir=(Path(self.library_dir) / "router") if self.persist else None,
                 persist_strict=self.persist_strict,
-                image_dir=Path(self.library_dir) / "images",  # overmind.png lands beside the entry renders
+                image_dir=(Path(self.library_dir) / "images") if self.render else None,
                 lazy_residency=self.lazy_residency,
                 lifecycle_enabled=self.lifecycle_enabled,
                 route_patience_tasks=self.route_patience_tasks,
@@ -1186,6 +1269,13 @@ class RoutedStrategy:
         steps_used: int,
         metrics: dict[str, float],
     ) -> RoutedSolution:
+        digest = hashlib.sha256()
+        digest.update(str(service.version).encode())
+        digest.update(view.support_input.detach().cpu().contiguous().numpy().tobytes())
+        digest.update(json.dumps([view.input_key, view.head_key, view.net._vertex_order, sorted(view.net._retired)]).encode())
+        for name, tensor in sorted(view.net.state_dict().items()):
+            digest.update(name.encode())
+            digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
         return RoutedSolution(
             router_version=service.version,
             input_key=view.input_key,
@@ -1195,6 +1285,8 @@ class RoutedStrategy:
             trained_metric=float(metric),
             steps_used=steps_used,
             expert_usage=dict(view.net.last_gate_stats),
+            snapshot=frozen_router(view.net),
+            identity=f"router:{digest.hexdigest()[:20]}",
         )
 
     def evaluate_report(self, candidate: RoutedSolution, task: Task, spec: CompTaskSpec, library: ModuleLibrary) -> dict[str, float]:
@@ -1202,9 +1294,9 @@ class RoutedStrategy:
 
         from versal.evaluation import evaluate
 
-        service = self._service(library)
+        net = candidate.snapshot if candidate.snapshot is not None else self._service(library).net
         support_input, _descriptor = spec.encoded.support_input
-        view = RoutedTaskView(service.net, input_key=candidate.input_key, head_key=candidate.head_key, support_input=support_input)
+        view = RoutedTaskView(net, input_key=candidate.input_key, head_key=candidate.head_key, support_input=support_input)
         with torch.no_grad():
             return dict(evaluate(view, spec.encoded, spec.encoder))
 
@@ -1299,13 +1391,13 @@ class RoutedStrategy:
                 runtime.on_generation(self.name, steps_run // milestone, holder, float(-loss.detach()))
         return steps_run
 
-    def _replay_step(self, optimizer: torch.optim.Optimizer) -> None:
+    def _replay_step(self, optimizer: torch.optim.Optimizer) -> int:
         from versal.evaluation import support_loss
 
         encoded, input_key, head_key, support_input = self._replay[int(torch.randint(len(self._replay), (1,)))]
         net = self.service.net if self.service is not None else None
         if net is None:
-            return
+            return 0
         replay_view = RoutedTaskView(net, input_key=input_key, head_key=head_key, support_input=support_input)
         optimizer.zero_grad()
         loss = support_loss(replay_view, encoded)
@@ -1313,6 +1405,8 @@ class RoutedStrategy:
             self._sync_optimizer_parameters(optimizer, net)
             loss.backward()
             optimizer.step()
+            return 1
+        return 0
 
     @staticmethod
     def _sync_optimizer_parameters(optimizer: torch.optim.Optimizer, net: RoutedNet) -> None:
@@ -1617,4 +1711,5 @@ def build_routed_strategy(config: dict[str, Any]) -> RoutedStrategy:
         route_patience_tasks=max(1, int(lifecycle.get("route_patience_tasks", 24))),
         route_activity_floor=max(0.0, float(lifecycle.get("activity_floor", 0.01))),
         route_traffic_decay=min(1.0, max(0.0, float(lifecycle.get("traffic_decay", 0.95)))),
+        render=bool(table.get("render", True)),
     )

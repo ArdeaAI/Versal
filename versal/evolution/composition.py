@@ -800,6 +800,64 @@ def perturb_glue(comp: CompositionGenome, ctx: CompMutationContext, *, rng: rand
     return child
 
 
+@COMP_MUTATION.register("remove_comp_edge")
+def remove_comp_edge(comp: CompositionGenome, ctx: CompMutationContext, *, rng: random.Random, prob: float = 0.1) -> CompositionGenome:
+    """
+    Delete an edge so composition search can reduce its executable structure.
+    """
+    if rng.random() >= prob or not comp.edges:
+        return comp
+    child = comp.clone()
+    del child.edges[rng.randrange(len(child.edges))]
+    return child
+
+
+@COMP_MUTATION.register("remove_module_node")
+def remove_module_node(comp: CompositionGenome, ctx: CompMutationContext, *, rng: random.Random, prob: float = 0.1) -> CompositionGenome:
+    """
+    Remove a module and its incident edges; ordinary assessment checks viability.
+    """
+    if rng.random() >= prob or not comp.module_ids:
+        return comp
+    child = comp.clone()
+    target = rng.choice(child.module_ids)
+    del child.nodes[target]
+    child.edges = [edge for edge in child.edges if edge.in_id != target and edge.out_id != target]
+    return child
+
+
+@COMP_MUTATION.register("bypass_module")
+def bypass_module(comp: CompositionGenome, ctx: CompMutationContext, *, rng: random.Random, prob: float = 0.1) -> CompositionGenome:
+    """
+    Replace one module with a direct predecessor-to-successor connection.
+
+    The new glue is trained and validated normally. No equivalence of a nonlinear
+    module and its bypass is assumed, and rank/resource guards still apply.
+    """
+    if rng.random() >= prob or not comp.module_ids:
+        return comp
+    target = rng.choice(comp.module_ids)
+    incoming = [edge.in_id for edge in comp.enabled_edges() if edge.out_id == target]
+    outgoing = [edge.out_id for edge in comp.enabled_edges() if edge.in_id == target]
+    if not incoming or not outgoing:
+        return comp
+    child = comp.clone()
+    source, destination = rng.choice(incoming), rng.choice(outgoing)
+    del child.nodes[target]
+    child.edges = [edge for edge in child.edges if edge.in_id != target and edge.out_id != target]
+    if not child.has_edge(source, destination) and not comp_would_create_cycle(child, source, destination):
+        glue, rank = _glue_for(
+            child.nodes[source].out_width,
+            child.nodes[destination].in_width,
+            rng,
+            glue_rank=ctx.glue_rank,
+            glue_rank_threshold=ctx.glue_rank_threshold,
+            glue_storage=ctx.glue_storage,
+        )
+        child.edges.append(CompEdgeGene(source, destination, True, ctx.innovations.innovation(source, destination), glue, rank))
+    return child
+
+
 @dataclass
 class CompMutationPipeline:
     operators: list[CompMutator]

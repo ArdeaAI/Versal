@@ -31,7 +31,7 @@ class CompositionStrategy:
             seeded.append(minimal_values)
         return max(seeded, default=minimal_values)
 
-    def __call__(
+    def preflight_population(
         self,
         task: Task,
         spec: CompTaskSpec,
@@ -39,7 +39,7 @@ class CompositionStrategy:
         *,
         budget: int,
         seed_comps: list | None = None,
-    ) -> StrategyResult:
+    ) -> StrategyResult | dict[str, float]:
         initial_glue_values = self._initial_glue_values(spec, runtime, seed_comps)
         loop = runtime.loop
         pool = get_shared_pool()
@@ -84,6 +84,22 @@ class CompositionStrategy:
                 },
                 resource_metrics=combined_resource_metrics,
             )
+        return combined_resource_metrics
+
+    def __call__(
+        self,
+        task: Task,
+        spec: CompTaskSpec,
+        runtime: StrategyRuntime,
+        *,
+        budget: int,
+        seed_comps: list | None = None,
+    ) -> StrategyResult:
+        checked = self.preflight_population(task, spec, runtime, budget=budget, seed_comps=seed_comps)
+        if isinstance(checked, StrategyResult):
+            return checked
+        combined_resource_metrics = checked
+        loop = runtime.loop
         progress = {"generations": 0}
         loop.evolver.deadline = runtime.deadline
         loop.evolver.deadline_exceeded = runtime.deadline_exceeded

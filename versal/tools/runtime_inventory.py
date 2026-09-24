@@ -31,6 +31,7 @@ REGISTRY_MODULES = (
     "versal.evolution.train",
     "versal.library",
     "versal.strategy",
+    "versal.strategy_sessions",
 )
 
 # Paths intentionally describe the ordinary app entry point, not opt-in maintenance tools. Keep
@@ -45,6 +46,9 @@ RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "<library_dir>/router/router_state.pt", "access": "read-write", "condition": "routed persistence enabled"},
     {"path": "<library_dir>/router_stale_<timestamp>/", "access": "write", "condition": "persisted router is incompatible and persist_strict is false"},
     {"path": "<library_dir>/grammar/grammar.json", "access": "read-write", "condition": "grammar strategy rebuilds after the live library key set changes"},
+    {"path": "<library_dir>/search/index.json", "access": "read-write", "condition": "interleaved search stores task incumbents and population snapshot references"},
+    {"path": "<library_dir>/search/<task>-<sha256>.json.gz", "access": "read-write", "condition": "immutable task population, optimizer, RNG, and topology snapshots"},
+    {"path": "<system temp>/versal-router-report-*/", "access": "read-write", "condition": "immutable lazy router shards during held-out candidate reporting; removed afterward"},
     {"path": "<library_dir>/images/<key>.png", "access": "delete", "condition": "optional run-end GC removes an unreferenced retired entry"},
     {"path": "<library_dir>/images/overmind.png", "access": "write", "condition": "routed expert set changes"},
     {"path": "<library_dir>/images/overmind_pruned.png", "access": "write", "condition": "full overmind portrait is written; retired experts are compacted out"},

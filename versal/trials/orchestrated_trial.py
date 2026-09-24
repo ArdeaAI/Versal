@@ -137,6 +137,9 @@ class OrchestratedTrial(Proctor):
             self._load_task_pool()
             self._capture_or_load_run_manifest()
             orchestrator = Orchestrator(self.config, self.loop, self.library, state, proctor=self, shutdown_requested=lambda: self.shutdown.requested)
+            restored_search = getattr(self, "_restored_search_state", None)
+            if orchestrator.search is not None and restored_search is not None:
+                orchestrator.search.load_state_dict(restored_search)
             orchestrator.attempts = attempts
             if counters:
                 orchestrator.counters = {**orchestrator.counters, **counters}  # old checkpoints lack newer counters
@@ -635,6 +638,11 @@ class OrchestratedTrial(Proctor):
         if directory is None:
             raise FileNotFoundError(f"no checkpoint found under {self.run_dir}")
         data = checkpoint.read_checkpoint(directory)
+        self._restored_search_state = data.get("search_state")
+        if "torch_rng" in data:
+            from versal.strategy_sessions import restore_torch_rng
+
+            restore_torch_rng(data["torch_rng"])
         rng = checkpoint.deserialize_rng(data["rng"])
         state = state_from_dict(data["loop_state"], rng)
         self.scheduler.load_state_dict(data["schedule"])
@@ -747,6 +755,9 @@ class OrchestratedTrial(Proctor):
             record["resource_metrics"] = dict(attempt.resource_metrics)
         if attempt is not None and getattr(attempt, "strategy_metrics", None):
             record["strategy_metrics"] = dict(attempt.strategy_metrics)
+        if attempt is not None and (getattr(attempt, "validation_status", "not_run") != "not_run" or getattr(attempt, "validation_metrics", None)):
+            record["validation_status"] = attempt.validation_status
+            record["validation_metrics"] = dict(attempt.validation_metrics)
         if attempt is not None and getattr(attempt, "diagnostic_observation", None):
             record["diagnostic_observation"] = dict(attempt.diagnostic_observation)
         if attempt is not None and (
@@ -765,6 +776,20 @@ class OrchestratedTrial(Proctor):
             )
         if module_pool_sizes:
             record["module_pool"] = dict(module_pool_sizes)
+        if attempt is not None:
+            for name in (
+                "candidate_id",
+                "reported_candidate_id",
+                "acceptance_reason",
+                "acceptance_value",
+                "acceptance_threshold",
+                "selected_support_accuracy",
+                "phase",
+                "strategy_work",
+            ):
+                value = getattr(attempt, name, None)
+                if value is not None and value != {}:
+                    record[name] = value
         self.task_records.append(record)
 
     def _write_run_summary(self, orchestrator: Orchestrator | None, state: HierarchicalState, task_cursor: int, *, status: str) -> None:
@@ -899,6 +924,7 @@ class OrchestratedTrial(Proctor):
                 loop_state=state_to_dict(state),
                 attempts=attempts_to_dicts(orchestrator.attempts),
                 counters=orchestrator.counters,
+                search_state=orchestrator.search.state_dict() if orchestrator.search is not None else None,
             ),
         )
 
@@ -979,6 +1005,7 @@ class OrchestratedTrial(Proctor):
                 loop_state=state_to_dict(state),
                 attempts=attempts_to_dicts(orchestrator.attempts),
                 counters=orchestrator.counters,
+                search_state=orchestrator.search.state_dict() if orchestrator.search is not None else None,
             ),
         )
         # Snapshot the history: the async render thread must never read a list the next task mutates.

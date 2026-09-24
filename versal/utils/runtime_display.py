@@ -188,6 +188,11 @@ class RuntimeDisplay:
             reason = "no strategy produced an executable champion"
         elif getattr(attempt, "validation_status", None) in {"failed", "inconclusive"}:
             reason = f"best executable champion did not clear support-fold validation ({attempt.validation_status})"
+        elif getattr(attempt, "acceptance_reason", None) == "distillation_failed" or (
+            getattr(attempt, "report_strategy", None) == "routed"
+            and (getattr(attempt, "strategy_metrics", None) or {}).get("distilled_score", 1.0) < (getattr(attempt, "strategy_metrics", None) or {}).get("router_score", 0.0)
+        ):
+            reason = "no accepted reusable solution — router distillation failed"
         else:
             reason = "best executable champion remained below the acceptance threshold"
 
@@ -196,8 +201,14 @@ class RuntimeDisplay:
         grid.add_column(ratio=1)
         outcome_style = "bold green" if solved else "bold red"
         grid.add_row("Outcome", Text(f"{outcome} — {reason}", style=outcome_style))
+        strategy_metrics = getattr(attempt, "strategy_metrics", None) or {}
+        if not solved and "router_score" in strategy_metrics and "distilled_score" in strategy_metrics:
+            threshold = getattr(attempt, "acceptance_threshold", None)
+            required = f" · requires {threshold:.4f}" if threshold is not None else ""
+            grid.add_row("Live router support", f"{strategy_metrics['router_score']:.4f}")
+            grid.add_row("Distilled candidate support", f"{strategy_metrics['distilled_score']:.4f}{required}")
         grid.add_row(
-            Text("BEST REPORTABLE SUPPORT ACCURACY", style="bold bright_cyan"),
+            Text("SELECTED SUPPORT ACCURACY" if solved else "BEST REPORTABLE SUPPORT ACCURACY", style="bold bright_cyan"),
             _accuracy_with_counts(
                 getattr(attempt, "support_accuracy", None),
                 getattr(attempt, "support_status", "legacy_missing"),
@@ -217,7 +228,9 @@ class RuntimeDisplay:
             ),
         )
         validation_status = getattr(attempt, "validation_status", "not_run")
-        if validation_status != "not_run":
+        if validation_status == "exhaustive":
+            grid.add_row("Validation", "complete Boolean input domain verified")
+        elif validation_status != "not_run":
             validation_metrics = getattr(attempt, "validation_metrics", None) or {}
             passed = int(validation_metrics.get("cv_folds_passed", 0.0))
             completed = int(validation_metrics.get("cv_folds_completed", 0.0))
@@ -234,7 +247,11 @@ class RuntimeDisplay:
             grid.add_row("Selected path", "none — no executable parent champion")
             grid.add_row("Stopped during", "task deadline" if strategy == "time_budget" else "graceful shutdown")
         else:
-            grid.add_row("Selected path", f"{STAGES.get(strategy, (strategy, ''))[0]} · {getattr(attempt, 'generations', 0)} generations")
+            work = getattr(attempt, "strategy_work", None)
+            label = STAGES.get(strategy, (strategy, ""))[0]
+            grid.add_row("Selected path", label if work else f"{label} · {getattr(attempt, 'generations', 0)} generations")
+            if work:
+                grid.add_row("Shared generations", f"{getattr(attempt, 'generations', 0)} total · {getattr(attempt, 'refine_generations', 0)} refinement")
         report_strategy = getattr(attempt, "report_strategy", None)
         if report_strategy is not None:
             report_label = STAGES.get(report_strategy, (str(report_strategy).replace("_", " ").title(), ""))[0]
@@ -256,6 +273,11 @@ class RuntimeDisplay:
             else:
                 persistence = "nothing retained — no candidate cleared retention policy"
         grid.add_row("Persistence", f"{persistence} · library size {library_size}")
+        if getattr(attempt, "phase", None):
+            grid.add_row("Search phase", attempt.phase)
+        complexity = (getattr(attempt, "size_metrics", None) or {}).get("champion_expanded_complexity")
+        if complexity is not None:
+            grid.add_row("Expanded complexity", str(int(complexity)))
         strategy_metrics = getattr(attempt, "strategy_metrics", None) or {}
         expired = int(strategy_metrics.get("router_vertices_expired", 0.0))
         revived = int(strategy_metrics.get("router_vertices_revived", 0.0))

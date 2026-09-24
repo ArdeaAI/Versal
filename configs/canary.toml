@@ -4,7 +4,7 @@
 [run]
 project = "versal"
 experiment = "orchestrated_overmind_canary"
-clearml = true
+clearml = false
 # Keep Rich's transient progress footer local. Python logs, metrics, and artifacts still report.
 clearml_capture_streams = false
 machine = "MonadMetal"
@@ -34,6 +34,7 @@ shuffle = true
 
 [orchestrator]
 tasks = 36
+search_policy = "interleaved"
 # Search uses dense support feedback, admission respects task-level semantics, and reporting is held out.
 search_metric = "support_accuracy"
 accept_metric = "support_task_appropriate"
@@ -62,8 +63,8 @@ decompose_probe_generations = 6
 decompose_probe_seconds = 30
 decompose_leaf_cap = 64
 
-  # A support-perfect payload is a provisional solution until it can relearn from reduced support.
-  # The omitted support examples are the only validation labels; the real query remains blind.
+  # Complete Boolean domains receive exhaustive support verification; other tasks must relearn
+  # reduced support folds. The real query remains blind in either case.
   [orchestrator.cross_validation]
   enabled = true
   max_folds = 5
@@ -331,13 +332,16 @@ elitism = 1
     rate = 0.3
 
     [evolution.composition.mutation]
-    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue"]
+    operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue", "remove_comp_edge", "remove_module_node", "bypass_module"]
     add_module_node_prob = 0.3
     switch_ref_prob = 0.12
     add_comp_edge_prob = 0.15
     toggle_comp_edge_prob = 0.05
     perturb_glue_prob = 0.6
     perturb_glue_sigma = 0.3
+    remove_comp_edge_prob = 0.1
+    remove_module_node_prob = 0.1
+    bypass_module_prob = 0.1
 
   # The shared module population absorbs reusable library structures and receives champion-only credit.
   [evolution.modules]

@@ -162,6 +162,7 @@ def assess_composition_pure(
         comp, net = cast(tuple[CompositionGenome, ComposedNet], train_op(comp, net, spec.encoded, rng=rng, writeback=False, deadline=deadline))
         comp = writeback_composition(comp, net)
     metrics = evaluate_op(comp, net, _CompositionEvalAdapter(spec))
+    metrics["training_optimizer_steps"] = float(getattr(net, "optimizer_steps", 0))
     stamp_complexity_metrics(comp, metrics, library)
     if library is not None:
         from versal.library import MODULE, expanded_payload_complexity
@@ -271,6 +272,8 @@ class HierarchicalLoop:
     library: ModuleLibrary | None = None
     # Set only around post-solve composition refinement.
     topology_tabu: Any | None = None
+    work_evaluations: int = 0
+    work_optimizer_steps: int = 0
 
     def attach_library(self, library: ModuleLibrary | None) -> None:
         self.library = library
@@ -381,7 +384,10 @@ class HierarchicalLoop:
     def assess_composition(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
         """Public assessment seam: the orchestrator's strategies verify champions through it
         (fresh assembly against CURRENT champions/library) before threshold checks and admission."""
-        return self._assess(comp, spec, state, train=train)
+        result = self._assess(comp, spec, state, train=train)
+        self.work_evaluations += 1
+        self.work_optimizer_steps += int(result.metrics.get("training_optimizer_steps", 0))
+        return result
 
     def _assess(self, comp: CompositionGenome, spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> AssessedComposition:
         return assess_composition_pure(
@@ -399,13 +405,24 @@ class HierarchicalLoop:
         )
 
     def _assess_all(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
-        """Assess a batch of candidates, order-preserving. Prefer the shared process pool (true
+        """
+        Count evaluations and candidate gradient updates across serial or pooled work.
+        """
+        assessed = self._assess_batch(comps, spec, state, train=train)
+        self.work_evaluations += len(assessed)
+        self.work_optimizer_steps += sum(int(item.metrics.get("training_optimizer_steps", 0)) for item in assessed)
+        return assessed
+
+    def _assess_batch(self, comps: list[CompositionGenome], spec: CompTaskSpec, state: HierarchicalState, *, train: bool) -> list[AssessedComposition]:
+        """
+        Assess a batch of candidates, order-preserving. Prefer the shared process pool (true
         multi-core, same workers as the direct path) when present; else the sequential list.
 
         Results are identical to the serial loop: candidates share no trainable state, assessment
         consumes no rng (a throwaway rng in workers is safe), and floored candidates (assembly errors)
         are produced INSIDE the pure assessor. Pooled results carry trained glue and live-module
-        writebacks as plain genes; no torch storage crosses the process boundary."""
+        writebacks as plain genes; no torch storage crosses the process boundary.
+        """
         pool = get_shared_pool()
         if pool is not None and len(comps) > 1:
             # The encoded task can itself contain large torch tensors. Spill it once and let each

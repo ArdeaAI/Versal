@@ -70,6 +70,7 @@ def gradient(
     # weight_decay (L2) regularizes the fit: it shrinks weights, which narrows the support->query
     # generalization gap on tasks that can generalize (and is harmless when set to 0).
     parameters = _trainable_parameters(module)
+    module.optimizer_steps = 0
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
@@ -86,6 +87,7 @@ def gradient(
         if expired(deadline):
             break
         optimizer.step()
+        module.optimizer_steps += 1
     if writeback:
         genome = _writeback(genome, module)
     if score_candidates:  # NeST/GradMax growth hints from the trained weights (one extra backward)
@@ -130,6 +132,7 @@ def gradient_scheduled(
     # (fixed lr) to 0.92+ (scheduled) query, showing that trainability—not structure search—was
     # the binding constraint. rng-free like every train op (the batching contract).
     parameters = _trainable_parameters(module)
+    module.optimizer_steps = 0
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
@@ -146,6 +149,7 @@ def gradient_scheduled(
         if expired(deadline):
             break
         optimizer.step()
+        module.optimizer_steps += 1
     if writeback:
         genome = _writeback(genome, module)
     if score_candidates:
@@ -181,6 +185,7 @@ def gradient_refine(
     if not hasattr(module, "refine_trace"):
         return gradient(genome, module, encoded, rng=rng, steps=steps, lr=lr, writeback=writeback, weight_decay=weight_decay, score_candidates=score_candidates, deadline=deadline)
     parameters = _trainable_parameters(module)
+    module.optimizer_steps = 0
     if steps <= 0 or not module.has_edges or not parameters:
         return genome, module
     optimizer = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
@@ -203,6 +208,7 @@ def gradient_refine(
         if expired(deadline):
             break
         optimizer.step()
+        module.optimizer_steps += 1
     if writeback:
         genome = _writeback(genome, module)
     return genome, module
@@ -484,6 +490,7 @@ def _gradient_batched_impl(
             nets = [net for index in indices if (net := cores[index][0]) is not None]
             batched = BatchedGraphNet(nets, device=resolved)
             population = len(nets)
+            steps_run = 0
             if batched.mask.any():
                 # Both knobs default OFF: fused Adam is cuda-only and not bit-equal to the unfused
                 # step; torch.compile recompiles as the population shape churns generation to
@@ -514,7 +521,10 @@ def _gradient_batched_impl(
                     if expired(deadline):
                         break
                     optimizer.step()
+                    steps_run += 1
                 batched.unstack_into(nets)
+            for index in indices:
+                modules[index].optimizer_steps = steps_run
             return float(batched.n_max), batched.pad_efficiency()
 
         size = microbatch_size or max(len(batch_indices), 1)

@@ -101,6 +101,7 @@ def test_stepping_stone_is_never_promoted_to_lookup_solution(tmp_path: Path, xor
 
 
 def test_cross_validation_failure_blocks_admission_but_keeps_report_candidate(tmp_path: Path, xor_task: Task, solving_genome) -> None:
+    xor_task = Task(xor_task.meta, xor_task.support[:3], xor_task.query)
     orchestrator = _orchestrator(
         tmp_path,
         table={
@@ -572,7 +573,7 @@ def test_parent_recovery_retains_the_strongest_reportable_payload(tmp_path: Path
     assert orchestrator._remember_or_recover_parent_result(weaker, depth=0) is first
 
 
-def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(tmp_path: Path, solving_genome) -> None:
+def test_parent_reporting_follows_accepted_payload_over_higher_support_router(tmp_path: Path, solving_genome) -> None:
     orchestrator = _orchestrator(
         tmp_path,
         table={"blind_query": True, "search_metric": "support_accuracy", "accept_metric": "support_accuracy", "accept_threshold": 0.75},
@@ -593,19 +594,20 @@ def test_parent_reporting_prefers_higher_support_router_over_admissible_payload(
         generations_used=1,
         champion_genome=solving_genome,
         champion_metrics={"support_accuracy": 0.8},
+        report_metrics={"query_accuracy": 0.6, "query_loss": 0.4},
         representation="explicit_flat/cppn",
     )
 
     orchestrator._consider_parent_report_result(router, depth=0)
     orchestrator._consider_parent_report_result(reusable, depth=0)
 
-    assert orchestrator._report_result_for(reusable, depth=0) is router
+    assert orchestrator._report_result_for(reusable, depth=0) is reusable
     assert orchestrator._accepts_result(reusable)
     assert not orchestrator._accepts_result(router)
-    attempt = orchestrator._attempt_from_result(reusable, task="xor", depth=0, outcome="evolved", report_result=router)
+    attempt = orchestrator._attempt_from_result(reusable, task="xor", depth=0, outcome="evolved", report_result=orchestrator._report_result_for(reusable, depth=0))
     assert attempt.strategy == "direct" and attempt.representation == "explicit_flat/cppn"
-    assert attempt.report_strategy == "routed" and attempt.report_representation == "routed"
-    assert attempt.support_accuracy == pytest.approx(0.9) and attempt.query_accuracy == pytest.approx(0.4)
+    assert attempt.report_strategy == "direct" and attempt.report_representation == "explicit_flat/cppn"
+    assert attempt.support_accuracy == pytest.approx(0.8) and attempt.query_accuracy == pytest.approx(0.6)
 
 
 def test_accepted_parent_is_not_masked_by_a_stronger_report_only_incumbent(tmp_path: Path, solving_genome) -> None:

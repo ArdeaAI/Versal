@@ -62,6 +62,49 @@ def test_valid_zero_query_is_not_rendered_as_missing_at_narrow_width() -> None:
     assert "saved 1 new entry" in output
 
 
+def test_distillation_failure_has_separate_router_and_acceptance_scores() -> None:
+    display, stream = _render_display(width=180)
+    attempt = _attempt(
+        failure_stage=None,
+        strategy="routed",
+        report_strategy="routed",
+        acceptance_reason="distillation_failed",
+        acceptance_threshold=0.95,
+        support_accuracy=1.0,
+        query_accuracy=1.0,
+        query_status="evaluated",
+        strategy_metrics={"router_score": 1.0, "distilled_score": 0.5},
+    )
+    display.task_finished(8, 100, 1, "xor", attempt, solved=False, task_seconds=17.0, new_library_keys=[], library_size=3)
+    output = stream.getvalue()
+    assert "router distillation failed" in output
+    assert "Live router support" in output
+    assert "Distilled candidate support" in output
+    assert "0.5000" in output and "0.9500" in output
+
+
+def test_interleaved_panel_reports_shared_budget_and_incumbent_size() -> None:
+    display, stream = _render_display(width=150)
+    attempt = _attempt(
+        outcome="library_hit",
+        failure_stage=None,
+        library_key="m1_example",
+        support_accuracy=1.0,
+        query_accuracy=1.0,
+        phase="refine",
+        generations=24,
+        refine_generations=24,
+        validation_status="exhaustive",
+        strategy_work={"direct": {"generations": 12.0}, "composition": {"generations": 12.0}},
+        size_metrics={"champion_expanded_complexity": 4.0},
+    )
+    display.task_finished(12, 100, 1, "xor", attempt, solved=True, task_seconds=2.0, new_library_keys=[], library_size=3)
+    output = stream.getvalue()
+    assert "SELECTED SUPPORT ACCURACY" in output
+    assert "24 total" in output and "24 refinement" in output
+    assert "Expanded complexity" in output and "complete Boolean input domain verified" in output
+
+
 def test_recursive_diagnostic_never_becomes_parent_support() -> None:
     display, stream = _render_display()
     display.task_started(13, 18, 13, "darcy_flow.b3")

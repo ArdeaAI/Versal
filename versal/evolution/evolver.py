@@ -183,6 +183,8 @@ class Evolver:
     init_params: dict[str, Any] = field(default_factory=dict)
     deadline_exceeded: Callable[[], bool] | None = None
     deadline: float | None = None
+    work_evaluations: int = 0
+    work_optimizer_steps: int = 0
 
     def _context(self, state: EvolverState) -> MutationContext:
         return MutationContext(
@@ -201,12 +203,19 @@ class Evolver:
             return Assessed(genome, _floored_metrics(), _FLOOR_FITNESS, None)
         genome, module = self.train_op(genome, module, adapter.encoded, rng=state.rng, deadline=self.deadline)
         if self.deadline_exceeded is not None and self.deadline_exceeded():
-            return Assessed(genome, _floored_metrics() | {"deadline_stage_candidate_training": 1.0}, _FLOOR_FITNESS, None)
+            return Assessed(
+                genome,
+                _floored_metrics() | {"deadline_stage_candidate_training": 1.0, "training_optimizer_steps": float(getattr(module, "optimizer_steps", 0))},
+                _FLOOR_FITNESS,
+                None,
+            )
         metrics = self.evaluate_op(genome, module, adapter)
+        metrics["training_optimizer_steps"] = float(getattr(module, "optimizer_steps", 0))
         return Assessed(genome, metrics, self._score(genome, metrics), module)
 
     def evaluate_only(self, genome: Genome, adapter: Adapter) -> Assessed:
         """Score a genome WITHOUT training. Used to refresh fitness against a new task on a switch."""
+        self.work_evaluations += 1
         try:
             module = self._decode(genome, adapter)
         except (ValueError, KeyError):
@@ -219,9 +228,20 @@ class Evolver:
         return self.fitness(genome, metrics)
 
     def assess_many(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
-        """Assess a batch of genomes, training them all in one tensor program when a population
+        """
+        Assess candidates and count actual candidate evaluations and gradient updates.
+        """
+        assessed = self._assess_many(genomes, adapter, state)
+        self.work_evaluations += len(assessed)
+        self.work_optimizer_steps += sum(int(item.metrics.get("training_optimizer_steps", 0)) for item in assessed)
+        return assessed
+
+    def _assess_many(self, genomes: list[Genome], adapter: Adapter, state: EvolverState) -> list[Assessed]:
+        """
+        Assess a batch of genomes, training them all in one tensor program when a population
         trainer is configured. Order-preserving, and rng-equivalent to the sequential path because
-        train ops never draw from the shared rng (the contract documented in train.py)."""
+        train ops never draw from the shared rng (the contract documented in train.py).
+        """
         if self.train_population_op is None:
             if self.halving_stages and len(genomes) > 1:
                 return self._assess_staged(genomes, adapter, state)
@@ -254,6 +274,7 @@ class Evolver:
                 continue
             genome, trained_module = next(trained)
             metrics = self.evaluate_op(genome, trained_module, adapter)
+            metrics["training_optimizer_steps"] = float(getattr(trained_module, "optimizer_steps", 0))
             assessed.append(Assessed(genome, metrics, self._score(genome, metrics), trained_module))
         return assessed
 
@@ -310,12 +331,14 @@ class Evolver:
             eval_async = pool.map_async(evaluator, [genome for genome, _module in trained_pairs], chunksize=chunksize)
             for index, (evaluated, pair) in zip(batch_indices, zip(eval_async.get(), trained_pairs)):
                 genome, metrics, fitness = evaluated
+                metrics["training_optimizer_steps"] = float(getattr(pair[1], "optimizer_steps", 0))
                 results[index] = Assessed(genome, metrics, fitness, pair[1])
         elif batch_indices:
             # Without writeback the tuned weights exist ONLY on the trained modules, so a pooled
             # re-decode would score untrained weights; evaluate inline exactly like the batched path.
             for index, (genome, module) in zip(batch_indices, trained_pairs):
                 metrics = self.evaluate_op(genome, module, adapter)
+                metrics["training_optimizer_steps"] = float(getattr(module, "optimizer_steps", 0))
                 results[index] = Assessed(genome, metrics, self._score(genome, metrics), module)
 
         if serial_async is not None:
@@ -344,6 +367,7 @@ class Evolver:
         pool = self._ensure_pool() if self.assess_workers > 1 else None
         pooled_adapter = self._pooled_adapter(adapter) if pool is not None else adapter
         results: list[tuple[Genome, dict[str, float], float] | None] = [None] * len(genomes)
+        accumulated_steps = [0.0] * len(genomes)
         alive = list(range(len(genomes)))
         current = list(genomes)
         for stage_index, delta in enumerate(deltas):
@@ -355,6 +379,8 @@ class Evolver:
             else:
                 triples = [worker(current[index]) for index in alive]
             for index, triple in zip(alive, triples):
+                accumulated_steps[index] += triple[1].get("training_optimizer_steps", 0.0)
+                triple[1]["training_optimizer_steps"] = accumulated_steps[index]
                 current[index] = triple[0]
                 results[index] = triple
             if stage_index < len(deltas) - 1:
@@ -809,9 +835,10 @@ def _assess_in_worker(
         return genome, _floored_metrics(), _FLOOR_FITNESS
     genome, module = train_op(genome, module, adapter.encoded, rng=_WORKER_RNG, deadline=deadline)
     if expired(deadline):
-        metrics = _floored_metrics() | {"deadline_skipped": 1.0}
+        metrics = _floored_metrics() | {"deadline_skipped": 1.0, "training_optimizer_steps": float(getattr(module, "optimizer_steps", 0))}
         return genome, metrics, _FLOOR_FITNESS
     metrics = evaluate_op(genome, module, adapter)
+    metrics["training_optimizer_steps"] = float(getattr(module, "optimizer_steps", 0))
     stamp_complexity_metrics(genome, metrics, _WORKER_LIBRARY)
     return genome, metrics, fitness(genome, metrics)
 

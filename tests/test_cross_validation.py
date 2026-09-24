@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import torch
 
-from versal.cross_validation import CrossValidationConfig, SupportCrossValidator, fresh_composition_glue, fresh_genome_weights
+from versal.cross_validation import CrossValidationConfig, SupportCrossValidator, complete_boolean_support, fresh_composition_glue, fresh_genome_weights
 from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
 from versal.evolution.composition import CompEdgeGene, CompNodeGene, CompNodeKind, CompositionGenome, IndexRun, PortMap
 from versal.evolution.genome import ConnectionGene, Genome, NodeGene, NodeKind
@@ -104,3 +104,35 @@ def test_fresh_composition_resets_only_trainable_glue() -> None:
     assert comp.edges[0].glue == (9.0, 9.0, 9.0, 9.0)
     assert fresh.edges[0].glue != comp.edges[0].glue
     assert fresh.edges[1] == comp.edges[1]
+
+
+def test_complete_boolean_domain_uses_verified_support_without_refitting(xor_task: Task) -> None:
+    def forbidden(*_args):
+        raise AssertionError("An exhaustive support domain must not be reduced")
+
+    result = SupportCrossValidator(_config(), accept_threshold=0.95).run(xor_task, forbidden, deadline=None)
+    assert result.status == "exhaustive" and result.admits
+    assert result.folds_completed == 0
+    assert complete_boolean_support(Task(replace(xor_task.meta, name="unrelated_truth_table", rung=99), xor_task.support, []))
+
+
+def test_boolean_domain_requires_complete_consistent_unmasked_support(xor_task: Task) -> None:
+    assert not complete_boolean_support(Task(xor_task.meta, xor_task.support[:3], []))
+    inputs, target = xor_task.support[0]
+    conflict = (inputs, replace(target, data=1 - target.data))
+    assert not complete_boolean_support(Task(xor_task.meta, [*xor_task.support, conflict], []))
+    masked = (replace(inputs, mask=torch.ones_like(inputs.data, dtype=torch.bool)), target)
+    assert not complete_boolean_support(Task(xor_task.meta, [masked, *xor_task.support[1:]], []))
+    nonbinary = (replace(inputs, data=inputs.data + 0.1), target)
+    assert not complete_boolean_support(Task(xor_task.meta, [nonbinary, *xor_task.support[1:]], []))
+    assert complete_boolean_support(Task(xor_task.meta, [*xor_task.support, *xor_task.support], []))
+
+
+def test_boolean_sequences_still_require_fold_validation(xor_task: Task) -> None:
+    from versal.dataset.icarus import Axis
+
+    # All two-step sequences say nothing about the rest of a variable-length domain.
+    task = Task(xor_task.meta, [(replace(inputs, axes=(Axis.TIME,)), target) for inputs, target in xor_task.support], [])
+    assert not complete_boolean_support(task)
+    result = SupportCrossValidator(_config(), accept_threshold=0.95).run(task, lambda *_args: {"query_accuracy": 1.0}, deadline=None)
+    assert result.status == "passed" and result.folds_completed == 4

@@ -6,9 +6,11 @@
     "configs/full.toml",
     "configs/full_cluster-lattice.toml",
     "configs/full_cluster.toml",
+    "configs/fullish_light.toml",
     "configs/preflight-lattice.toml",
     "configs/preflight.toml",
-    "configs/smoke.toml"
+    "configs/smoke.toml",
+    "configs/xor_repro.toml"
   ],
   "canonical_config": "configs/smoke.toml",
   "canonical_config_sha256": "5987dface97c1e31d77c2e2b778c5a6e02f66102190d9ed7783b3eccd683967b",
@@ -28,9 +30,12 @@
     "evolution.composition.max_inline_depth",
     "evolution.composition.mutation.add_comp_edge_prob",
     "evolution.composition.mutation.add_module_node_prob",
+    "evolution.composition.mutation.bypass_module_prob",
     "evolution.composition.mutation.operators",
     "evolution.composition.mutation.perturb_glue_prob",
     "evolution.composition.mutation.perturb_glue_sigma",
+    "evolution.composition.mutation.remove_comp_edge_prob",
+    "evolution.composition.mutation.remove_module_node_prob",
     "evolution.composition.mutation.switch_ref_prob",
     "evolution.composition.mutation.toggle_comp_edge_prob",
     "evolution.composition.pop_size",
@@ -237,6 +242,7 @@
     "orchestrator.routed.weight_decay",
     "orchestrator.routed.zero_shot_accept",
     "orchestrator.search_metric",
+    "orchestrator.search_policy",
     "orchestrator.spatial_patches_n_patches",
     "orchestrator.stall_epsilon",
     "orchestrator.stall_generations",
@@ -318,7 +324,8 @@
     "run_matrix": "versal.tools.run_matrix:main",
     "run_report": "versal.tools.run_report:main",
     "rung_doctor": "versal.tools.rung_doctor:main",
-    "runtime_inventory": "versal.tools.runtime_inventory:main"
+    "runtime_inventory": "versal.tools.runtime_inventory:main",
+    "xor_repro": "versal.tools.xor_repro:main"
   },
   "registries": {
     "comp_crossover": [
@@ -328,7 +335,10 @@
     "comp_mutation": [
       "add_comp_edge",
       "add_module_node",
+      "bypass_module",
       "perturb_glue",
+      "remove_comp_edge",
+      "remove_module_node",
       "switch_ref",
       "toggle_comp_edge"
     ],
@@ -434,6 +444,13 @@
       "neat",
       "none"
     ],
+    "strategy_session": [
+      "composition",
+      "direct",
+      "field",
+      "grammar",
+      "routed"
+    ],
     "train": [
       "gradient",
       "gradient_refine",
@@ -491,6 +508,21 @@
       "access": "read-write",
       "condition": "grammar strategy rebuilds after the live library key set changes",
       "path": "<library_dir>/grammar/grammar.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "interleaved search stores task incumbents and population snapshot references",
+      "path": "<library_dir>/search/index.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "immutable task population, optimizer, RNG, and topology snapshots",
+      "path": "<library_dir>/search/<task>-<sha256>.json.gz"
+    },
+    {
+      "access": "read-write",
+      "condition": "immutable lazy router shards during held-out candidate reporting; removed afterward",
+      "path": "<system temp>/versal-router-report-*/"
     },
     {
       "access": "delete",

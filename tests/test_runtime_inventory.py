@@ -9,11 +9,13 @@ TOP_LEVEL_CONFIGS = {
     "configs/canary-lattice.toml",
     "configs/canary.toml",
     "configs/full.toml",
+    "configs/fullish_light.toml",
     "configs/full_cluster.toml",
     "configs/full_cluster-lattice.toml",
     "configs/preflight.toml",
     "configs/preflight-lattice.toml",
     "configs/smoke.toml",
+    "configs/xor_repro.toml",
 }
 
 
@@ -73,10 +75,10 @@ def test_profiles_have_the_declared_scale_and_hardware() -> None:
 
     brute = Config(Config.PROJECT_ROOT / "configs" / "brute.toml").current
     assert len(brute["schedule"]["rungs"]) == 1 and 1 <= brute["schedule"]["rungs"][0] <= 18  # intentionally retargetable
-    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 200
+    assert brute["schedule"]["tasks_per_rung"] == brute["orchestrator"]["tasks"] == 20
     assert brute["n_samples"] == 400
     assert brute["orchestrator"]["budgets"]["depth0"] == 400
-    assert brute["orchestrator"]["max_total_task_seconds"] == 600
+    assert brute["orchestrator"]["max_total_task_seconds"] == 620
 
     lattice = Config(Config.PROJECT_ROOT / "configs" / "canary-lattice.toml").current
     assert lattice["machine_env"] == "LocalLatticeCUDA"

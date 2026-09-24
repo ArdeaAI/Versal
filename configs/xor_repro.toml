@@ -1,0 +1,40 @@
+extends = "fullish_light.toml"
+
+# Offline truth-table regression: unchanged search/training populations and refinement allowance.
+# Run with python -m versal.tools.xor_repro; every seed gets its own empty library.
+[run]
+experiment = "xor_repro"
+clearml = false
+live_status = false
+
+[schedule]
+rungs = [1]
+tasks_per_rung = 100
+
+[orchestrator]
+tasks = 100
+search_policy = "interleaved"
+
+  [orchestrator.routed]
+  # Evidence is executable JSON; render portraits separately when needed.
+  render = false
+
+  [orchestrator.direct]
+  assess_workers = 0
+
+    [orchestrator.direct.train]
+    device = "cpu"
+    # Batch small CPU candidates as well; population sizes and candidate update counts are unchanged.
+    min_batch_nodes = 0
+
+  [orchestrator.field]
+  assess_workers = 0
+
+[evolution]
+assess_workers = 0
+
+  [evolution.composition.mutation]
+  operators = ["add_module_node", "switch_ref", "add_comp_edge", "toggle_comp_edge", "perturb_glue", "remove_comp_edge", "remove_module_node", "bypass_module"]
+  remove_comp_edge_prob = 0.1
+  remove_module_node_prob = 0.1
+  bypass_module_prob = 0.1

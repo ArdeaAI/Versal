@@ -15,7 +15,9 @@ from array import array
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
-from versal.dataset.icarus import Task
+import torch
+
+from versal.dataset.icarus import Axis, Task, TaskKind, ValueType
 from versal.evolution.composition import CompositionGenome
 from versal.evolution.genome import Genome
 
@@ -59,7 +61,7 @@ class CrossValidationConfig:
 
 @dataclass(frozen=True, slots=True)
 class CrossValidationResult:
-    status: str  # disabled | not_applicable | passed | failed | inconclusive
+    status: str  # disabled | exhaustive | not_applicable | passed | failed | inconclusive
     folds_planned: int = 0
     folds_completed: int = 0
     folds_passed: int = 0
@@ -67,7 +69,7 @@ class CrossValidationResult:
 
     @property
     def admits(self) -> bool:
-        return self.status in {"disabled", "not_applicable", "passed"}
+        return self.status in {"disabled", "exhaustive", "not_applicable", "passed"}
 
     def metrics(self) -> dict[str, float]:
         return {
@@ -80,6 +82,53 @@ class CrossValidationResult:
 
 
 FoldEvaluator = Callable[[Task, int, float | None], dict[str, float]]
+
+
+def complete_boolean_support(task: Task) -> bool:
+    """
+    Recognize a complete finite input domain without reading query examples.
+
+    This is deliberately conservative: fixed-shape Boolean maps only, with no masks,
+    nonfinite values, or contradictory labels. Cardinality is bounded by the observed
+    row count before computing the size of the domain.
+    """
+    if task.meta.kind is not TaskKind.MAP or not task.support:
+        return False
+    first_input, first_target = task.support[0]
+    # Spatial/temporal axes admit other resolutions or lengths. Enumerating one observed
+    # shape does not exhaust those domains, even when every value is Boolean.
+    if any(axis not in {Axis.CHANNEL, Axis.EXTRA} for axis in first_input.axes):
+        return False
+    width = first_input.data.numel()
+    if width <= 0 or width >= len(task.support).bit_length():
+        return False
+    seen: dict[tuple[int, ...], torch.Tensor] = {}
+    for inputs, target in task.support:
+        if (
+            inputs.value_type is not ValueType.BINARY
+            or inputs.mask is not None
+            or target.mask is not None
+            or inputs.data.shape != first_input.data.shape
+            or inputs.axes != first_input.axes
+            or inputs.n_classes != first_input.n_classes
+            or inputs.value_range != first_input.value_range
+            or target.data.shape != first_target.data.shape
+            or target.value_type != first_target.value_type
+            or target.axes != first_target.axes
+            or target.n_classes != first_target.n_classes
+            or target.value_range != first_target.value_range
+        ):
+            return False
+        values = inputs.data.detach().cpu().reshape(-1)
+        labels = target.data.detach().cpu()
+        if not bool(torch.all((values == 0) | (values == 1))) or not bool(torch.isfinite(labels).all()):
+            return False
+        key = tuple(int(value) for value in values.tolist())
+        previous = seen.get(key)
+        if previous is not None and not torch.equal(previous, labels):
+            return False
+        seen[key] = labels
+    return len(seen) == 1 << width
 
 
 class SupportCrossValidator:
@@ -98,6 +147,8 @@ class SupportCrossValidator:
     def run(self, task: Task, evaluate_fold: FoldEvaluator, *, deadline: float | None) -> CrossValidationResult:
         if not self.config.enabled:
             return CrossValidationResult("disabled")
+        if complete_boolean_support(task):
+            return CrossValidationResult("exhaustive")
         indices = self._fold_indices(task)
         if len(task.support) < 2 or len(indices) < self.config.min_folds:
             return CrossValidationResult("not_applicable", folds_planned=len(indices))

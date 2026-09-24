@@ -39,15 +39,12 @@ the method while reducing its populations, training, data, and recursion.
 For each scheduled task, Versal:
 
 1. Materializes one revision-pinned Icarus task and constructs a support-only search view.
-2. Tests structurally compatible library entries. A successful hit may receive a bounded,
-   non-regressing refinement attempt.
+2. Tests structurally compatible library entries, checking the protected winner for this exact support task first. A successful hit resumes its populations for bounded, non-regressing refinement.
 3. For a miss, optionally decomposes an oversized task before flat search when no enabled native
    representation can handle it safely.
-4. Runs the configured shared-budget strategy ladder:
-   `routed → grammar → field → direct → composition`.
-5. Validates provisional support winners by refitting them on reduced support folds. The real query
-   split remains inaccessible.
-6. If the ladder does not produce an accepted parent, optionally decomposes the task and recursively
+4. Interleaves eligible `routed`, `grammar`, `field`, `direct`, and `composition` processes using the configured budget shares. A turn advances one population generation, one router training slice, or one distillation attempt.
+5. Validates provisional support winners by refitting them on reduced support folds. A complete, consistent, unmasked Boolean input domain instead receives exhaustive support verification: withholding one truth-table row would ask a different learning question. The real query split remains inaccessible to search and admission.
+6. If search does not produce an accepted parent, optionally decomposes the task and recursively
    solves the resulting parts.
 7. Evaluates support-selected report candidates on held-out query data only after their support
    decision. Those values cannot affect search, validation, or library admission.
@@ -64,8 +61,13 @@ The five strategies have different jobs:
 - **Direct** evolves a task-shaped network from genomes and optional warm starts.
 - **Composition** evolves graphs of reusable modules connected by trainable or fixed mappings.
 
-All five share one generation budget. Unused generations carry forward, and the first executable
-candidate to clear the support and cross-validation gates stops the ladder.
+All five share one generation budget. The first accepted executable switches the search to a shared refinement allowance (`orchestrator.refine.budget_k`, normally 24). Exact support-task revisits resume those same populations, random streams, species, novelty history, candidate deduplication history, and router optimizer moments. Ineligible strategies spend no generation credits and can become eligible as the library grows. Router slices and distillation are separately charged; per-strategy evaluations, optimizer updates, and elapsed time are recorded because a generation is not an equal amount of compute across representations.
+
+An accepted task winner is protected separately from the diversity archive. Replacement compares acceptance score, recursively expanded complexity, then weight robustness; perfect accuracy cannot be traded for a smaller graph. Compact native winners remain available as parents even when diversity selection prefers another individual. Exchanges are bounded and reference immutable executable snapshots. Grammar still requires independent lineages: copies exchanged during one task do not manufacture rediscovery evidence.
+
+When refinement deduplication is enabled, interleaved search compares actual candidate parameters, including live module weights. A previously tried topology can be fitted again from new inherited weights; unchanged candidates are skipped. A lifetime ban on topology alone would block continued fitting and can prevent later pruning. The ladder comparator retains its original topology-only rule.
+
+Set `orchestrator.search_policy = "ladder"` to retain the original sequential policy for comparison. That policy stops at the first accepted strategy and refines only the stored representation. The live profiles select `"interleaved"` through `canary.toml`.
 
 ## Quick start
 
@@ -109,6 +111,8 @@ The checked-in profiles inherit the canary method and override explicit scale or
 | `brute.toml` | Repeated deep search on one editable rung | Set in the profile |
 | `preflight.toml` | Workstation confidence run | 10 tasks/rung, 180 attempts |
 | `full.toml` | Long adaptive local campaign arm | 10 tasks/rung, 180 attempts/seed |
+| `fullish_light.toml` | Editable local campaign with adaptive resource limits | Set in the profile |
+| `xor_repro.toml` | Offline cold-library XOR reproducibility check | 100 exact-task encounters/seed |
 | `full_cluster.toml` | Multi-seed adaptive cluster campaign | 20 tasks/rung, 360 attempts/seed |
 | `canary-lattice.toml` | CUDA parity overlay for the canary | Inherits the canary schedule |
 | `full_cluster-lattice.toml` | Local-CUDA version of the cluster arm | 20 tasks/rung, 360 attempts/seed |
@@ -116,6 +120,26 @@ The checked-in profiles inherit the canary method and override explicit scale or
 The brute profile is intentionally easy to retarget through `schedule.rungs`. Repeated attempts can
 reuse exact hits, refine stored structures, seed searches from stepping stones, and build deeper
 compositions instead of restarting from an empty search state.
+
+## XOR reproducibility
+
+The offline check constructs all four XOR inputs locally and uses a separate empty library per seed. All five strategies remain configured; field search is ineligible for this nonspatial task, and grammar waits for independently supported productions. The profile retains the direct/composition populations and training allowances from `fullish_light.toml`, pins computation to one CPU thread per process, and batches small direct candidates for practical runtime.
+
+```bash
+uv run xor_repro --output results/xor-check --seeds 0,1,2,3,4,5,6,7,8,9
+uv run xor_repro --output results/xor-ladder --policy ladder --seeds 0,1,2,3,4,5,6,7,8,9
+```
+
+Each seed must reach perfect support and query accuracy, preserve that accuracy, never increase the accepted perfect winner's expanded complexity, and finish at complexity **5 or less** within 100 encounters. This is an empirical reproducibility target under the repository's structural cost, not a proof of a unique mathematical minimum. Activation choices, including `sin`, remain evolved.
+
+Each seed directory saves `trajectory.json`, `summary.json`, `predictions.json`, the final executable and dependency closure in `final_payloads.json`, the effective configuration, source hashes, and a task-boundary checkpoint. A failed target produces a nonzero exit status and retains its evidence. To test interruption at a completed boundary:
+
+```bash
+uv run xor_repro --output results/xor-resume --seeds 0 --encounters 50
+uv run xor_repro --output results/xor-resume --seeds 0 --encounters 100 --resume
+```
+
+Compare this with a separate uninterrupted seed-0 run. Timings may differ; candidate identities, predictions, structural trajectories, and saved search state should agree. Held-out XOR covers the same finite four-input domain, so a perfect query score here is not evidence of generalization beyond that domain.
 
 ## Persistent state and reporting
 
@@ -132,8 +156,11 @@ The library stores modules, compositions, routing state, grammar state, lifecycl
 network renders. `library/images/overmind.png` preserves live and retired routing history, while
 `library/images/overmind_pruned.png` shows only the current live set.
 
+Interleaved populations live in compressed immutable snapshots under `library/search/`, indexed by the full support data contract, configuration, and seed. Inactive tasks stay on disk. Rolling checkpoints capture the snapshot index and RNG state; garbage collection protects the current incumbents and population dependencies. Resume requires the corresponding library as well as the run directory.
+
 Support and held-out values are separate reporting rails. A missing held-out value remains missing
 with an explicit reason; it is never silently converted to zero.
+For accepted solutions, both headline scores describe the selected executable. A live router can score perfectly while its distilled composition fails; that failure reports the router score, distilled score, and acceptance threshold separately. Validation status, candidate identities, shared work, and expanded complexity remain present on unchanged library hits.
 
 ## Useful commands
 

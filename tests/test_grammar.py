@@ -32,6 +32,22 @@ _IO = {"inputs": [{"signature": "BINARY|K", "width": 1}], "output": {"signature"
 _WIDE_IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
 
 
+def test_exchanged_snapshots_do_not_count_as_independent_discoveries(tmp_path, monkeypatch):
+    import versal.grammar as grammar
+
+    library = ModuleLibrary(tmp_path / "library")
+    for weight in (0.5, 1.5, 2.5):
+        library.add(entry_type=MODULE, payload=_gadget(0, weight), io=_IO, provenance={"search_lineage": "one-task"})
+
+    def forbidden_enumeration(*args, **kwargs):
+        raise AssertionError("one lineage cannot produce independently supported motifs")
+
+    monkeypatch.setattr(grammar, "_entry_occurrences", forbidden_enumeration)
+    derived = induce_grammar(library)
+    assert derived.productions == ()
+    assert len(derived.source_entries) == 3
+
+
 def _gadget(offset: int, weight: float) -> dict[str, Any]:
     ids = [offset + index for index in range(4)]
     return {
