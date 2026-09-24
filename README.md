@@ -156,6 +156,8 @@ The library stores modules, compositions, routing state, grammar state, lifecycl
 network renders. `library/images/overmind.png` preserves live and retired routing history, while
 `library/images/overmind_pruned.png` shows only the current live set.
 
+The terminal keeps the best support score fixed at the left of its live status line, with the current activity updating beside it. Completed result boxes stay in scrollback; add `--verbose` to retain individual stage messages too. Network PNGs use a dark, organic style with small nodes, fine connections, and compact legends. Overmind portraits retain usage percentages and stone/retired labels; the recorded JSON holds the detailed experiment data.
+
 Interleaved populations live in compressed immutable snapshots under `library/search/`, indexed by the full support data contract, configuration, and seed. Inactive tasks stay on disk. Rolling checkpoints capture the snapshot index and RNG state; garbage collection protects the current incumbents and population dependencies. Resume requires the corresponding library as well as the run directory.
 
 Support and held-out values are separate reporting rails. A missing held-out value remains missing

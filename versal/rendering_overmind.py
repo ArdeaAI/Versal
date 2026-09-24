@@ -33,7 +33,7 @@ _BAND_GAP = 4
 _BAND_H = 1.6
 _LEGEND_COLUMNS = 2
 _LEGEND_ROW_STEP = 1.45
-_LEGEND_WIDTH = 22.0
+_LEGEND_WIDTH = 18.0
 _OVERMIND_COLUMNS = 8
 
 
@@ -64,28 +64,29 @@ def _overmind_legend_entries(*, traffic_observed: bool = True) -> list[tuple[str
     """Every marker/edge class the overmind canvas can show, as (swatch kind, params, label) rows."""
     early, deep = _layer_color(0, 3), _layer_color(3, 3)
     return [
-        ("node", {"color": THEME["node_input"], "marker": "s"}, "input"),
-        ("node", {"color": THEME["node_bias"], "marker": "s", "alpha": 0.7}, "bias"),
-        ("node", {"color": THEME["node_output"], "marker": "s"}, "output"),
-        ("node", {"color": early, "marker": "o"}, "hidden (early layer)"),
-        ("node", {"color": deep, "marker": "o"}, "hidden (deep layer)"),
+        ("node", {"color": THEME["node_input"], "marker": "o"}, "input"),
+        ("node", {"color": THEME["node_bias"], "marker": "o", "alpha": 0.7}, "bias"),
+        ("node", {"color": THEME["node_output"], "marker": "o"}, "output"),
+        ("node", {"color": early, "marker": "o"}, "hidden · early"),
+        ("node", {"color": deep, "marker": "o"}, "hidden · deep"),
         ("node", {"color": deep, "marker": "D"}, "product gate"),
-        ("node", {"color": THEME["node_module"], "marker": "h"}, "module ref / macro footprint"),
-        ("node", {"color": THEME["node_anchor"], "marker": "o", "size": 0.65}, "network input anchor"),
-        ("node", {"color": deep, "marker": "o", "alpha": 0.25, "size": 0.5}, "isolated (unused)"),
-        ("box", {}, "retired or unexpanded network"),
-        ("edge", {"color": THEME["edge_forward"]}, "forward connection"),
-        ("edge", {"color": THEME["edge_recurrent"], "style": "dashed", "curve": 0.25}, "recurrent (time-delayed)"),
-        ("edge", {"color": THEME["edge_macro"]}, "macro implied wiring"),
-        ("edge", {"color": THEME["edge_glue"]}, "composition glue"),
-        ("edge", {"color": THEME["edge_callout"]}, "nested-network flow"),
+        ("node", {"color": THEME["node_module"], "marker": "h"}, "module"),
+        ("node", {"color": THEME["node_anchor"], "marker": "o", "size": 0.65}, "nested input"),
+        ("node", {"color": deep, "marker": "o", "alpha": 0.25, "size": 0.5}, "unused"),
+        ("box", {}, "collapsed / retired"),
+        ("edge", {"color": THEME["edge_forward"]}, "positive"),
+        ("edge", {"color": THEME["edge_negative"]}, "negative"),
+        ("edge", {"color": THEME["edge_recurrent"], "style": "dashed", "curve": 0.25}, "recurrent"),
+        ("edge", {"color": THEME["edge_macro"]}, "macro"),
+        ("edge", {"color": THEME["edge_glue"]}, "composition"),
+        ("edge", {"color": THEME["edge_callout"]}, "nested"),
         (
             "edge",
             {"color": THEME["edge_pathway"], "curve": 0.25},
-            "routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)",
+            "routing · observed" if traffic_observed else "routing · potential",
         ),
-        ("edge", {"color": THEME["edge_entry"], "alpha": 0.6}, "input feed (step-0 gate mass)"),
-        ("edge", {"color": THEME["edge_exit"], "alpha": 0.6}, "output feed (final-step gate mass)"),
+        ("edge", {"color": THEME["edge_entry"], "alpha": 0.6}, "input feed"),
+        ("edge", {"color": THEME["edge_exit"], "alpha": 0.6}, "output feed"),
     ]
 
 
@@ -105,32 +106,34 @@ def _adaptive_overmind_legend_entries(
     if "bias" in node_roles:
         labels.add("bias")
     if hidden_colors:
-        labels.add("hidden (early layer)")
+        labels.add("hidden · early")
     if len(hidden_colors) > 1:
-        labels.add("hidden (deep layer)")
+        labels.add("hidden · deep")
     if any(node.marker == "D" for node in nodes):
         labels.add("product gate")
     if node_roles & {"macro-footprint", "module-footprint"}:
-        labels.add("module ref / macro footprint")
+        labels.add("module")
     if view.vertices:
-        labels.add("network input anchor")
-        labels.update({"input feed (step-0 gate mass)", "output feed (final-step gate mass)"})
+        labels.add("nested input")
+        labels.update({"input feed", "output feed"})
     if "isolated" in node_roles:
-        labels.add("isolated (unused)")
+        labels.add("unused")
     if any(child.opaque for child in children):
-        labels.add("retired or unexpanded network")
-    if any(role.startswith("forward") for role in edge_roles):
-        labels.add("forward connection")
+        labels.add("collapsed / retired")
+    if edge_roles & {"forward", "forward-positive", "composition-glue-positive"}:
+        labels.add("positive")
+    if edge_roles & {"forward-negative", "composition-glue-negative"}:
+        labels.add("negative")
     if "recurrent" in edge_roles:
-        labels.add("recurrent (time-delayed)")
+        labels.add("recurrent")
     if "macro-implied" in edge_roles:
-        labels.add("macro implied wiring")
+        labels.add("macro")
     if any(role.startswith("composition-glue") for role in edge_roles):
-        labels.add("composition glue")
+        labels.add("composition")
     if "nested-network" in edge_roles:
-        labels.add("nested-network flow")
+        labels.add("nested")
     if view.pathways:
-        labels.add("routing traffic (observed)" if traffic_observed else "routing potential (cold structural view)")
+        labels.add("routing · observed" if traffic_observed else "routing · potential")
     return [entry for entry in _overmind_legend_entries(traffic_observed=traffic_observed) if entry[2] in labels]
 
 
@@ -151,7 +154,7 @@ def _overmind_legend(spec: RenderSpec, x0: float, y_top: float, entries: list[tu
                     y,
                     item_x + 1.8,
                     y,
-                    width=1.6,
+                    width=0.7,
                     color=params["color"],
                     style=params.get("style", "solid"),
                     curve=params.get("curve", 0.0),
@@ -268,7 +271,7 @@ def build_overmind_spec(
         placed: list[tuple[float, float]] = []
         for index, signature in enumerate(signatures):
             x = content_x_shift + grid_width * (index + 1) / (len(signatures) + 1)
-            spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="s", role="input-adapter" if color == THEME["node_input"] else "output-head"))
+            spec.nodes.append(SpecNode(x, y, color=color, size=1.4, marker="o", role="input-adapter" if color == THEME["node_input"] else "output-head"))
             spec.texts.append(SpecText(x, y - 0.45, signature, size=6.0, ha="center", va="top"))
             placed.append((x, y))
         return placed

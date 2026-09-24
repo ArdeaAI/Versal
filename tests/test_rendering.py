@@ -322,22 +322,33 @@ def test_wide_layer_wraps_into_block() -> None:
     assert len(output_columns) == 45  # ceil(sqrt(2000)) rows -> 45 sub-columns
 
 
-def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling() -> None:
+def test_draw_spec_rasterizes_every_edge_without_matplotlib_sampling(monkeypatch) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.collections import LineCollection
 
+    import versal.rendering as rendering
     from versal.rendering import _MAX_STRAIGHT_EDGES, RenderSpec, SpecEdge, draw_spec
 
     count = _MAX_STRAIGHT_EDGES + 10_000
+    rasterized: list[int] = []
+    original = rendering._rasterized_spec_edges
+
+    def capture(spec, **kwargs):
+        image, included = original(spec, **kwargs)
+        rasterized.append(included)
+        return image, included
+
+    monkeypatch.setattr(rendering, "_rasterized_spec_edges", capture)
     edges = [SpecEdge(0.0, float(i % 100), 1.0, float(i % 97), width=0.6, color=THEME["edge_forward"]) for i in range(count)]
     figure, axis = plt.subplots()
     draw_spec(axis, RenderSpec(edges=edges, width=2.0, height=100.0, flow_label="potential influence flow · test"))
     drawn = sum(len(artist.get_segments()) for artist in axis.collections if isinstance(artist, LineCollection))
     assert drawn == 0  # dense edges live in one raster image, not per-edge Matplotlib artists
-    assert any(f"all {count:,} scene edges included" in text.get_text() for text in axis.texts)
+    assert rasterized == [count]
+    assert not any("Datashader" in text.get_text() for text in axis.texts)
     assert axis.images
     plt.close(figure)
 
@@ -390,6 +401,119 @@ def test_render_network_writes_png(tmp_path: Path, solving_genome: Genome) -> No
     image_path = render_network(tmp_path, solving_genome, title="test")
     assert image_path.name == "net.png"
     assert image_path.exists() and image_path.stat().st_size > 0
+
+
+def test_small_network_markers_stay_compact_across_canvas_sizes(solving_genome: Genome) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PathCollection
+
+    from versal.rendering import draw_spec
+
+    spec = build_genome_spec(solving_genome)
+    assert all(node.marker == "o" for node in spec.nodes if node.role in {"input", "output", "bias"})
+    for figsize in ((4, 4), (12, 8)):
+        figure, axis = plt.subplots(figsize=figsize, dpi=300)
+        try:
+            draw_spec(axis, spec)
+            sizes = [size for collection in axis.collections if isinstance(collection, PathCollection) for size in collection.get_sizes()]
+            assert sizes and 0 < min(sizes) <= max(sizes) <= 36  # at most a 25-pixel diameter at 300 dpi
+            assert all(patch.get_linewidth() <= 1.2 for patch in axis.patches)
+        finally:
+            plt.close(figure)
+
+
+def test_portrait_heading_and_key_fit_without_overlapping_drawing(monkeypatch, tmp_path: Path) -> None:
+    from matplotlib.figure import Figure
+
+    from versal.rendering import RenderSpec, SpecEdge, _render_spec_png
+
+    edges = [
+        SpecEdge(0, index * 0.2, 1, 1, 0.7, THEME["edge_positive"], role=role)
+        for index, role in enumerate(("forward-positive", "forward-negative", "recurrent", "macro-implied", "nested-network"))
+    ]
+    original_save = Figure.savefig
+    checked = []
+
+    def inspect(figure, *args, **kwargs):
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        heading = figure._suptitle.get_window_extent(renderer)
+        key = figure.legends[0].get_window_extent(renderer)
+        network = figure.axes[0].get_window_extent(renderer)
+        assert figure.bbox.contains(heading.x0, heading.y0) and figure.bbox.contains(heading.x1, heading.y1)
+        assert figure.bbox.contains(key.x0, key.y0) and figure.bbox.contains(key.x1, key.y1)
+        assert key.y1 < network.y0 < network.y1 < heading.y0
+        checked.append(True)
+        return original_save(figure, *args, **kwargs)
+
+    monkeypatch.setattr(Figure, "savefig", inspect)
+    _render_spec_png(
+        tmp_path / "portrait.png",
+        RenderSpec(edges=edges, width=4, height=4, flow_label="potential influence flow"),
+        "orchestrated task 35: composition c3_a_long_network_name_with_nested_modules",
+    )
+    assert checked == [True]
+
+
+def test_rendering_keeps_payload_and_random_streams_unchanged(tmp_path: Path, solving_genome: Genome) -> None:
+    import copy
+    import pickle
+
+    import numpy as np
+    import torch
+
+    payload = copy.deepcopy(genome_to_dict(solving_genome))
+    python_state = random.getstate()
+    numpy_state = pickle.dumps(np.random.get_state())
+    torch_state = torch.get_rng_state().clone()
+    render_network(tmp_path, solving_genome, title="XOR")
+    assert genome_to_dict(solving_genome) == payload
+    assert random.getstate() == python_state
+    assert pickle.dumps(np.random.get_state()) == numpy_state
+    assert torch.equal(torch.get_rng_state(), torch_state)
+
+
+def test_portrait_keeps_stone_annotations_with_or_without_usage() -> None:
+    import matplotlib.pyplot as plt
+
+    from versal.rendering import RenderSpec, SpecContainer, draw_spec, overmind_vertex_label
+
+    figure, axis = plt.subplots(figsize=(4, 4))
+    spec = RenderSpec(
+        containers=[
+            SpecContainer(0, 0, 4, 2, overmind_vertex_label("long_retired_expert_name", stepping_stone=True, retired=True), 1),
+            SpecContainer(5, 0, 9, 2, overmind_vertex_label("long_current_expert_name", usage=0.42, stepping_stone=True), 1),
+        ],
+        width=9,
+        height=3,
+    )
+    try:
+        draw_spec(axis, spec)
+        captions = {text.get_text(): text for text in axis.texts}
+        assert {"stone · retired", "(42%) · stone"} <= captions.keys()
+        assert captions["(42%) · stone"].get_color() == THEME["node_anchor"]
+        assert captions["stone · retired"].get_fontweight() == "bold"
+    finally:
+        plt.close(figure)
+
+
+def test_gentle_curves_stay_inside_tall_narrow_networks() -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.path import Path as PlotPath
+
+    from versal.rendering import RenderSpec, SpecEdge, draw_spec
+
+    figure, axis = plt.subplots(figsize=(4, 10))
+    try:
+        edges = [SpecEdge(0, 0, 1, 100, 1, THEME["edge_positive"], role="forward-positive")]
+        draw_spec(axis, RenderSpec(edges=edges, width=1, height=100))
+        figure.canvas.draw()
+        path = axis.patches[0].get_path()
+        vertices = np.asarray(path.vertices)[np.asarray(path.codes) != PlotPath.CLOSEPOLY]
+        assert axis.get_xlim()[0] <= vertices[:, 0].min() < vertices[:, 0].max() <= axis.get_xlim()[1]
+    finally:
+        plt.close(figure)
 
 
 def test_render_network_expands_macro_with_library(tmp_path: Path, solving_genome: Genome) -> None:
@@ -559,8 +683,8 @@ def test_large_density_png_is_fixed_size_nonblank_and_deterministic(monkeypatch,
     assert first_pixels.shape[:2] == (3200, 4800)
     assert first_pixels.std() > 0.01
     assert np.array_equal(first_pixels, second_pixels)
-    assert "potential influence flow" in labels
-    assert any("weights, not activations" in label for label in labels)
+    assert "weight structure" in labels
+    assert not any("renderer:" in label for label in labels)
 
 
 def test_large_density_failure_atomically_replaces_with_opaque_summary(monkeypatch, tmp_path: Path, solving_genome: Genome) -> None:
@@ -789,8 +913,8 @@ def test_overmind_legend_populates_texts_and_widens() -> None:
     assert keyed.width > bare.width
     labels = [text.text for text in keyed.texts]
     assert "key" in labels
-    expected_labels = ("routing traffic (observed)", "input feed (step-0 gate mass)", "output feed (final-step gate mass)", "recurrent (time-delayed)")
-    for expected in expected_labels + ("network input anchor", "nested-network flow"):
+    expected_labels = ("routing · observed", "input feed", "output feed", "recurrent")
+    for expected in expected_labels + ("nested input", "nested"):
         assert expected in labels
     assert "built from (structural ref)" not in labels
     feed_swatches = [edge for edge in keyed.edges if edge.role == "legend" and edge.color in {THEME["edge_entry"], THEME["edge_exit"]}]
@@ -804,11 +928,11 @@ def test_pruned_adaptive_legend_only_shows_present_symbols_and_moves_below_narro
     adaptive = build_overmind_spec(_grid_view(1), legend=True, legend_mode="adaptive")
     labels = {text.text for text in adaptive.texts}
 
-    assert "input feed (step-0 gate mass)" in labels
-    assert "output feed (final-step gate mass)" in labels
-    assert "retired or unexpanded network" in labels
-    assert "macro implied wiring" not in labels
-    assert "recurrent (time-delayed)" not in labels
+    assert "input feed" in labels
+    assert "output feed" in labels
+    assert "collapsed / retired" in labels
+    assert "macro" not in labels
+    assert "recurrent" not in labels
     assert adaptive.width < full.width
     expert = next(box for box in adaptive.containers if box.depth == 1 and box.label == "v0")
     legend_panel = next(box for box in adaptive.containers if box.depth == 0)
@@ -824,8 +948,8 @@ def test_cold_overmind_labels_routing_potential_not_observed_traffic() -> None:
     labels = [text.text for text in spec.texts]
 
     assert spec.flow_label == "routing potential · cold structural view, not observed traffic or activations"
-    assert "routing potential (cold structural view)" in labels
-    assert "routing traffic (observed)" not in labels
+    assert "routing · potential" in labels
+    assert "routing · observed" not in labels
 
 
 def test_spec_text_draws() -> None:
@@ -944,7 +1068,7 @@ def test_draw_spec_falls_back_when_datashader_layer_fails(monkeypatch) -> None:
     figure, axis = plt.subplots()
     rendering.draw_spec(axis, spec)
 
-    assert any("classic fallback" in text.get_text() for text in axis.texts)
+    assert not any("Datashader" in text.get_text() for text in axis.texts)
     assert axis.collections  # classic line collection remains visible
     plt.close(figure)
 

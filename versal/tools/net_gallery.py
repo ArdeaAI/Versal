@@ -173,7 +173,7 @@ def render_overmind_from_metadata(
     """Render persisted traffic without loading the router's potentially large tensor state."""
     import json
 
-    from versal.rendering import OvermindVertex, OvermindView, render_overmind
+    from versal.rendering import OvermindVertex, OvermindView, overmind_vertex_label, render_overmind
     from versal.routing import mean_firing_step, overmind_vertex_order, sanitize_key
 
     meta = json.loads(metadata_path.read_text())
@@ -193,7 +193,7 @@ def render_overmind_from_metadata(
     ordered_names = overmind_vertex_order(latent_order, retired, step_usage)
 
     usage = {str(name): float(value) for name, value in meta.get("usage_totals", {}).items()}
-    total_usage = sum(usage.get(name, 0.0) for name in ordered_names) or 1.0
+    total_usage = sum(usage.values()) or 1.0
     entry_raw = {name: values[0] for name, values in step_usage.items() if values}
     exit_raw = {name: values[-1] for name, values in step_usage.items() if values}
     if not entry_raw:
@@ -209,16 +209,21 @@ def render_overmind_from_metadata(
         is_retired = name in retired
         route_evicted = key in (meta.get("evicted") or {})
         share = usage.get(name, 0.0) / total_usage
+        try:
+            stone = bool(library.load(key).provenance.get("stepping_stone", False))
+        except KeyError:
+            stone = False
         vertices.append(
             OvermindVertex(
                 key=key,
-                label=f"{key}  ({share:.0%})" + ("  retired" if summaries[key].get("retired", False) else ("  route evicted" if route_evicted else "")),
+                label=overmind_vertex_label(key, usage=share, stepping_stone=stone, retired=bool(summaries[key].get("retired", False)), route_evicted=route_evicted),
                 retired=is_retired,
                 usage=share,
                 entry_share=entry_raw.get(name, 0.0) / entry_peak,
                 exit_share=exit_raw.get(name, 0.0) / exit_peak,
                 mean_step=mean_firing_step(step_usage.get(name, [])),
                 embedding_rank=rank[name],
+                stepping_stone=stone,
             )
         )
 

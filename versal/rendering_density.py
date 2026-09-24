@@ -330,8 +330,8 @@ def _signed_influence_rgba(magnitude: Any, signed: Any, span: float, numpy: Any,
     level = numpy.clip(numpy.log1p(magnitude) / math.log1p(safe_span), 0.0, 1.0)
     balance = numpy.divide(signed, magnitude, out=numpy.zeros_like(signed, dtype=numpy.float32), where=magnitude > 0)
     balance = numpy.clip(balance, -1.0, 1.0)
-    positive = numpy.asarray(colors.to_rgb(THEME["edge_glue"]), dtype=numpy.float32)
-    negative = numpy.asarray(colors.to_rgb(THEME["edge_exit"]), dtype=numpy.float32)
+    positive = numpy.asarray(colors.to_rgb(THEME["edge_positive"]), dtype=numpy.float32)
+    negative = numpy.asarray(colors.to_rgb(THEME["edge_negative"]), dtype=numpy.float32)
     neutral = numpy.asarray(colors.to_rgb("#7d86a3"), dtype=numpy.float32)
     background = numpy.asarray(colors.to_rgb("#172033"), dtype=numpy.float32)
     positive_mix = numpy.clip(balance, 0.0, 1.0)[..., None]
@@ -348,15 +348,15 @@ def _flow_color(stats: _FlowStats, colors: Any) -> tuple[float, float, float, fl
         return colors.to_rgba(THEME["label"], 0.35)
     balance = max(-1.0, min(1.0, stats.signed / stats.magnitude))
     neutral = colors.to_rgb("#7d86a3")
-    target = colors.to_rgb(THEME["edge_glue"] if balance >= 0 else THEME["edge_exit"])
+    target = colors.to_rgb(THEME["edge_positive"] if balance >= 0 else THEME["edge_negative"])
     amount = abs(balance)
     return (*(neutral[index] + amount * (target[index] - neutral[index]) for index in range(3)), 0.72)
 
 
 def _flow_width(stats: _FlowStats, peak: float) -> float:
     if stats.magnitude <= 0:
-        return 0.7
-    return 0.8 + 6.2 * math.log1p(stats.magnitude) / math.log1p(max(peak, stats.magnitude, 1e-12))
+        return 0.3
+    return 0.35 + 0.95 * math.log1p(stats.magnitude) / math.log1p(max(peak, stats.magnitude, 1e-12))
 
 
 def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeRenderMetadata:
@@ -540,11 +540,8 @@ def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeR
                 py1 = map_y0 + (panel.y1 - panel_y_min) / panel_y_span * (map_y1 - map_y0)
                 rgba = _signed_influence_rgba(magnitude, signed, target_span, np, mcolors)
                 axis.imshow(rgba, extent=(px0, px1, py0, py1), origin="lower", interpolation="nearest", aspect="auto", zorder=4)
-            stats = input_target_flow.get(node_id, _FlowStats())
             kind = "macro" if node_id in macro_outputs else "hidden"
             axis.text(card_x0 + 0.108, y1 - 0.018, f"{kind} {node_id}", color=THEME["title"], fontsize=6.2, ha="left", va="top", zorder=6)
-            axis.text(card_x0 + 0.108, y1 - 0.041, f"{stats.count:,} edges", color=THEME["label"], fontsize=5.2, ha="left", va="top", zorder=6)
-            axis.text(card_x0 + 0.108, y1 - 0.062, f"Σ|w| {stats.magnitude:,.2g}", color=THEME["label"], fontsize=5.2, ha="left", va="top", zorder=6)
 
     for index, node_id in enumerate(node_id for node_id in transform_ids if nodes_by_id[node_id].get("kind") == NodeKind.BIAS.value):
         transform_positions[node_id] = (0.805, 0.145 - index * 0.025)
@@ -601,7 +598,7 @@ def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeR
                 end,
                 connectionstyle=f"arc3,rad={curve}",
                 arrowstyle="-|>",
-                mutation_scale=7.0,
+                mutation_scale=4.0,
                 linewidth=_flow_width(stats, flow_peak),
                 linestyle="dashed" if dashed else "solid",
                 color=rgba,
@@ -654,16 +651,16 @@ def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeR
         if node_id in macro_outputs:
             marker, color = "h", THEME["node_module"]
         elif kind == NodeKind.BIAS.value:
-            marker, color = "s", THEME["node_bias"]
+            marker, color = "o", THEME["node_bias"]
         else:
             marker = "D" if node.get("aggregation", "sum") == "product" else "o"
-            color = "#73d055"
+            color = THEME["hidden_colors"][0]
         marker_groups.setdefault((marker, color), []).append(node_id)
     for (marker, color), node_ids in marker_groups.items():
         axis.scatter(
             [transform_positions[node_id][0] for node_id in node_ids],
             [transform_positions[node_id][1] for node_id in node_ids],
-            s=27,
+            s=16,
             c=color,
             marker=marker,
             linewidths=0.45,
@@ -675,60 +672,25 @@ def _render_large_module_density(out_path: Path, entry: LibraryEntry) -> _LargeR
             x, y = transform_positions[node_id]
             axis.text(x + 0.005, y, str(node_id), color=THEME["label"], fontsize=5, ha="left", va="center", zorder=7)
 
-    kind_counts: dict[str, int] = {}
-    for node in raw_nodes:
-        kind = str(node.get("kind", "?"))
-        kind_counts[kind] = kind_counts.get(kind, 0) + 1
-    macro_refs = sorted({str(macro.get("ref", "?")) for macro in entry.payload.get("macros", [])})
     inputs = " + ".join(f"{item.get('signature', '?')}:{item.get('width', '?')}" for item in entry.io.get("inputs", []))
     output = entry.io.get("output", {})
     output_label = f"{output.get('signature', '?')}:{output.get('width', '?')}"
     axis.text(0.025, 0.975, f"{entry.key}  L{entry.level} module", color=THEME["title"], fontsize=15, fontweight="bold", ha="left", va="top", zorder=8)
     axis.text(0.025, 0.948, f"{inputs}  →  {output_label}", color=THEME["label"], fontsize=8, ha="left", va="top", zorder=8)
-    axis.text(0.04, 0.922, "spatial potential influence · filled semantic H×W cells", color=THEME["label"], fontsize=6.3, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.975, "potential influence flow", color=THEME["title"], fontsize=11, fontweight="bold", ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.949, "conceptual weight flow · not activation analysis", color=THEME["label"], fontsize=6.8, ha="left", va="top", zorder=8)
-    count_text = " · ".join(f"{kind_counts.get(kind, 0):,} {kind}" for kind in ("input", "bias", "hidden", "output") if kind_counts.get(kind, 0))
-    axis.text(0.625, 0.928, count_text, color=THEME["label"], fontsize=6.5, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.908, f"{enabled_count:,} enabled edges · {isolated_count:,} isolated inputs", color=THEME["label"], fontsize=6.5, ha="left", va="top", zorder=8)
-    axis.text(0.625, 0.888, f"renderer: Datashader · {layout.mode} · {_DENSITY_WIDTH}×{_DENSITY_HEIGHT}", color=THEME["label"], fontsize=5.8, ha="left", va="top", zorder=8)
-    if macro_refs:
-        refs = ", ".join(ref.removeprefix("library:") for ref in macro_refs)
-        axis.text(0.625, 0.870, f"macro refs (not expanded): {refs}", color=THEME["node_module"], fontsize=6, ha="left", va="top", wrap=True, zorder=8)
-    if layout.fallback_reason:
-        axis.text(0.025, 0.112, f"layout note: {layout.fallback_reason}", color=THEME["label"], fontsize=5.5, ha="left", va="top", zorder=8)
+    axis.text(0.04, 0.922, "spatial influence", color=THEME["label"], fontsize=6.3, ha="left", va="top", zorder=8)
+    axis.text(0.625, 0.975, "weight structure", color=THEME["title"], fontsize=11, fontweight="bold", ha="left", va="top", zorder=8)
 
     legend = (
-        (THEME["edge_glue"], "positive influence"),
-        (THEME["edge_exit"], "negative influence"),
+        (THEME["edge_positive"], "positive"),
+        (THEME["edge_negative"], "negative"),
         ("#7d86a3", "mixed sign"),
         (THEME["edge_recurrent"], "recurrent"),
         (THEME["edge_macro"], "macro-implied"),
     )
     for index, (color, label) in enumerate(legend):
         x = 0.04 + index * 0.185
-        axis.plot((x, x + 0.022), (0.072, 0.072), color=color, linewidth=2.2, zorder=8)
+        axis.plot((x, x + 0.022), (0.072, 0.072), color=color, linewidth=0.9, zorder=8)
         axis.text(x + 0.027, 0.072, label, color=THEME["label"], fontsize=6, ha="left", va="center", zorder=8)
-    axis.text(
-        0.04,
-        0.048,
-        "field brightness = log accumulated |weight| · field hue = signed balance · hidden cards are locally scaled",
-        color=THEME["label"],
-        fontsize=5.8,
-        ha="left",
-        va="center",
-        zorder=8,
-    )
-    axis.text(
-        0.5,
-        0.022,
-        f"Potential influence flow (weights, not activations) · all {enabled_count:,} enabled edges included in fields, ribbons, or matrices",
-        color=THEME["label"],
-        fontsize=7,
-        ha="center",
-        va="center",
-        zorder=8,
-    )
     axis.set_xlim(0.0, 1.0)
     axis.set_ylim(0.0, 1.0)
     axis.axis("off")

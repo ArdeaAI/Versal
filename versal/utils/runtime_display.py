@@ -1,7 +1,9 @@
-"""Human-facing Rich output for orchestrated runs.
+"""
+Human-facing Rich output for orchestrated runs.
 
 JSON remains the exhaustive diagnostic record. This module renders the smaller operational story:
-what the system tried, what each completed stage established, and the two literal accuracy rails.
+the current activity, completed task results, and the two literal accuracy rails. Individual stage
+history is available through verbose output.
 """
 
 from collections import Counter
@@ -14,7 +16,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from versal.utils.status import BOARD
+from versal.utils.status import BOARD, activity_text
 
 STAGES: dict[str, tuple[str, str]] = {
     "load_task": ("Load task", "stream the selected Parquet row into the one-task resident slot"),
@@ -77,10 +79,13 @@ def _accuracy_with_counts(value: float | None, status: str, style: str, metrics:
 
 
 class RuntimeDisplay:
-    """Rich renderer used by the trial and orchestrator."""
+    """
+    Rich renderer used by the trial and orchestrator.
+    """
 
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, *, verbose: bool = False) -> None:
         self.console = console
+        self.verbose = verbose
         self._active_stage: str | None = None
         self._provisional_support: float | None = None
 
@@ -103,19 +108,20 @@ class RuntimeDisplay:
         self._active_stage = None
         self._provisional_support = None
         BOARD.task(cursor, total, rung, name)
-        self.console.print(Rule(Text(f"Task {cursor}/{total} · rung {rung} · {name}", style="bold cyan"), style="cyan"))
+        if self.verbose:
+            self.console.print(Rule(Text(f"Task {cursor}/{total} · rung {rung} · {name}", style="bold cyan"), style="cyan"))
 
-    def stage_started(self, stage: str, *, detail: str = "") -> None:
+    def stage_started(self, stage: str, *, detail: str = "", phase: str | None = None, shared_generation: int | None = None) -> None:
         label, concept = STAGES.get(stage, (stage.replace("_", " ").title(), detail))
         self._active_stage = label
-        BOARD.stage(label, detail or concept)
+        BOARD.stage(label, detail or concept, phase=phase, shared_generation=shared_generation)
 
     def generation(self, strategy: str, generation: int, best_fitness: float, support_accuracy: float, mean_fitness: float, *, depth: int = 0) -> None:
         label = STAGES.get(strategy, (strategy, ""))[0]
         self._active_stage = label
         if depth == 0:
             self._provisional_support = support_accuracy if self._provisional_support is None else max(self._provisional_support, support_accuracy)
-        BOARD.generation(label, generation, best_fitness, support_accuracy, mean_fitness)
+        BOARD.generation(label, generation, best_fitness, support_accuracy, mean_fitness, depth=depth)
 
     def stage_result(
         self,
@@ -131,27 +137,17 @@ class RuntimeDisplay:
         self._active_stage = label
         if support_accuracy is not None and depth == 0:
             self._provisional_support = support_accuracy if self._provisional_support is None else max(self._provisional_support, support_accuracy)
-        style, symbol = {
-            "accepted": ("green", "✓"),
-            "hit": ("green", "✓"),
-            "saved": ("green", "✓"),
-            "continue": ("yellow", "→"),
-            "miss": ("dim", "·"),
-            "skipped": ("dim", "·"),
-            "failed": ("red", "×"),
-            "unavailable": ("yellow", "!"),
-        }.get(outcome, ("cyan", "•"))
-        row = Table.grid(padding=(0, 1))
-        row.add_column(width=2 + depth * 2)
-        row.add_column(min_width=17, style="bold")
-        row.add_column(ratio=1)
-        row.add_column(justify="right", style="dim")
+        symbol = {"accepted": "✓", "hit": "✓", "saved": "✓", "continue": "→", "miss": "·", "skipped": "·", "failed": "×", "unavailable": "!"}.get(outcome, "•")
         prefix = f"{'  ' * depth}{symbol}"
         score_label = "support" if depth == 0 else "subtask support"
         score = f" · {score_label} {support_accuracy:.4f}" if support_accuracy is not None else ""
-        timing = _duration(seconds) if seconds is not None else ""
-        row.add_row(Text(prefix, style=style), Text(label, style=style), Text(f"{detail or concept}{score}"), timing)
-        self.console.print(row)
+        timing = f" · {_duration(seconds)}" if seconds is not None else ""
+        row = activity_text(f"{prefix} {label} · {detail or concept}{score}{timing}")
+        BOARD.message(label, row, support_accuracy=support_accuracy, depth=depth)
+        if self.verbose:
+            row.no_wrap = False
+            row.overflow = "fold"
+            self.console.print(row)
 
     def query_result(self, value: float | None, status: str, *, seconds: float | None = None, depth: int = 0) -> None:
         if value is not None:

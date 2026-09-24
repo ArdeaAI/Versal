@@ -897,7 +897,7 @@ class RouterService:
         if signature == self._rendered_signature:
             return
         try:
-            from versal.rendering import OvermindVertex, OvermindView, render_overmind, submit_render
+            from versal.rendering import OvermindVertex, OvermindView, overmind_vertex_label, render_overmind, submit_render
 
             embedding_ordered = self._embedding_order()
             rank = {name: index for index, name in enumerate(embedding_ordered)}
@@ -925,7 +925,7 @@ class RouterService:
                 vertices.append(
                     OvermindVertex(
                         key=vertex.original_key,
-                        label=f"{vertex.original_key}  ({share:.0%})" + ("  stone" if stone else "") + ("  retired" if retired else ""),
+                        label=overmind_vertex_label(vertex.original_key, usage=share, stepping_stone=stone, retired=retired),
                         retired=retired,
                         usage=share,
                         entry_share=entry_raw.get(name, 0.0) / entry_peak,
@@ -943,13 +943,17 @@ class RouterService:
                 summary = self.library.summary(key)
                 if summary is None:
                     continue
-                retired_label = "retired" if summary.get("retired", False) else "route evicted"
+                try:
+                    stone = bool(self.library.load(key).provenance.get("stepping_stone", False))
+                except KeyError:
+                    stone = False
                 vertices.append(
                     OvermindVertex(
                         key=key,
-                        label=f"{key}  {retired_label}",
+                        label=overmind_vertex_label(key, stepping_stone=stone, retired=bool(summary.get("retired", False)), route_evicted=True),
                         retired=True,
                         embedding_rank=len(rank) + offset,
+                        stepping_stone=stone,
                     )
                 )
             view = OvermindView(

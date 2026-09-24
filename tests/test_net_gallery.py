@@ -3,6 +3,7 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -300,6 +301,9 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
             assert include_retired is True
             return summaries
 
+        def load(self, key: str) -> SimpleNamespace:
+            return SimpleNamespace(provenance={"stepping_stone": key in {"m1_beta", "m1_evicted"}})
+
     meta = {
         "d_model": 64,
         "top_k": 2,
@@ -307,7 +311,7 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
         "vertex_keys": ["m1_alpha", "m1_beta", "m1_retired", "m1_missing"],
         "input_adapter_keys": [{"key": "BINARY|K:2", "width": 2}, "REAL|K:3"],
         "output_head_keys": [{"key": "BINARY|K:1", "width": 1}],
-        "usage_totals": {"m1_alpha": 2.0, "m1_beta": 6.0, "m1_retired": 2.0},
+        "usage_totals": {"m1_alpha": 2.0, "m1_beta": 6.0, "m1_retired": 2.0, "m1_missing": 2.0},
         "step_usage_totals": {
             "m1_alpha": [0.0, 2.0],
             "m1_beta": [4.0, 0.0],
@@ -340,11 +344,14 @@ def test_render_overmind_from_metadata_builds_traffic_view_without_rendering(tmp
     assert captured["library"] is library_spy
     view = captured["view"]
     assert [vertex.key for vertex in view.vertices] == ["m1_beta", "m1_alpha", "m1_retired", "m1_evicted"]
-    assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.6, 0.2, 0.2, 0.0])
+    assert [vertex.usage for vertex in view.vertices] == pytest.approx([0.5, 1.0 / 6.0, 1.0 / 6.0, 0.0])  # matches live usage even after a payload was collected
     assert [vertex.mean_step for vertex in view.vertices[:3]] == pytest.approx([0.0, 1.0, 0.5])
     assert view.vertices[-1].mean_step is None
     assert view.vertices[-2].retired is True and view.vertices[-1].retired is True
     assert "route evicted" in view.vertices[-1].label
+    assert view.vertices[0].label == "m1_beta  (50%)  stone"
+    assert view.vertices[0].stepping_stone is True
+    assert view.vertices[-1].label == "m1_evicted  (0%)  stone  route evicted"
     assert view.input_signatures == ["BINARY|K:2", "REAL|K:3"]
     assert view.output_signatures == ["BINARY|K:1"]
     assert view.pathways == pytest.approx([(1, 0, 0.5), (1, 2, 1.0 / 6.0), (0, 1, 1.0)])

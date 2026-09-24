@@ -11,10 +11,10 @@ from versal.utils.logging import Logger
 from versal.utils.runtime_display import STAGES, RuntimeDisplay
 
 
-def _render_display(width: int = 100) -> tuple[RuntimeDisplay, io.StringIO]:
+def _render_display(width: int = 100, *, verbose: bool = False) -> tuple[RuntimeDisplay, io.StringIO]:
     stream = io.StringIO()
     console = Console(file=stream, force_terminal=True, color_system="standard", no_color=False, width=width)
-    return RuntimeDisplay(console), stream
+    return RuntimeDisplay(console, verbose=verbose), stream
 
 
 def _attempt(**overrides):
@@ -42,7 +42,7 @@ def test_task_panel_preserves_zero_and_explains_missing_query() -> None:
     display.task_finished(16, 18, 16, "deepsea.b2348", _attempt(), solved=False, task_seconds=4.8, new_library_keys=[], library_size=9)
 
     output = stream.getvalue()
-    assert "Reuse" in output and "Evolve dense network" in output
+    assert "Reuse" not in output and "Evolve dense network" in output
     assert "BEST REPORTABLE SUPPORT ACCURACY" in output and "0.0000" in output
     assert "HELD-OUT QUERY ACCURACY" in output and "N/A" in output
     assert "deadline arrived before held-out evaluation" in output
@@ -106,7 +106,7 @@ def test_interleaved_panel_reports_shared_budget_and_incumbent_size() -> None:
 
 
 def test_recursive_diagnostic_never_becomes_parent_support() -> None:
-    display, stream = _render_display()
+    display, stream = _render_display(verbose=True)
     display.task_started(13, 18, 13, "darcy_flow.b3")
     display.stage_result("routed", "continue", "diagnostic only", depth=1, support_accuracy=0.618)
     attempt = _attempt(
@@ -119,7 +119,7 @@ def test_recursive_diagnostic_never_becomes_parent_support() -> None:
     display.task_finished(13, 18, 13, "darcy_flow.b3", attempt, solved=False, task_seconds=640, new_library_keys=[], library_size=7)
 
     output = stream.getvalue()
-    assert "subtask support 0.6180" in output
+    assert "subtask support 0.6180" in re.sub(r"\x1b\[[0-9;]*m", "", output)
     assert "BEST REPORTABLE SUPPORT ACCURACY" in output and "N/A" in output
     assert "Best diagnostic" in output and "darcy_flow.b3.h0" in output
     assert "none — no executable parent champion" in output
@@ -182,13 +182,59 @@ def test_task_panel_separates_selected_and_held_out_paths_and_explains_failed_di
 
 
 def test_reasoned_strategy_skip_does_not_claim_zero_generation_evolution() -> None:
-    display, stream = _render_display()
+    display, stream = _render_display(verbose=True)
     display.stage_result("direct", "skipped", "9,000 flattened outputs exceed the 4,096 safety limit", seconds=0.0)
 
-    output = stream.getvalue()
+    output = re.sub(r"\x1b\[[0-9;]*m", "", stream.getvalue())
     assert "Evolve dense network" in output
     assert "9,000 flattened outputs exceed the 4,096 safety limit" in output
     assert "0 generations" not in output
+
+
+def test_default_stage_history_is_quiet_even_without_a_terminal() -> None:
+    stream = io.StringIO()
+    display = RuntimeDisplay(Console(file=stream, width=120))
+    display.enable()
+    try:
+        display.task_started(1, 100, 1, "xor")
+        for generation in range(10):
+            display.stage_started("direct", phase="refine", shared_generation=generation + 1)
+            display.generation("direct", generation, 1.0, 1.0, 0.8)
+            display.stage_result("direct", "continue", f"refine · shared generation {generation + 1}", support_accuracy=1.0)
+            display.stage_result("cross_validation", "accepted", "exhaustive · verified support", seconds=0.0)
+        assert stream.getvalue() == ""
+        assert display.provisional_support == 1.0
+        display.task_finished(1, 100, 1, "xor", _attempt(), solved=False, task_seconds=1.0, new_library_keys=[], library_size=0)
+        assert "Task 1/100" in stream.getvalue()
+        assert "shared generation" not in stream.getvalue()
+        assert "\x1b" not in stream.getvalue()
+    finally:
+        display.close()
+
+
+def test_live_results_update_support_without_subtask_or_query_contamination(monkeypatch) -> None:
+    from versal.utils import runtime_display
+    from versal.utils.status import StatusBoard
+
+    board = StatusBoard()
+    monkeypatch.setattr(runtime_display, "BOARD", board)
+    display, _stream = _render_display()
+    display.enable()
+    try:
+        display.task_started(1, 10, 1, "xor")
+        display.stage_result("lookup", "hit", "retrieved", support_accuracy=0.75)
+        assert board.best_metric == 0.75
+        display.generation("direct", 1, 1.0, 1.0, 0.8, depth=1)
+        display.stage_result("routed", "continue", "subtask", support_accuracy=1.0, depth=1)
+        display.query_result(1.0, "evaluated")
+        assert board.best_metric == display.provisional_support == 0.75
+        assert "Held-out query" in board.stage_line and "subtask" not in board.stage_line
+        display.task_started(2, 10, 1, "xor")
+        assert board.best_metric is None and display.provisional_support is None
+        display.stage_result("direct", "continue", "starting", support_accuracy=0.0)
+        assert board.best_metric == 0.0
+    finally:
+        display.close()
 
 
 def test_logging_defaults_clean_and_verbose_never_enables_raw_debug_records() -> None:

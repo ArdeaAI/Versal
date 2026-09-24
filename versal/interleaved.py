@@ -407,7 +407,7 @@ class InterleavedSearch:
             state.deficits[selected] -= 1.0
             session = sessions[selected]
             session.refining = phase == "refine"
-            owner.display.stage_started(selected)
+            owner.display.stage_started(selected, phase=phase, shared_generation=used + 1)
             before = time.perf_counter()
             evaluations, steps = session.evaluations, session.optimizer_steps
             outcome = session.advance(runtime)

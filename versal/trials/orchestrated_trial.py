@@ -11,6 +11,7 @@ import datetime
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import random
 import shutil
@@ -66,7 +67,7 @@ class OrchestratedTrial(Proctor):
         self.checkpoint_every = max(1, int(table.get("checkpoint_every", 1)))
         self.task_records: list[dict[str, Any]] = []
         self.interruptions: list[dict[str, Any]] = []
-        self.display = RuntimeDisplay(console)
+        self.display = RuntimeDisplay(console, verbose=logger.isEnabledFor(logging.INFO))
         self.shutdown = EscapeShutdown(lambda: BOARD.event("Escape pressed · stopping at the next safe boundary and writing final reports"))
         # Pool discovery is intentionally deferred until ``run``.  A Hub/network/Parquet failure
         # must happen only after the run directory and its first durable summary exist, and the

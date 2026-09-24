@@ -81,7 +81,7 @@ def main() -> None:
     clearml.add_argument("--clearml", dest="clearml", action="store_true", help="Enable ClearML telemetry for this run.")
     clearml.add_argument("--no-clearml", dest="clearml", action="store_false", help="Disable ClearML telemetry for this run.")
     parser.set_defaults(clearml=None)
-    parser.add_argument("--verbose", action="store_true", help="Show concise operational diagnostics in addition to the Rich run display.")
+    parser.add_argument("--verbose", action="store_true", help="Keep individual stage messages and operational diagnostics in the console history.")
     args = parser.parse_args()
     Logger.configure(verbose=args.verbose)
 
