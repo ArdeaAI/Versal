@@ -51,7 +51,7 @@ quick_eval_top_k = 5
 library_dir = "library"
 # Oversized tasks decompose first only when no configured native representation can fit safely.
 decompose_first_above = 2000000
-evolve = ["routed", "grammar", "field", "direct", "composition"]
+evolve = ["routed", "grammar", "spatial", "direct", "composition"]
 decompose = ["output_slices", "input_subsets", "time_windows", "spatial_patches"]
 output_slices_n_groups = 2
 output_slices_max_output_features = 1024
@@ -89,27 +89,37 @@ decompose_leaf_cap = 64
   [orchestrator.evolve_budget]
   routed = 0.15
   grammar = 0.15
-  field = 0.25
+  spatial = 0.25
   direct = 0.30
   composition = 0.15
 
-  [orchestrator.field]
-  train_sites = 4096
-  audit_sites = 16384
-  verify_top_k = 5
-  verify_chunk_size = 32768
+  # Sparse neuron recipes start with no hidden circuit and no repetition.
+  # Mutations discover circuits, bindings, repetition, specialization, and weight sharing.
+  [orchestrator.spatial]
+  chunk_size = 32768
+  max_expanded_edges = 1000000
+  max_activation_cells = 8000000
   pop_size = 64
   elitism = 2
   assess_workers = 0
 
-    [orchestrator.field.train]
+    [orchestrator.spatial.init]
+    kind = "spatial_minimal"
+
+    [orchestrator.spatial.crossover]
+    kind = "spatial"
+
+    [orchestrator.spatial.mutation]
+    operators = ["spatial_weights", "spatial_add_node", "spatial_connect", "spatial_bind", "spatial_repeat", "spatial_group", "spatial_split", "spatial_share", "spatial_prune", "mutate_activation", "mutate_aggregation", "spatial_reuse", "spatial_recurrent", "tweak_refine_steps"]
+
+    [orchestrator.spatial.train]
     kind = "gradient_scheduled"
     steps = 20
     lr = 0.01
     writeback = true
     weight_decay = 0.0001
 
-    [orchestrator.field.evaluate]
+    [orchestrator.spatial.evaluate]
     kind = "standard"
 
   # The router selects frozen library experts, then distills successful pathways into reusable compositions.

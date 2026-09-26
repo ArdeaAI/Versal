@@ -28,6 +28,9 @@ REGISTRY_MODULES = (
     "versal.evolution.schedule",
     "versal.evolution.selection",
     "versal.evolution.speciation",
+    "versal.evolution.spatial_ops",
+    "versal.representation",
+    "versal.spatial",
     "versal.evolution.train",
     "versal.library",
     "versal.strategy",
@@ -45,7 +48,10 @@ RUN_PATHS: tuple[dict[str, str], ...] = (
     {"path": "<library_dir>/router/router_meta.json", "access": "read-write", "condition": "routed persistence enabled"},
     {"path": "<library_dir>/router/router_state.pt", "access": "read-write", "condition": "routed persistence enabled"},
     {"path": "<library_dir>/router_stale_<timestamp>/", "access": "write", "condition": "persisted router is incompatible and persist_strict is false"},
-    {"path": "<library_dir>/grammar/grammar.json", "access": "read-write", "condition": "grammar strategy rebuilds after the live library key set changes"},
+    {"path": "<library_dir>/grammar/grammar.json", "access": "read-write", "condition": "atomic publication of a complete grammar snapshot"},
+    {"path": "<library_dir>/grammar/catalog.json", "access": "read-write", "condition": "completed grammar snapshot identity and mining parameters"},
+    {"path": "<library_dir>/grammar/preparation.json", "access": "read-write", "condition": "unfinished grammar cursor at a task or shutdown boundary"},
+    {"path": "<library_dir>/grammar/evidence/<digest>.json", "access": "read-write", "condition": "cached immutable-entry motif evidence"},
     {"path": "<library_dir>/search/index.json", "access": "read-write", "condition": "interleaved search stores task incumbents and population snapshot references"},
     {"path": "<library_dir>/search/<task>-<sha256>.json.gz", "access": "read-write", "condition": "immutable task population, optimizer, RNG, and topology snapshots"},
     {"path": "<system temp>/versal-router-report-*/", "access": "read-write", "condition": "immutable lazy router shards during held-out candidate reporting; removed afterward"},
@@ -98,8 +104,8 @@ def _config_surface(table: dict[str, Any]) -> tuple[list[str], list[str]]:
 def _registry_surface() -> dict[str, list[str]]:
     registries: dict[str, list[str]] = {}
     seen: set[int] = set()
-    for module_name in REGISTRY_MODULES:
-        module = importlib.import_module(module_name)
+    modules = [importlib.import_module(name) for name in REGISTRY_MODULES]
+    for module in modules:
         for value in vars(module).values():
             if not isinstance(value, Registry) or id(value) in seen:
                 continue

@@ -188,7 +188,12 @@ class DirectStrategy:
         def seeded_front(tracker: InnovationTracker) -> list[Genome]:
             # Refine-on-hit warm start: grafted entries take the front of the population and are
             # trained/assessed like every other member. Grid stamping keeps geometry mutators live.
-            grafted = [graft(entry, tracker) for entry in (seed_entries or [])]
+            grafted = []
+            for entry in seed_entries or []:
+                try:
+                    grafted.append(graft(entry, tracker))
+                except ValueError:
+                    continue
             grafted.extend(_restamp_genome(genome, tracker) for genome in (seed_genomes or []))
             if grid is not None:
                 from versal.evolution.init import stamp_input_coordinates

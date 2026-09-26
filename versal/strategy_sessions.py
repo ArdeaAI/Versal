@@ -265,7 +265,11 @@ class DirectSession(StrategySession):
         for key in self.pending:
             entry = runtime.library.load(key)
             if entry.entry_type == MODULE and "field_template" not in entry.payload and entry.io == self.spec.io:
-                seeds.append(graft(entry, tracker))
+                try:
+                    seeds.append(graft(entry, tracker))
+                except ValueError:
+                    # Large recipes remain reusable as macros and composition vertices.
+                    continue
         self.pending = []
         return seeds
 
@@ -393,6 +397,69 @@ class DirectSession(StrategySession):
             speciation=self.speciation,
         )
         return data
+
+
+@SESSION_STRATEGY.register("spatial")
+class SpatialSession(DirectSession):
+    """
+    Interleave ordinary evolutionary generations of compact tensor graph recipes.
+    """
+
+    def _initialize(self, runtime: StrategyRuntime) -> None:
+        from functools import partial
+
+        from versal.spatial import SpatialContract
+
+        evolver = self.strategy.evolver
+        original = evolver.init_op
+        evolver.init_op = partial(original, contract=SpatialContract.from_task(self.task))
+        try:
+            super()._initialize(runtime)
+        finally:
+            evolver.init_op = original
+
+    def _seeds(self, runtime: StrategyRuntime, tracker: InnovationTracker) -> list[Genome]:
+        from versal.evolution.spatial_ops import embed_entry, restamp_spatial, spatial_minimal
+        from versal.spatial import SpatialGenome
+
+        seeds = []
+        contract = self.adapter.contract
+        keys = list(self.pending)
+        if self.state is None and self.saved.get("population") is None:
+            # A new task may bind a learned recipe at another size. It must enter
+            # the population and pass this task's gates before becoming a solution.
+            keys.extend(entry.key for entry in runtime.library.query_spatial(contract, limit=self.strategy.evolver.pop_size))
+        for key in dict.fromkeys(keys):
+            entry = runtime.library.load(key)
+            if "field_template" in entry.payload:
+                continue
+            if entry.payload.get("representation") == "spatial":
+                genome = genome_from_dict(entry.payload)
+                if not isinstance(genome, SpatialGenome) or genome.contract is None or not genome.contract.compatible(contract):
+                    continue
+                genome.contract = contract
+                seeds.append(restamp_spatial(genome, tracker))
+            elif entry.io == self.spec.io:
+                base = spatial_minimal(1, 1, rng=self.rng, contract=contract)
+                base.connections, base.bindings = [], {}
+                base = restamp_spatial(base, tracker)
+                try:
+                    seeds.append(embed_entry(base, entry, tracker, self.rng, exact=True))
+                except ValueError:
+                    continue
+        self.pending = []
+        return seeds
+
+    def _verified(self, runtime: StrategyRuntime) -> StrategyResult:
+        result = super()._verified(runtime)
+        result.representation = "spatial"
+        return result
+
+    def _advance(self, runtime: StrategyRuntime) -> StrategyResult:
+        try:
+            return super()._advance(runtime)
+        except TimeoutError:
+            return StrategyResult("spatial", 0.0, 0, champion_metrics={"deadline_skipped": 1.0}, representation="spatial")
 
 
 @SESSION_STRATEGY.register("field")
@@ -643,34 +710,55 @@ class GrammarSession(StrategySession):
         }
         self.compiled = set(self.saved.get("compiled", []))
         self.active = set(self.saved.get("active", []))
-        self.catalog: tuple[str, ...] | None = None
+        self.catalog: str | None = self.saved.get("catalog")
 
     def ready(self, runtime: StrategyRuntime) -> bool:
-        from versal.grammar import GrammarError, compile_program
+        from versal.grammar_work import catalog_token
 
-        catalog = tuple(runtime.library.keys())
-        if catalog != self.catalog:
-            self.catalog = catalog
-            with self.bound(runtime):
-                for program in self.strategy._programs(runtime):
-                    identity = repr(program.to_dict())
-                    if identity in self.compiled:
-                        continue
-                    self.compiled.add(identity)
-                    try:
-                        compiled = compile_program(program, self.strategy._grammar, library=runtime.library, rng=self.rng)
-                    except (GrammarError, KeyError, ValueError):
-                        continue
-                    if isinstance(compiled, Genome) and len(compiled.input_ids) == self.spec.n_inputs and len(compiled.output_ids) == self.spec.output_width:
-                        self.children["direct"].seed_genomes.append(compiled)
-                        self.active.add("direct")
-                    elif isinstance(compiled, CompositionGenome) and self.strategy._composition_compatible(compiled, self.spec):
-                        self.children["composition"].seed_comps.append(compiled)
-                        self.active.add("composition")
-        self.skip_reason = None if self.active else "no compatible independently supported grammar productions"
-        return bool(self.active)
+        pending = catalog_token(runtime.library) != self.catalog or bool(self.saved.get("program_queue"))
+        self.skip_reason = None if pending or self.active else "no compatible independently supported grammar productions"
+        return pending or bool(self.active)
 
     def _advance(self, runtime: StrategyRuntime) -> StrategyResult:
+        import time
+
+        from versal.grammar import GrammarError, Program, compile_program
+        from versal.grammar_work import catalog_token
+
+        pending = catalog_token(runtime.library) != self.catalog or bool(self.saved.get("program_queue"))
+        prepare = pending and (not self.active or not self.saved.get("prepared_last", False))
+        if prepare:
+            self.saved["prepared_last"] = True
+            if not self.strategy.prepare(runtime):
+                return StrategyResult("grammar", 0.0, 0, preparation_steps=1)
+            queue = self.saved.get("program_queue")
+            if queue is None:
+                queue = [program.to_dict() for program in self.strategy._programs(runtime)]
+                self.saved["program_queue"] = queue
+            end = time.perf_counter() + 0.1
+            for _ in range(128):
+                if not queue or runtime.should_stop() or runtime.should_shutdown() or time.perf_counter() >= end:
+                    break
+                program = Program.from_dict(queue.pop(0))
+                identity = repr(program.to_dict())
+                if identity in self.compiled:
+                    continue
+                self.compiled.add(identity)
+                try:
+                    compiled = compile_program(program, self.strategy._grammar, library=runtime.library, rng=self.rng)
+                except (GrammarError, KeyError, ValueError):
+                    continue
+                if isinstance(compiled, Genome) and len(compiled.input_ids) == self.spec.n_inputs and len(compiled.output_ids) == self.spec.output_width:
+                    self.children["direct"].seed_genomes.append(compiled)
+                    self.active.add("direct")
+                elif isinstance(compiled, CompositionGenome) and self.strategy._composition_compatible(compiled, self.spec):
+                    self.children["composition"].seed_comps.append(compiled)
+                    self.active.add("composition")
+            if not queue:
+                self.saved.pop("program_queue", None)
+                self.catalog = self.strategy._completed_token
+            return StrategyResult("grammar", 0.0, 0, preparation_steps=1)
+        self.saved["prepared_last"] = False
         ready = [name for name in sorted(self.active) if self.children[name].ready(runtime)]
         if not ready:
             return StrategyResult("grammar", 0.0, 0, skip_reason="grammar children declined resource allocation")
@@ -685,7 +773,15 @@ class GrammarSession(StrategySession):
         return result
 
     def state_dict(self) -> dict[str, Any]:
-        return {**super().state_dict(), **{name: child.state_dict() for name, child in self.children.items()}, "active": sorted(self.active), "compiled": sorted(self.compiled)}
+        return {
+            **super().state_dict(),
+            **{name: child.state_dict() for name, child in self.children.items()},
+            "active": sorted(self.active),
+            "compiled": sorted(self.compiled),
+            "catalog": self.catalog,
+            "program_queue": self.saved.get("program_queue"),
+            "prepared_last": self.saved.get("prepared_last", False),
+        }
 
 
 @SESSION_STRATEGY.register("routed")
@@ -712,7 +808,7 @@ class RoutedSession(StrategySession):
         with self.bound(runtime):
             loading = self.strategy.service is None and self.strategy.persist and (Path(self.strategy.library_dir) / "router" / "router_meta.json").exists()
             original = capture_torch_rng() if loading else None
-            self.service = self.strategy._service(runtime.library)
+            self.service = self.strategy._service(runtime.library, sync_on_load=False)
             if original is not None:
                 restore_torch_rng(original)
             catalog = tuple(runtime.library.keys())
@@ -792,7 +888,7 @@ class RoutedSession(StrategySession):
             self.optimizer_steps += 1
             self.train_steps += 1
             if self.strategy._replay and self.strategy.replay_every > 0 and self.train_steps % self.strategy.replay_every == 0:
-                self.optimizer_steps += self.strategy._replay_step(optimizer)
+                self.optimizer_steps += self.strategy._replay_step(optimizer, prepare_optimizer=self._optimizer)
         with torch.no_grad():
             metrics = dict(evaluate(self.view, self.spec.encoded, self.spec.encoder))
         self.evaluations += 1
@@ -819,6 +915,9 @@ class RoutedSession(StrategySession):
             self.service.record_traffic()
             self.service.record_task({"task": self.task.meta.name, "rung": self.task.meta.rung, "steps_used": self.optimizer_steps, "interleaved": True})
             self.strategy._remember_for_replay(self.spec, self.view.input_key, self.view.head_key, self.view.support_input)
+        if self.service is not None:
+            # Eligibility may attach experts even when this task gives routing no quantum.
+            # Persist that catalog too, so a restart retains exactly the same adapters.
             self.service.save()
 
     def state_dict(self) -> dict[str, Any]:

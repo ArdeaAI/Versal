@@ -28,20 +28,60 @@ class GrammarStrategy:
     name: str = "grammar"
     _library_keys: tuple[str, ...] = field(default=(), init=False, repr=False)
     _grammar: Any = field(default=None, init=False, repr=False)
+    _preparation: Any = field(default=None, init=False, repr=False)
+    _completed_token: str | None = field(default=None, init=False, repr=False)
+
+    def prepare(self, runtime: StrategyRuntime) -> bool:
+        """
+        Spend one bounded turn on a stable snapshot, retaining unfinished work.
+        """
+        import json
+
+        from versal.grammar_work import GrammarPreparation, catalog_token
+
+        token = catalog_token(runtime.library)
+        params = {name: getattr(self, name) for name in ("module_sizes", "composition_sizes", "min_lineage_support", "per_entry_cap")}
+        stamp_path = runtime.library.root / "grammar" / "catalog.json"
+        if self._grammar is None and stamp_path.exists():
+            from versal.grammar import load_grammar
+
+            stamp = json.loads(stamp_path.read_text())
+            if stamp == {"token": token, "params": json.loads(json.dumps(params))}:
+                self._grammar, self._completed_token = load_grammar(runtime.library), token
+        if self._grammar is not None and token == self._completed_token:
+            return True
+        if self._preparation is None:
+            path = runtime.library.root / "grammar" / "preparation.json"
+            saved = json.loads(path.read_text()) if path.exists() else None
+            if saved is not None and saved.get("params") != json.loads(json.dumps(params)):
+                saved = None
+            if saved is not None and not set(saved["state"]["keys"]).issubset(runtime.library.keys()):
+                saved = None
+            self._preparation = GrammarPreparation(runtime.library, params, saved.get("state") if saved else None)
+        complete = self._preparation.advance(should_stop=lambda: runtime.should_stop() or runtime.should_shutdown())
+        if complete:
+            self._grammar = self._preparation.grammar
+            self._completed_token = self._preparation.state["token"]
+            runtime.library._write_json(stamp_path, {"token": self._completed_token, "params": params})
+            self._preparation = None
+            path = runtime.library.root / "grammar" / "preparation.json"
+            path.unlink(missing_ok=True)
+        return complete
+
+    def save_preparation(self, runtime: StrategyRuntime) -> None:
+        """
+        Persist the cursor only at a task boundary, not on every tiny work slice.
+        """
+        if self._preparation is not None:
+            path = runtime.library.root / "grammar" / "preparation.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            runtime.library._write_json(path, {"params": self._preparation.params, "state": self._preparation.state_dict()})
 
     def _programs(self, runtime: StrategyRuntime) -> list[Any]:
-        from versal.grammar import crossover_program, mutate_program, rebuild_grammar, seed_program
+        from versal.grammar import crossover_program, mutate_program, seed_program
 
-        keys = tuple(runtime.library.keys())
-        if self._grammar is None or keys != self._library_keys:
-            self._grammar = rebuild_grammar(
-                runtime.library,
-                module_sizes=self.module_sizes,
-                composition_sizes=self.composition_sizes,
-                min_lineage_support=self.min_lineage_support,
-                per_entry_cap=self.per_entry_cap,
-            )
-            self._library_keys = keys
+        if self._grammar is None:
+            return []
         productions = sorted(self._grammar.productions, key=lambda item: (-item.mdl_gain, -item.support, item.key))[: self.max_productions]
         programs: list[Any] = []
         seen: set[str] = set()
@@ -90,6 +130,13 @@ class GrammarStrategy:
     ) -> StrategyResult:
         from versal.grammar import GrammarError, compile_program
 
+        preparation_turns = 0
+        while preparation_turns < budget and not runtime.should_stop() and not runtime.should_shutdown():
+            preparation_turns += 1
+            if self.prepare(runtime):
+                break
+        self.save_preparation(runtime)
+
         module_seeds: list[Genome] = []
         comp_seeds: list[CompositionGenome] = []
         for program in self._programs(runtime):
@@ -102,10 +149,18 @@ class GrammarStrategy:
             elif isinstance(compiled, CompositionGenome) and self._composition_compatible(compiled, spec):
                 comp_seeds.append(_restamp_composition(compiled, runtime.state.comp_innovations))
         if not module_seeds and not comp_seeds:
-            return StrategyResult(strategy=self.name, metric=0.0, generations_used=0, champion_metrics={"grammar_productions": float(len(self._grammar.productions))})
+            return StrategyResult(
+                strategy=self.name,
+                metric=0.0,
+                generations_used=0,
+                champion_metrics={"grammar_productions": float(len(self._grammar.productions) if self._grammar is not None else 0)},
+            )
 
         results: list[StrategyResult] = []
         used = 0
+        budget = max(0, budget - preparation_turns)
+        if budget == 0:
+            return StrategyResult(self.name, 0.0, 0, preparation_steps=preparation_turns)
         if module_seeds:
             allocation = budget if not comp_seeds else max(1, budget // 2)
             result = self.direct(task, spec, runtime, budget=allocation, seed_genomes=module_seeds)
@@ -123,6 +178,6 @@ class GrammarStrategy:
         winner = max(results, key=lambda item: item.metric)
         winner.strategy = self.name
         winner.generations_used = used
-        winner.champion_metrics["grammar_productions"] = float(len(self._grammar.productions))
+        winner.champion_metrics["grammar_productions"] = float(len(self._grammar.productions) if self._grammar is not None else 0)
         winner.champion_metrics["grammar_programs"] = float(len(module_seeds) + len(comp_seeds))
         return winner

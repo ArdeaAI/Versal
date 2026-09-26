@@ -37,7 +37,7 @@ def hidden_penalty(genome: Genome, metrics: dict[str, float]) -> float:
     # high-dimensional I/O (e.g. 32->19) the readout alone is hundreds of edges, so a total-edge
     # `complexity_penalty` swamps the fitting signal and punishes any growth; this bounds the shared
     # body instead. This is the complexity bound to use on a continuous / multi-rung run.
-    return -float(len(genome.hidden_ids))
+    return -float(metrics.get("spatial_expanded_hidden", len(genome.hidden_ids)))
 
 
 @FITNESS.register("negative_query_loss")

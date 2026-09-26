@@ -164,7 +164,7 @@ class RouterVertex:
 
 def build_vertex(entry: LibraryEntry, library: ModuleLibrary, *, max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH) -> RouterVertex | None:
     """Decode an entry into a frozen expert, returning ``None`` when it is incompatible."""
-    if _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
+    if entry.payload.get("representation") != "spatial" and _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
         return None
     in_width, out_width = _entry_widths(entry)
     try:
@@ -334,7 +334,7 @@ class RoutedNet(nn.Module):
             entry = library.load(key)
             if entry.entry_type == COMPOSITION and not include_compositions:
                 continue
-            if exclude_temporal and _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
+            if exclude_temporal and entry.payload.get("representation") != "spatial" and _is_temporal_signature(entry.io["inputs"][0].get("signature", "")):
                 continue
             vertex = build_vertex(entry, library, max_inline_depth=max_inline_depth)
             if vertex is None:
@@ -636,6 +636,7 @@ class RouterService:
         route_patience_tasks: int = 24,
         route_activity_floor: float = 0.01,
         route_traffic_decay: float = 0.95,
+        sync_on_load: bool = True,
     ) -> None:
         self.library = library
         self.persist_dir = persist_dir
@@ -681,7 +682,7 @@ class RouterService:
         self.net.shard_loader = self._load_shard
         self.net.expert_loader = self._load_expert
         if persist_dir is not None and (persist_dir / "router_meta.json").exists():
-            self._load(persist_dir)
+            self._load(persist_dir, sync=sync_on_load)
 
     def sync(self, *, include_compositions: bool = True, exclude_temporal: bool = True, render: bool = True) -> int:
         revived = 0
@@ -1111,7 +1112,7 @@ class RouterService:
             return
         raise KeyError(f"unknown router shard kind {kind!r}")
 
-    def _load(self, directory: Path) -> None:
+    def _load(self, directory: Path, *, sync: bool = True) -> None:
         meta = json.loads((directory / "router_meta.json").read_text())
         expected = {
             "d_model": self.net.d_model,
@@ -1185,7 +1186,8 @@ class RouterService:
         for name in known:
             self.route_life.setdefault(name, self.route_patience_tasks)
         self.evicted = {str(key): {str(name): int(value) for name, value in record.items()} for key, record in (meta.get("evicted") or {}).items()}
-        self.sync()  # append admissions and revive entries with newer external-use evidence
+        if sync:
+            self.sync()  # append admissions and revive entries with newer external-use evidence
 
 
 @dataclass
@@ -1233,7 +1235,7 @@ class RoutedStrategy:
     _replay: list[tuple[Any, str, str, torch.Tensor]] = field(default_factory=list)
     _last_distill_resource_metrics: dict[str, float] = field(default_factory=dict)
 
-    def _service(self, library: ModuleLibrary) -> RouterService:
+    def _service(self, library: ModuleLibrary, *, sync_on_load: bool = True) -> RouterService:
         if self.service is None:
             self.service = RouterService(
                 library,
@@ -1255,6 +1257,7 @@ class RoutedStrategy:
                 route_patience_tasks=self.route_patience_tasks,
                 route_activity_floor=self.route_activity_floor,
                 route_traffic_decay=self.route_traffic_decay,
+                sync_on_load=sync_on_load,
             )
         return self.service
 
@@ -1395,7 +1398,7 @@ class RoutedStrategy:
                 runtime.on_generation(self.name, steps_run // milestone, holder, float(-loss.detach()))
         return steps_run
 
-    def _replay_step(self, optimizer: torch.optim.Optimizer) -> int:
+    def _replay_step(self, optimizer: torch.optim.Optimizer, *, prepare_optimizer: Any = None) -> int:
         from versal.evaluation import support_loss
 
         encoded, input_key, head_key, support_input = self._replay[int(torch.randint(len(self._replay), (1,)))]
@@ -1406,6 +1409,8 @@ class RoutedStrategy:
         optimizer.zero_grad()
         loss = support_loss(replay_view, encoded)
         if torch.isfinite(loss):
+            if prepare_optimizer is not None:
+                prepare_optimizer()
             self._sync_optimizer_parameters(optimizer, net)
             loss.backward()
             optimizer.step()

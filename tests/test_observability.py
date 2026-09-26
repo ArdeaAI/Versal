@@ -380,7 +380,7 @@ def test_pool_loading_failure_is_reported_after_loading_status_exists(tmp_path: 
     config["schedule"] = {"kind": "round_robin", "rungs": [1], "tasks_per_rung": 1}
     monkeypatch.setattr(orchestrated_trial.results, "DEFAULT_ROOT", tmp_path / "results")
     trial = OrchestratedTrial(config)
-    trial.shutdown = cast(Any, SimpleNamespace(requested=False, start=lambda: None, stop=lambda: None))
+    trial.shutdown = cast(Any, SimpleNamespace(requested=False, start=lambda: None, stop=lambda: None, restore_terminal=lambda: None))
     status_seen_inside_loader: list[str] = []
 
     def fail_after_summary() -> None:

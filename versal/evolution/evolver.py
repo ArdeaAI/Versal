@@ -31,7 +31,7 @@ from versal.evolution.novelty import NoveltyConfig, archive_insert, compute_desc
 from versal.evolution.selection import pareto_ranks_and_crowding, pareto_sort_key
 from versal.evolution.speciation import SpeciesPlan
 from versal.reference_depth import DEFAULT_MAX_INLINE_DEPTH
-from versal.substrate import GraphNet, SubstrateModule, decode_module
+from versal.substrate import SubstrateModule, decode_module
 from versal.utils.memory import release_unused_host_memory
 
 _TaskPayload = TypeVar("_TaskPayload")
@@ -68,7 +68,7 @@ class TaskAdapter:
     grid_shape: tuple[int, ...] | None = None
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH
 
-    def decode(self, genome: Genome) -> GraphNet:
+    def decode(self, genome: Genome) -> SubstrateModule:
         # A genome that evolved refine_steps > 1 decodes to the iterative-refinement substrate (the
         # same static input re-applied with state carried across passes); steps == 1 keeps the exact
         # feedforward path, so the flat search is unchanged until refinement is actually evolved.
@@ -329,7 +329,7 @@ class Evolver:
             evaluator = partial(_evaluate_in_worker, adapter=pooled_adapter, evaluate_op=self.evaluate_op, fitness=self.fitness)
             chunksize = max(1, len(batch_indices) // (self.assess_workers * 4))
             eval_async = pool.map_async(evaluator, [genome for genome, _module in trained_pairs], chunksize=chunksize)
-            for index, (evaluated, pair) in zip(batch_indices, zip(eval_async.get(), trained_pairs)):
+            for index, (evaluated, pair) in zip(batch_indices, zip(wait_pool_result(eval_async), trained_pairs)):
                 genome, metrics, fitness = evaluated
                 metrics["training_optimizer_steps"] = float(getattr(pair[1], "optimizer_steps", 0))
                 results[index] = Assessed(genome, metrics, fitness, pair[1])
@@ -342,7 +342,7 @@ class Evolver:
                 results[index] = Assessed(genome, metrics, self._score(genome, metrics), module)
 
         if serial_async is not None:
-            for index, (genome, metrics, fitness) in zip(serial_indices, serial_async.get()):
+            for index, (genome, metrics, fitness) in zip(serial_indices, wait_pool_result(serial_async)):
                 module = None if metrics.get("decode_failed") else self._decode(genome, adapter)
                 results[index] = Assessed(genome, metrics, fitness, module)
         return [item for item in results if item is not None]
@@ -375,7 +375,7 @@ class Evolver:
             worker = partial(_assess_in_worker, adapter=pooled_adapter, train_op=staged_op, evaluate_op=self.evaluate_op, fitness=self.fitness, deadline=self.deadline)
             if pool is not None:
                 chunksize = max(1, len(alive) // (self.assess_workers * 4))
-                triples = pool.map(worker, [current[index] for index in alive], chunksize=chunksize)
+                triples = map_pool(pool, worker, [current[index] for index in alive], chunksize=chunksize)
             else:
                 triples = [worker(current[index]) for index in alive]
             for index, triple in zip(alive, triples):
@@ -411,7 +411,7 @@ class Evolver:
             deadline=self.deadline,
         )
         chunksize = max(1, len(genomes) // (self.assess_workers * 4))
-        results = pool.map(worker, genomes, chunksize=chunksize)
+        results = map_pool(pool, worker, genomes, chunksize=chunksize)
         return [Assessed(genome, metrics, fitness, None if metrics.get("decode_failed") else self._decode(genome, adapter)) for genome, metrics, fitness in results]
 
     def _pooled_adapter(self, adapter: _TaskPayload) -> "_TaskPayload | AdapterRef":
@@ -480,6 +480,8 @@ class Evolver:
             self._pool = None
             pool.terminate()
             pool.join()
+            if pool in _OWNED_POOLS:
+                _OWNED_POOLS.remove(pool)
 
     def release_task_adapter(self) -> None:
         """Release the main process's encoded payload when the scheduler switches tasks.
@@ -665,14 +667,76 @@ class Evolver:
 
 _WORKER_RNG = random.Random(0)
 _SHARED_POOL: "Pool | None" = None
+_OWNED_POOLS: list[Any] = []
+
+
+def wait_pool_result(result: Any) -> Any:
+    """
+    Wait responsively while workers finish their current cooperative boundary.
+    """
+    import multiprocessing
+
+    from versal.utils.shutdown import active_shutdown
+
+    while True:
+        controller = active_shutdown()
+        if controller is not None:
+            _ = controller.requested
+        try:
+            return result.get(timeout=0.1)
+        except multiprocessing.TimeoutError:
+            continue
+
+
+def map_pool(pool: Any, worker: Any, items: Any, *, chunksize: int) -> Any:
+    """
+    Use interruptible waits while retaining the small inline-pool testing seam.
+    """
+    if not hasattr(pool, "map_async"):
+        return pool.map(worker, items, chunksize=chunksize)
+    return wait_pool_result(pool.map_async(worker, items, chunksize=chunksize))
+
+
+def close_assess_pools(*, force: bool = False) -> None:
+    """
+    Close every pool owned by this process; forced stops skip task release barriers.
+    """
+    global _SHARED_POOL
+    pools = list(_OWNED_POOLS)
+    _SHARED_POOL = None
+    for pool in pools:
+        if force:
+            # Let Pool stop its queue/worker handlers before terminating children.
+            # Killing an idle reader first can strand the queue's semaphore and
+            # deadlock Pool.terminate while it tries to drain that same queue.
+            pool.terminate()
+        else:
+            pool.close()
+        pool.join()
+        # Keep ownership until join succeeds: a second interrupt during ordinary
+        # cleanup must still find and terminate this pool on the forced path.
+        if pool in _OWNED_POOLS:
+            _OWNED_POOLS.remove(pool)
 
 
 def _spawn_assess_pool(workers: int, library_dir: str) -> "Pool":
     import multiprocessing as mp
+    import signal
+
+    from versal.utils.cancellation import cancellation_flag
 
     context = mp.get_context("spawn")  # torch/Metal-safe; also avoids fork issues on the Linux queues
     n = min(workers, mp.cpu_count() or workers)
-    return context.Pool(processes=n, initializer=_init_worker, initargs=(library_dir,))
+    # A spawned interpreter imports torch before its initializer runs. Block SIGINT
+    # across spawn, then ignore/unblock it in the worker, to cover that window too.
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}) if hasattr(signal, "pthread_sigmask") else None
+    try:
+        pool = context.Pool(processes=n, initializer=_init_worker, initargs=(library_dir, cancellation_flag()))
+        _OWNED_POOLS.append(pool)
+        return pool
+    finally:
+        if mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def create_assess_pool(workers: int, library_dir: str) -> "Pool":
@@ -723,7 +787,7 @@ def _release_pool_task_adapters(pool: "Pool") -> None:
         # Each task pauses briefly after clearing its slot.  That keeps one fast worker from
         # consuming the whole queue and makes the returned PID set an explicit acknowledgement
         # from every live worker, rather than a best-effort broadcast.
-        acknowledgements = pool.map(_release_worker_task_adapter, range(max(1, len(expected) * 2)), chunksize=1)
+        acknowledgements = map_pool(pool, _release_worker_task_adapter, range(max(1, len(expected) * 2)), chunksize=1)
         seen.update(int(pid) for pid in acknowledgements)
     missing = sorted(expected - seen)
     if missing:
@@ -749,13 +813,22 @@ def _close_shared_pool() -> None:
 _WORKER_LIBRARY: "ModuleLibrary | None" = None
 
 
-def _init_worker(library_dir: str) -> None:
+def _init_worker(library_dir: str, cancel_flag: Any = None) -> None:
     """Per-worker bootstrap for the process pool. First scrub ClearML's master-task env so a worker can
     never decide it is a ClearML subprocess and stall attaching to the server (workers are pure compute).
     Then pin torch to one intra-op thread (N workers x 1 thread map cleanly to N cores; the kernels are
     too small for intra-op threading to help) and open the on-disk library once (shared by the macro
     resolver and composition assembly)."""
     import os
+    import signal
+
+    from versal.utils.cancellation import install_cancellation_flag
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+    if cancel_flag is not None:
+        install_cancellation_flag(cancel_flag)
 
     os.environ.pop("CLEARML_PROC_MASTER_ID", None)
     os.environ.pop("TRAINS_PROC_MASTER_ID", None)

@@ -42,7 +42,7 @@ For each scheduled task, Versal:
 2. Tests structurally compatible library entries, checking the protected winner for this exact support task first. A successful hit resumes its populations for bounded, non-regressing refinement.
 3. For a miss, optionally decomposes an oversized task before flat search when no enabled native
    representation can handle it safely.
-4. Interleaves eligible `routed`, `grammar`, `field`, `direct`, and `composition` processes using the configured budget shares. A turn advances one population generation, one router training slice, or one distillation attempt.
+4. Interleaves eligible `routed`, `grammar`, `spatial`, `direct`, and `composition` processes using the configured budget shares. A turn advances one population generation, one router training slice, one distillation attempt, or a bounded grammar preparation slice. Preparation uses scheduling credit without reporting a generation.
 5. Validates provisional support winners by refitting them on reduced support folds. A complete, consistent, unmasked Boolean input domain instead receives exhaustive support verification: withholding one truth-table row would ask a different learning question. The real query split remains inaccessible to search and admission.
 6. If search does not produce an accepted parent, optionally decomposes the task and recursively
    solves the resulting parts.
@@ -57,7 +57,7 @@ The five strategies have different jobs:
   a reusable composition.
 - **Grammar** turns structures rediscovered in independent lineages into new candidate graph
   programs.
-- **Field** evolves resolution-independent programs over compatible spatial fields.
+- **Spatial** grows sparse neuron circuits over raw typed tensors, with evolved connection rules, optional repeated placements, and independently evolved parameter sharing. It supports sequence, classification, and tensor mapping tasks without choosing an architecture from the rung number.
 - **Direct** evolves a task-shaped network from genomes and optional warm starts.
 - **Composition** evolves graphs of reusable modules connected by trainable or fixed mappings.
 
@@ -98,7 +98,7 @@ uv run app --resume results/<timestamp>_orchestrated
 
 During an interactive run, press **Escape** to request a cooperative stop. Versal finishes the
 current safe optimizer or generation boundary, restores the terminal, records status `stopped`, and
-writes the checkpoint needed by `--resume`. Ctrl-C remains the immediate interruption path.
+writes the checkpoint needed by `--resume`. The first Ctrl-C requests the same cooperative save, including redirected runs. A second Ctrl-C forces exit with status 130. Assessment workers leave signal handling to the main process.
 
 ## Run profiles
 
@@ -123,12 +123,14 @@ compositions instead of restarting from an empty search state.
 
 ## XOR reproducibility
 
-The offline check constructs all four XOR inputs locally and uses a separate empty library per seed. All five strategies remain configured; field search is ineligible for this nonspatial task, and grammar waits for independently supported productions. The profile retains the direct/composition populations and training allowances from `fullish_light.toml`, pins computation to one CPU thread per process, and batches small direct candidates for practical runtime.
+The offline check constructs all four XOR inputs locally and uses a separate empty library per seed. All five strategies remain configured, including spatial graph recipes on the Boolean tensor contract. Grammar preparation shares the schedule and waits for independently supported productions. The profile retains the direct/composition populations and training allowances from `fullish_light.toml`, pins computation to one CPU thread per process, and batches small direct candidates for practical runtime.
 
 ```bash
 uv run xor_repro --output results/xor-check --seeds 0,1,2,3,4,5,6,7,8,9
 uv run xor_repro --output results/xor-ladder --policy ladder --seeds 0,1,2,3,4,5,6,7,8,9
 ```
+
+For a quicker convergence check, add `--stop-at-minimum` to finish each seed when perfect support reaches expanded complexity 5 or less. The default continues through all 100 encounters to check continued stability. Query accuracy remains report-only in either mode.
 
 Each seed must reach perfect support and query accuracy, preserve that accuracy, never increase the accepted perfect winner's expanded complexity, and finish at complexity **5 or less** within 100 encounters. This is an empirical reproducibility target under the repository's structural cost, not a proof of a unique mathematical minimum. Activation choices, including `sin`, remain evolved.
 
@@ -250,3 +252,11 @@ uv run pytest tests/test_substrate.py::test_decode_forward_shape -v
 
 When reporting a new experiment, preserve the exact configuration and task manifest, distinguish
 missing measurements from valid zeroes, and keep held-out outcomes separate from support fitting.
+
+Spatial recipes are versioned module payloads. A minimal recipe connects raw input values and a bias to output ports; it supplies no convolution stencil, pooled statistics, attention block, or hand-authored hidden circuit. Registered mutations add/prune neurons and edges, change index maps, group connected neurons, repeat or split circuits, and tie or untie their parameters. Shape bindings are inferred from support descriptors and dimensions; query target shapes are used only for evaluation. Irregular shapes that cannot be represented by a consistent binding are declined explicitly.
+
+Compositions and routes can execute stored spatial modules, and spatial recipes can embed frozen modules or compositions. Direct search can expand small recipes or use them as macros; large recipes remain compact. Grammar mines scalar circuit examples from their actual bindings, keeping the original entry lineage so repeated copies cannot supply independent evidence. Candidate comparisons count every executed neuron, connection, and referenced placement; recipe size and parameter count are separate diagnostics. Resource limits govern execution size, not eligibility by task name or rung.
+
+Grammar induction keeps an indexed, resumable cursor and caches complete evidence per immutable entry, lineage, and mining parameters. Each preparation turn processes at most 128 work items with a 100 ms slice target, checking the stop/deadline between items. Entry loading, indexing, and publication are indivisible work items, so the slice target is not a hard real-time guarantee. New evidence is published only as a complete snapshot. Timing rows distinguish preparation, an explicit skip, and a strategy that was not reached before the budget ended.
+
+The legacy `field` strategy remains registered for old configurations and `field_template` artifacts. New profiles select `spatial`; an existing run resumed from its saved effective configuration keeps its original strategy selection.

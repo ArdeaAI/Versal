@@ -247,7 +247,7 @@ class GraphNet(SubstrateModule):
         # positions, frozen inner module). Inner output order convention: the inner genome's sorted
         # output ids correspond positionally to macro.output_node_ids.
         self._macro_inner = nn.ModuleList()
-        self._macro_entries: list[list[tuple[torch.Tensor, torch.Tensor, "GraphNet"]]] = [[] for _ in self._levels]
+        self._macro_entries: list[list[tuple[torch.Tensor, torch.Tensor, SubstrateModule]]] = [[] for _ in self._levels]
         if genome.macros:
             resolver = macro_resolver or _DEFAULT_MACRO_RESOLVER
             if resolver is None:
@@ -260,15 +260,18 @@ class GraphNet(SubstrateModule):
                 if _reference_depth >= max_inline_depth:
                     raise ValueError(f"macro reference nesting exceeds max_inline_depth={max_inline_depth}")
                 inner_genome = resolver(key)
-                if len(inner_genome.input_ids) != len(macro.input_node_ids) or len(inner_genome.output_ids) != len(macro.output_node_ids):
+                from versal.representation import module_ports
+
+                inner_inputs, inner_outputs = module_ports(inner_genome)
+                if inner_inputs != len(macro.input_node_ids) or inner_outputs != len(macro.output_node_ids):
                     raise ValueError(
                         f"macro {macro.ref} shape mismatch: inner {len(inner_genome.input_ids)}->{len(inner_genome.output_ids)}, "
                         f"placement {len(macro.input_node_ids)}->{len(macro.output_node_ids)}"
                     )
-                inner = GraphNet(
+                inner = decode_module(
                     inner_genome,
-                    len(inner_genome.input_ids),
-                    len(inner_genome.output_ids),
+                    inner_inputs,
+                    inner_outputs,
                     macro_resolver=resolver,
                     max_inline_depth=max_inline_depth,
                     _reference_depth=_reference_depth + 1,
@@ -607,11 +610,24 @@ def decode_module(
     max_inline_depth: int = DEFAULT_MAX_INLINE_DEPTH,
     _reference_depth: int = 0,
     _reference_stack: tuple[str, ...] = (),
-) -> GraphNet:
+) -> SubstrateModule:
     """Decode honoring the genome's evolved refinement depth: refine substrate when refine_steps > 1,
     plain feedforward otherwise. Use this at every STATIC-task decode site that evaluates or reuses a
     genome (adapter, library lookup re-eval, composition inner), so a module that needs its refine
     passes keeps working wherever it is reused, never silently collapsing to a single pass."""
+    from versal.representation import codec_for
+
+    codec = codec_for(genome)
+    if codec is not None:
+        if codec.ports(genome) != (n_inputs, n_outputs):
+            raise ValueError(f"module port mismatch: {codec.ports(genome)} != {(n_inputs, n_outputs)}")
+        return codec.decode(
+            genome,
+            macro_resolver=macro_resolver or _DEFAULT_MACRO_RESOLVER,
+            max_inline_depth=max_inline_depth,
+            _reference_depth=_reference_depth,
+            _reference_stack=_reference_stack,
+        )
     if genome.refine_steps > 1:
         return decode_refine(
             genome,

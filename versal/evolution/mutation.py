@@ -568,8 +568,12 @@ def add_library_module(genome: Genome, ctx: MutationContext, *, rng: random.Rand
     entry = entries[rng.randrange(len(entries))]
 
     from versal.evolution.genome import genome_from_dict
+    from versal.representation import explicit_genome
 
-    source = genome_from_dict(entry.payload)
+    try:
+        source = explicit_genome(genome_from_dict(entry.payload))
+    except ValueError:
+        return genome
     child = genome.clone()
     host_sources = [*child.input_ids, *child.bias_ids, *child.hidden_ids]
     host_outputs = child.output_ids
@@ -649,6 +653,11 @@ def add_macro_node(genome: Genome, ctx: MutationContext, *, rng: random.Random, 
         nodes = entry.payload.get("nodes", [])
         k = sum(1 for node in nodes if node.get("kind") == "input")
         m = sum(1 for node in nodes if node.get("kind") == "output")
+        if entry.payload.get("representation") is not None:
+            from versal.evolution.genome import genome_from_dict
+            from versal.representation import module_ports
+
+            k, m = module_ports(genome_from_dict(entry.payload))
         if not (1 <= k <= len(host_sources) and 1 <= m <= max_outputs):
             continue
         # Embedding this entry nests its whole macro chain one level deeper; past the decode cap

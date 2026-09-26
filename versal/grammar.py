@@ -32,10 +32,6 @@ from versal.motifs import (
     TIED_EDGE,
     MotifGraph,
     NodeLabel,
-    canonical_form,
-    composition_motif_graph,
-    enumerate_connected_subgraphs,
-    module_motif_graph,
     motif_fingerprint,
 )
 
@@ -317,7 +313,7 @@ def _production_key(source_kind: str, motif: MotifGraph, ports: Sequence[Boundar
     return f"g1_{_sha1(payload)}"
 
 
-def _lineage_root(key: str, entries: dict[str, LibraryEntry]) -> str:
+def _lineage_root(key: str, entries: dict[str, Any]) -> str:
     path: list[str] = []
     current = key
     while current not in path:
@@ -391,6 +387,8 @@ def _ports_for_occurrence(
     edges: dict[tuple[int, int], int],
     members: tuple[int, ...],
     mapping: tuple[int, ...],
+    *,
+    index: Any = None,
 ) -> tuple[BoundaryPort, ...]:
     member_set = set(members)
     canonical_of = {node_id: mapping[index] for index, node_id in enumerate(members)}
@@ -402,7 +400,8 @@ def _ports_for_occurrence(
             raw[("input", canonical_of[node_id])] = ("", 0, "terminal")
         elif kind == "output":
             raw[("output", canonical_of[node_id])] = ("", 0, "terminal")
-    for source, target in edges:
+    boundary_edges = edges if index is None else {edge for node in members for edge in index.incident[node]}
+    for source, target in boundary_edges:
         if source not in member_set and target in member_set:
             raw.setdefault(("input", canonical_of[target]), ("", 0, "cut"))
         elif source in member_set and target not in member_set:
@@ -411,7 +410,9 @@ def _ports_for_occurrence(
     typed: list[tuple[PortDirection, int, str, int, PortRole]] = []
     for (direction, canonical_node), (_signature, _width, role) in raw.items():
         original_node = members[mapping.index(canonical_node)]
-        if entry.entry_type == MODULE:
+        if index is not None:
+            signature, width = index.port_types[(original_node, direction, role)]
+        elif entry.entry_type == MODULE:
             signature, width = _module_port_type(entry, entry.payload, original_node, direction, role)
         else:
             signature, width = _composition_port_type(entry, entry.payload, original_node, direction, role)
@@ -429,30 +430,14 @@ def _ports_for_occurrence(
 
 
 def _entry_occurrences(entry: LibraryEntry, sizes: tuple[int, ...], cap: int, root: str) -> list[_Occurrence]:
-    if entry.entry_type == MODULE:
-        labels, edges = module_motif_graph(entry.payload)
-    else:
-        labels, edges = composition_motif_graph(entry.payload)
-    skeleton: dict[int, set[int]] = {node_id: set() for node_id in labels}
-    for source, target in edges:
-        if source != target:
-            skeleton[source].add(target)
-            skeleton[target].add(source)
+    from versal.grammar_work import OccurrenceCursor
 
-    occurrences: list[_Occurrence] = []
-    for size in sizes:
-        if size > len(labels):
-            continue
-        subsets, _truncated = enumerate_connected_subgraphs(skeleton, size, cap)
-        for subset in subsets:
-            members = tuple(sorted(subset))
-            local_index = {node_id: index for index, node_id in enumerate(members)}
-            local_labels = [labels[node_id] for node_id in members]
-            local_edges = [(local_index[source], local_index[target], mask) for (source, target), mask in edges.items() if source in subset and target in subset]
-            motif = canonical_form(local_labels, local_edges)
-            mapping = _canonical_mapping(local_labels, local_edges, motif)
-            ports = _ports_for_occurrence(entry, labels, edges, members, mapping)
-            occurrences.append(_Occurrence(entry.key, root, motif, ports))
+    cursor = OccurrenceCursor(entry, sizes, cap, root)
+    occurrences = []
+    while not cursor.done:
+        occurrence = cursor.step()
+        if occurrence is not None:
+            occurrences.append(occurrence)
     return occurrences
 
 

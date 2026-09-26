@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable
 
@@ -14,6 +13,7 @@ from versal.dataset.icarus import Axis, EncodedTask, Field, FieldDescriptor, Lev
 from versal.evaluation import split_metrics_from_raw
 from versal.evolution.genome import Genome, genome_from_dict
 from versal.substrate import SubstrateModule, decode_module
+from versal.utils.deadline import expired
 
 if TYPE_CHECKING:
     from versal.library import ModuleLibrary
@@ -161,7 +161,7 @@ def gather_local_multiscale_v1(field: Field, positions: torch.Tensor, *, deadlin
     offsets = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
     offsets.extend((dy * dilation, dx * dilation) for dilation in (2, 4, 8) for dy, dx in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)))
     for dy, dx in offsets:
-        if deadline is not None and time.perf_counter() >= deadline:
+        if expired(deadline):
             raise TimeoutError("deadline expired during field offset gathering")
         rr, cc = rows + dy, cols + dx
         inside = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
@@ -175,7 +175,7 @@ def gather_local_multiscale_v1(field: Field, positions: torch.Tensor, *, deadlin
         counts = torch.zeros_like(sums)
         for dy in range(-radius, radius + 1):
             for dx in range(-radius, radius + 1):
-                if deadline is not None and time.perf_counter() >= deadline:
+                if expired(deadline):
                     raise TimeoutError("deadline expired during field pooling")
                 rr, cc = rows + dy, cols + dx
                 inside = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
@@ -258,7 +258,7 @@ def encode_sites(task: Task, sites: list[FieldSite], contract: FieldContract, *,
     for pair_index, selected in sorted(by_pair.items()):
         input_field, target_field = task.support[pair_index]
         for start in range(0, len(selected), max(1, chunk_size)):
-            if deadline is not None and time.perf_counter() >= deadline:
+            if expired(deadline):
                 raise TimeoutError("deadline expired during field feature preparation")
             chunk = selected[start : start + chunk_size]
             positions = torch.tensor([(site.row, site.column) for site in chunk], dtype=torch.long)
@@ -327,7 +327,7 @@ def evaluate_field_module(
             _target_data, target_valid = _channel_first(target_field)
             positions = target_valid.any(dim=0).nonzero()
             for start in range(0, len(positions), max(1, chunk_size)):
-                if deadline is not None and time.perf_counter() >= deadline:
+                if expired(deadline):
                     raise TimeoutError(f"deadline expired during field {split} verification")
                 chunk = positions[start : start + chunk_size]
                 features = gather_local_multiscale_v1(input_field, chunk, deadline=deadline)
@@ -379,7 +379,7 @@ def predict_field(module: SubstrateModule, input_field: Field, contract: FieldCo
     encoder = Level0Encoder(field_feature_width(contract.input_channels))
     with torch.no_grad():
         for start in range(0, len(positions), max(1, chunk_size)):
-            if deadline is not None and time.perf_counter() >= deadline:
+            if expired(deadline):
                 raise TimeoutError("deadline expired during field inference")
             features = gather_local_multiscale_v1(input_field, positions[start : start + chunk_size], deadline=deadline)
             raw = as_logits(module(features), descriptor, contract.output_channels)

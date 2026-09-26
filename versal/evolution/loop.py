@@ -34,7 +34,7 @@ from versal.evolution.composition import (
     minimal_composition,
     writeback_composition,
 )
-from versal.evolution.evolver import AdapterRef, Evolver, _resolve_adapter, get_shared_pool, get_worker_library
+from versal.evolution.evolver import AdapterRef, Evolver, _resolve_adapter, get_shared_pool, get_worker_library, map_pool
 from versal.evolution.fitness import stamp_complexity_metrics
 from versal.evolution.genome import Genome, InnovationTracker, genome_from_dict, genome_to_dict, make_acyclic
 from versal.evolution.mutation import MutationContext
@@ -316,7 +316,10 @@ class HierarchicalLoop:
                 if "field_template" not in entry.payload and self.library.reference_subtree_depth(entry.key) <= self.max_inline_depth
             ][:wanted]
             for index, entry in enumerate(entries):
-                genomes[index] = graft(entry, tracker)
+                try:
+                    genomes[index] = graft(entry, tracker)
+                except ValueError:
+                    continue  # oversized recipes remain available as compact references
         modules = [LiveModule(genome=genome) for genome in genomes]
         state = HierarchicalState(modules=modules, module_innovations=tracker, comp_innovations=InnovationTracker(_next_node_id=0), rng=rng)
         self._speciate_only(state)
@@ -444,7 +447,7 @@ class HierarchicalLoop:
                 deadline=self.evolver.deadline,
             )
             chunksize = max(1, len(comps) // (4 * (getattr(pool, "_processes", 12) or 12)))
-            return pool.map(worker, comps, chunksize=chunksize)
+            return map_pool(pool, worker, comps, chunksize=chunksize)
         return [self._assess(comp, spec, state, train=train) for comp in comps]
 
     # attribution and writeback

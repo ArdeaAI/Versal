@@ -1,26 +1,50 @@
-"""Terminal Escape handling for a graceful run stop.
-
-The listener is deliberately inactive for redirected stdin and non-POSIX terminals.  Ctrl-C keeps
-its ordinary interrupt semantics; Escape only sets a cooperative flag that search loops inspect at
-their existing generation/optimizer-step boundaries.
+"""
+Cooperative Escape and Ctrl-C handling, with a second Ctrl-C escape hatch.
 """
 
 from __future__ import annotations
 
 import os
 import select
+import signal
 import sys
 import threading
 from collections.abc import Callable
 from copy import deepcopy
 from typing import IO, Any
 
+from versal.utils.cancellation import install_cancellation_flag
+
+_ACTIVE: EscapeShutdown | None = None
+
+
+class ForcedShutdown(BaseException):
+    """
+    Explicit second-interrupt exit; bypass expensive crash-report generation.
+    """
+
+
+def active_shutdown() -> EscapeShutdown | None:
+    """
+    Share the CLI controller with trials without putting runtime objects in config.
+    """
+    return _ACTIVE
+
 
 class EscapeShutdown:
-    """Turn a standalone Escape keypress into a thread-safe cooperative stop request."""
+    """
+    Own terminal controls and SIGINT until persistence and worker cleanup finish.
+    """
 
     def __init__(self, on_request: Callable[[], None] | None = None, *, stream: IO[str] | None = None) -> None:
-        self._requested = threading.Event()
+        import multiprocessing
+
+        self._flag = multiprocessing.get_context("spawn").RawValue("b", 0)
+        self._notified = False
+        self._installed = False
+        self._previous_handler: Any = None
+        self._previous_flag: Any = None
+        self._previous_controller: EscapeShutdown | None = None
         self._closing = threading.Event()
         self._on_request = on_request
         self._stream = stream if stream is not None else sys.stdin
@@ -30,19 +54,35 @@ class EscapeShutdown:
 
     @property
     def requested(self) -> bool:
-        return self._requested.is_set()
+        requested = bool(self._flag.value)
+        if requested and not self._notified:
+            self._notified = True
+            if self._on_request is not None:
+                self._on_request()
+        return requested
 
     def request(self) -> None:
-        """Request shutdown once; safe to call from tests or another control surface."""
+        """
+        Request shutdown once from an ordinary control surface.
+        """
+        self._flag.value = 1
+        _ = self.requested
 
-        if self._requested.is_set():
-            return
-        self._requested.set()
-        if self._on_request is not None:
-            self._on_request()
+    def _interrupt(self, _number: int, _frame: Any) -> None:
+        if self._flag.value:
+            raise ForcedShutdown()
+        self._flag.value = 1
 
     def start(self) -> bool:
-        """Begin listening when stdin is an interactive POSIX terminal."""
+        """
+        Install SIGINT independently of stdin; listen for Escape on POSIX terminals.
+        """
+        global _ACTIVE
+        if not self._installed and threading.current_thread() is threading.main_thread():
+            self._previous_controller, _ACTIVE = _ACTIVE, self
+            self._previous_flag = install_cancellation_flag(self._flag)
+            self._previous_handler = signal.signal(signal.SIGINT, self._interrupt)
+            self._installed = True
 
         if self._thread is not None or not self._stream.isatty():
             return False
@@ -62,8 +102,10 @@ class EscapeShutdown:
         self._thread.start()
         return True
 
-    def stop(self) -> None:
-        """Stop listening and restore the exact terminal mode captured by :meth:`start`."""
+    def restore_terminal(self) -> None:
+        """
+        Restore input mode while keeping SIGINT ownership during final saving.
+        """
 
         self._closing.set()
         thread, self._thread = self._thread, None
@@ -79,11 +121,23 @@ class EscapeShutdown:
         self._fd = None
         self._terminal_state = None
 
+    def stop(self) -> None:
+        """
+        Restore the terminal, original signal handler, and previous cancellation scope.
+        """
+        global _ACTIVE
+        self.restore_terminal()
+        if self._installed:
+            signal.signal(signal.SIGINT, self._previous_handler)
+            install_cancellation_flag(self._previous_flag)
+            _ACTIVE = self._previous_controller
+            self._installed = False
+
     def _listen(self) -> None:
         fd = self._fd
         if fd is None:
             return
-        while not self._closing.is_set() and not self._requested.is_set():
+        while not self._closing.is_set() and not self._flag.value:
             try:
                 readable, _writable, _errors = select.select([fd], [], [], 0.1)
                 if not readable:

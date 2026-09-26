@@ -225,6 +225,8 @@ def payload_shell_complexity(entry_type: str, payload: dict[str, Any]) -> int:
     """The historical local-only structural cost, computed without constructing a genome."""
 
     if entry_type == MODULE:
+        if payload.get("representation") == "spatial":
+            return genome_from_dict(payload).complexity()
         enabled = sum(bool(connection.get("enabled", True)) for connection in payload.get("connections", []))
         hidden = sum(node.get("kind") == "hidden" for node in payload.get("nodes", []))
         return enabled + hidden + len(payload.get("macros", []))
@@ -259,7 +261,14 @@ def expanded_payload_complexity(
     else:
         raise ValueError(f"unknown entry_type {entry_type!r}")
     total = payload_shell_complexity(entry_type, payload)
-    for reference in references:
+    copies = [1] * len(references)
+    if entry_type == MODULE and payload.get("representation") == "spatial":
+        from versal.spatial import SpatialGenome
+
+        genome = SpatialGenome.from_payload(payload)
+        counts = genome.reference_copies()
+        copies = [counts[int(macro["innovation"])] for macro in payload.get("macros", [])]
+    for reference, multiplicity in zip(references, copies):
         if not reference.startswith("library:"):
             continue
         key = reference.removeprefix("library:")
@@ -272,7 +281,7 @@ def expanded_payload_complexity(
         nested = expanded_payload_complexity(entry.entry_type, entry.payload, library, visiting=visiting | {key}, depth=depth + 1)
         if nested >= INVALID_EXPANDED_COMPLEXITY:
             return INVALID_EXPANDED_COMPLEXITY
-        total += nested
+        total += nested * multiplicity
         if total >= INVALID_EXPANDED_COMPLEXITY:
             return INVALID_EXPANDED_COMPLEXITY
     return total
@@ -285,6 +294,8 @@ def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
     always gets a fresh key; this is the identity refinement must compare against instead
     (a weight-only "improvement" is not a new solution). Also the natural basis for a future
     motif census over discovered substructures."""
+    from versal.representation import topology_extension
+
     if entry_type == MODULE:
         skeleton: dict[str, Any] = {
             "nodes": sorted(
@@ -295,6 +306,7 @@ def structural_fingerprint(entry_type: str, payload: dict[str, Any]) -> str:
             "macros": sorted((macro["ref"], list(macro["inputs"]), list(macro["outputs"]), bool(macro.get("trainable", False))) for macro in payload.get("macros", [])),
             "refine_steps": int(payload.get("refine_steps", 1)),
             "field_template": payload.get("field_template"),
+            **topology_extension(payload),
         }
     else:
         skeleton = {
@@ -450,9 +462,11 @@ class ModuleLibrary:
             "cv_pass_fraction": float(provenance.get("cv_pass_fraction", 0.0)),
             "retired": False,
             "dependency": bool(provenance.get("dependency", False)),
+            "search_lineage": provenance.get("search_lineage"),
+            "refined_from": provenance.get("refined_from"),
             "behavior": list(provenance.get("behavior", [])),  # QD niche descriptor (archive policy)
             "stats": entry.stats,
-            "representation": "field" if is_field_payload(payload) else entry_type,
+            "representation": "field" if is_field_payload(payload) else payload.get("representation", entry_type),
             "field_identity": (hashlib.sha1(json.dumps(payload["field_template"], sort_keys=True).encode()).hexdigest()[:16] if is_field_payload(payload) else None),
         }
         self._write_index()
@@ -476,6 +490,8 @@ class ModuleLibrary:
             summary["dependency"] = False
             summary["retired"] = False
             summary.pop("retired_reason", None)
+        summary["search_lineage"] = entry.provenance.get("search_lineage")
+        summary["refined_from"] = entry.provenance.get("refined_from")
         history = entry.provenance.setdefault("readmissions", [])
         history.append({k: provenance.get(k) for k in ("task", "rung", "depth", "accepted_metric", "weight_robustness", "validation_status", "cv_pass_fraction")})
         del history[:-10]  # cap file growth
@@ -525,6 +541,22 @@ class ModuleLibrary:
             for summary in self._index.values()
             if summary["entry_type"] == entry_type and not summary.get("retired", False) and not summary.get("dependency", False) and group_key(summary["io"]) == wanted
         ]
+
+    def query_spatial(self, contract: Any, *, limit: int = 0) -> list[LibraryEntry]:
+        """
+        Nominate compatible symbolic tensor recipes; support evaluation remains the gate.
+        """
+        from versal.spatial import SpatialContract
+
+        matches = []
+        for row in self.summaries():
+            if row.get("representation") != "spatial":
+                continue
+            entry = self.load(row["key"])
+            if SpatialContract.from_dict(entry.payload["spatial"]["contract"]).compatible(contract):
+                matches.append(entry)
+        matches.sort(key=lambda entry: (entry.provenance.get("weight_robustness", 0.0), entry.provenance.get("accepted_metric", 0.0)), reverse=True)
+        return matches[:limit] if limit else matches
 
     def query_field(self, contract: Any, *, include_retired: bool = False, limit: int = 0) -> list[LibraryEntry]:
         """Cross-resolution nominations by symbolic field identity; absolute H/W never participate."""
@@ -833,6 +865,7 @@ def macro_resolver(library: "ModuleLibrary") -> Callable[[str], Genome]:
             cache[key] = genome_from_dict(entry.payload)
         return cache[key]
 
+    setattr(resolve, "library", library)
     return resolve
 
 
@@ -851,7 +884,9 @@ def graft(entry: LibraryEntry, tracker: InnovationTracker) -> Genome:
         raise ValueError(f"can only graft module entries, got {entry.entry_type!r}")
     if is_field_entry(entry):
         raise ValueError("field-template entries may only seed the field strategy")
-    source = genome_from_dict(entry.payload)
+    from versal.representation import explicit_genome
+
+    source = explicit_genome(genome_from_dict(entry.payload))
     id_map = {old_id: tracker.new_node_id() for old_id in sorted(source.nodes)}
     nodes = {id_map[node.id]: replace(node, id=id_map[node.id]) for node in source.nodes.values()}
     connections = [

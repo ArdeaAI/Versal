@@ -43,7 +43,7 @@ from versal.utils.files import file_sha256
 from versal.utils.logging import Logger
 from versal.utils.proctor import Proctor
 from versal.utils.runtime_display import RuntimeDisplay
-from versal.utils.shutdown import EscapeShutdown
+from versal.utils.shutdown import EscapeShutdown, ForcedShutdown, active_shutdown
 from versal.utils.status import BOARD
 
 logger = Logger.get_logger()
@@ -68,7 +68,8 @@ class OrchestratedTrial(Proctor):
         self.task_records: list[dict[str, Any]] = []
         self.interruptions: list[dict[str, Any]] = []
         self.display = RuntimeDisplay(console, verbose=logger.isEnabledFor(logging.INFO))
-        self.shutdown = EscapeShutdown(lambda: BOARD.event("Escape pressed · stopping at the next safe boundary and writing final reports"))
+        self._owns_shutdown = active_shutdown() is None
+        self.shutdown = active_shutdown() or EscapeShutdown(lambda: BOARD.event("Stop requested · saving at the next safe boundary · Ctrl-C again forces exit"))
         # Pool discovery is intentionally deferred until ``run``.  A Hub/network/Parquet failure
         # must happen only after the run directory and its first durable summary exist, and the
         # constructor must never materialize hundreds of gigabytes before ClearML starts the run.
@@ -202,6 +203,13 @@ class OrchestratedTrial(Proctor):
                     self._persist_resume_state(orchestrator, state, task_cursor)
                 if self.shutdown.requested:
                     break
+        except ForcedShutdown:
+            self.shutdown.restore_terminal()
+            self.display.close()
+            self._release_experiment_lock()
+            if self._owns_shutdown:
+                self.shutdown.stop()
+            raise
         except BaseException as error:  # record the failure, then re-raise: no more silent empty runs
             try:
                 if active_entry is not None and active_task_started is not None:
@@ -214,7 +222,7 @@ class OrchestratedTrial(Proctor):
                         active_stage=self.display.active_stage,
                         elapsed=elapsed,
                     )
-                self.shutdown.stop()  # restore terminal input before releasing Rich or printing a traceback
+                self.shutdown.restore_terminal()
                 self.display.close()
                 task_value = None
                 if orchestrator is not None:
@@ -231,11 +239,13 @@ class OrchestratedTrial(Proctor):
                 self._archive_boundary(orchestrator, state, task_cursor, status=f"crashed-{type(error).__name__}", force=True, best_effort=True)
             finally:
                 self._release_experiment_lock()
+                if self._owns_shutdown:
+                    self.shutdown.stop()
             raise
 
         try:
             gracefully_stopped = self.shutdown.requested
-            self.shutdown.stop()
+            self.shutdown.restore_terminal()
             self.display.close()
             task_value = None
             try:
@@ -248,7 +258,7 @@ class OrchestratedTrial(Proctor):
             self._persist_resume_state(orchestrator, state, task_cursor)
             if self.gc_enabled and not self.fresh_per_task:
                 self._run_gc(state)
-            final_status = "stopped" if gracefully_stopped else "done"
+            final_status = "stopped" if gracefully_stopped or self.shutdown.requested else "done"
             self._write_run_summary(orchestrator, state, task_cursor, status=final_status)
             self._publish_final_archive(orchestrator, state, task_cursor, status=final_status)
             self.results = {
@@ -265,6 +275,8 @@ class OrchestratedTrial(Proctor):
             return self.results
         finally:
             self._release_experiment_lock()
+            if self._owns_shutdown:
+                self.shutdown.stop()
 
     def _release_experiment_lock(self) -> None:
         lock = getattr(self, "experiment_lock", None)
@@ -787,6 +799,7 @@ class OrchestratedTrial(Proctor):
                 "selected_support_accuracy",
                 "phase",
                 "strategy_work",
+                "strategy_status",
             ):
                 value = getattr(attempt, name, None)
                 if value is not None and value != {}:

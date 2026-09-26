@@ -25,6 +25,7 @@ STAGES: dict[str, tuple[str, str]] = {
     "routed": ("Route experts", "combine frozen experts and distill an executable pathway"),
     "grammar": ("Apply grammar", "synthesize from independently recurring structures"),
     "field": ("Evolve spatial field", "grow and train a compact network shared across spatial sites"),
+    "spatial": ("Evolve spatial graph", "grow neuron circuits, their placements, and their connection rules"),
     "direct": ("Evolve dense network", "grow and train a task-specific flattened topology"),
     "composition": ("Compose modules", "wire reusable modules with trainable glue"),
     "cross_validation": ("Validate support folds", "test whether a fresh fit predicts omitted support examples"),
@@ -175,7 +176,7 @@ class RuntimeDisplay:
         elif failure_stage == "time_budget":
             reason = "task deadline reached"
         elif failure_stage == "shutdown_requested":
-            reason = "Escape requested a graceful stop"
+            reason = "a graceful stop was requested"
         elif failure_stage == "parent_re_evolve":
             reason = "subtasks solved, but the recomposed parent stayed below threshold"
         elif isinstance(failure_stage, str) and failure_stage.startswith("subtask:"):
@@ -292,6 +293,12 @@ class RuntimeDisplay:
         for stage, seconds in (getattr(attempt, "stage_seconds", None) or {}).items():
             label = STAGES.get(stage, (stage.replace("_", " ").title(), ""))[0]
             inclusive = " (includes recursive work)" if stage in {"decompose", "decompose_first"} else ""
+            state = (getattr(attempt, "strategy_status", None) or {}).get(stage, {})
+            if state.get("status") in {"skipped", "not_reached"}:
+                timing.add(f"{label}: {state['status'].replace('_', ' ')} — {state.get('reason', '')}")
+                continue
+            if state.get("status") == "preparing":
+                inclusive += " (preparation; no generation completed)"
             timing.add(f"{label}: {_duration(float(seconds))}{inclusive}")
         body = Group(grid, Text(), timing)
         border = "green" if solved else "red"

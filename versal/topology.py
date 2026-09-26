@@ -64,6 +64,7 @@ def _nested_reference_label(reference: str, library: ModuleLibrary | None, visit
 
 def _module_graph(payload: dict[str, Any], library: ModuleLibrary | None, visiting: frozenset[str]) -> nx.DiGraph:
     graph = nx.DiGraph()
+    spatial = payload.get("spatial", {})
     nodes = list(payload.get("nodes", []))
     positions: dict[tuple[str, int], int] = {}
     by_kind: dict[str, list[int]] = {}
@@ -88,6 +89,7 @@ def _module_graph(payload: dict[str, Any], library: ModuleLibrary | None, visiti
                 activation=str(node.get("activation", "identity")),
                 aggregation=str(node.get("aggregation", "sum")),
                 coordinate=node.get("coordinate"),
+                **({"placement": spatial.get("placements", {}).get(str(identifier), {})} if spatial else {}),
             ),
         )
 
@@ -107,7 +109,12 @@ def _module_graph(payload: dict[str, Any], library: ModuleLibrary | None, visiti
         # hand-authored/future schemas. The numeric marker itself is an innovation-like id, while
         # the partition it induces across connections is architectural and must be preserved.
         tie_group = connection.get("tie", connection.get("tie_group"))
-        connection_label = _label("module_connection", enabled=bool(connection.get("enabled", True)), recurrent=bool(connection.get("recurrent", False)))
+        connection_label = _label(
+            "module_connection",
+            enabled=bool(connection.get("enabled", True)),
+            recurrent=bool(connection.get("recurrent", False)),
+            **({"binding": spatial["bindings"][str(connection["innovation"])]} if spatial else {}),
+        )
         # The ordinary case is one untied gene per endpoint pair.  Store its semantics directly on
         # the edge rather than expanding one indistinguishable relation node per gene.  Parallel
         # forward/recurrent genes and tied genes retain relation nodes so multiplicity and tie
@@ -143,6 +150,13 @@ def _module_graph(payload: dict[str, Any], library: ModuleLibrary | None, visiti
             if int(identifier) in node_map:
                 _add_relation(graph, macro_node, node_map[int(identifier)], "macro_output", position=position)
     graph.add_node(max(graph.nodes, default=-1) + 1, label=_label("refine_steps", value=int(payload.get("refine_steps", 1))))
+    if spatial:
+        graph.add_node(max(graph.nodes, default=-1) + 1, label=_label("spatial_contract", version=spatial["version"], contract=spatial["contract"]))
+        for members in spatial.get("groups", {}).values():
+            group = max(graph.nodes, default=-1) + 1
+            graph.add_node(group, label=_label("circuit_definition"))
+            for member in members:
+                graph.add_edge(group, node_map[int(member)], label="member")
     return graph
 
 

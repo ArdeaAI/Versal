@@ -13,7 +13,7 @@
     "configs/xor_repro.toml"
   ],
   "canonical_config": "configs/smoke.toml",
-  "canonical_config_sha256": "5987dface97c1e31d77c2e2b778c5a6e02f66102190d9ed7783b3eccd683967b",
+  "canonical_config_sha256": "73e18904e301eb24c3e1b900a12c6d0dc6a6b0df7cebe37e77587a3a96ed7b10",
   "config_keys": [
     "dataset.min_fixed_query_samples",
     "dataset.n_samples",
@@ -169,22 +169,9 @@
     "orchestrator.evolve",
     "orchestrator.evolve_budget.composition",
     "orchestrator.evolve_budget.direct",
-    "orchestrator.evolve_budget.field",
     "orchestrator.evolve_budget.grammar",
     "orchestrator.evolve_budget.routed",
-    "orchestrator.field.assess_workers",
-    "orchestrator.field.audit_sites",
-    "orchestrator.field.elitism",
-    "orchestrator.field.evaluate.kind",
-    "orchestrator.field.pop_size",
-    "orchestrator.field.train.kind",
-    "orchestrator.field.train.lr",
-    "orchestrator.field.train.steps",
-    "orchestrator.field.train.weight_decay",
-    "orchestrator.field.train.writeback",
-    "orchestrator.field.train_sites",
-    "orchestrator.field.verify_chunk_size",
-    "orchestrator.field.verify_top_k",
+    "orchestrator.evolve_budget.spatial",
     "orchestrator.floor",
     "orchestrator.grammar.candidates_per_production",
     "orchestrator.grammar.composition_sizes",
@@ -243,6 +230,21 @@
     "orchestrator.routed.zero_shot_accept",
     "orchestrator.search_metric",
     "orchestrator.search_policy",
+    "orchestrator.spatial.assess_workers",
+    "orchestrator.spatial.chunk_size",
+    "orchestrator.spatial.crossover.kind",
+    "orchestrator.spatial.elitism",
+    "orchestrator.spatial.evaluate.kind",
+    "orchestrator.spatial.init.kind",
+    "orchestrator.spatial.max_activation_cells",
+    "orchestrator.spatial.max_expanded_edges",
+    "orchestrator.spatial.mutation.operators",
+    "orchestrator.spatial.pop_size",
+    "orchestrator.spatial.train.kind",
+    "orchestrator.spatial.train.lr",
+    "orchestrator.spatial.train.steps",
+    "orchestrator.spatial.train.weight_decay",
+    "orchestrator.spatial.train.writeback",
     "orchestrator.spatial_patches_n_patches",
     "orchestrator.stall_epsilon",
     "orchestrator.stall_generations",
@@ -298,13 +300,16 @@
     "orchestrator.direct",
     "orchestrator.direct.train",
     "orchestrator.evolve_budget",
-    "orchestrator.field",
-    "orchestrator.field.evaluate",
-    "orchestrator.field.train",
     "orchestrator.grammar",
     "orchestrator.refine",
     "orchestrator.routed",
     "orchestrator.routed.lifecycle",
+    "orchestrator.spatial",
+    "orchestrator.spatial.crossover",
+    "orchestrator.spatial.evaluate",
+    "orchestrator.spatial.init",
+    "orchestrator.spatial.mutation",
+    "orchestrator.spatial.train",
     "orchestrator.wall",
     "run",
     "run.duration",
@@ -344,7 +349,8 @@
     ],
     "crossover": [
       "neat",
-      "none"
+      "none",
+      "spatial"
     ],
     "decompose": [
       "input_subsets",
@@ -363,7 +369,8 @@
       "direct",
       "field",
       "grammar",
-      "routed"
+      "routed",
+      "spatial"
     ],
     "fitness": [
       "bounded_negative_query_loss",
@@ -388,7 +395,8 @@
       "cppn",
       "factored",
       "minimal",
-      "sparse"
+      "sparse",
+      "spatial_minimal"
     ],
     "init_estimator": [
       "cppn",
@@ -403,6 +411,9 @@
     ],
     "loop": [
       "hierarchical"
+    ],
+    "module_representation": [
+      "spatial"
     ],
     "mutation": [
       "add_connection",
@@ -424,6 +435,17 @@
       "prune_and_regrow",
       "remove_connection",
       "remove_hidden_node",
+      "spatial_add_node",
+      "spatial_bind",
+      "spatial_connect",
+      "spatial_group",
+      "spatial_prune",
+      "spatial_recurrent",
+      "spatial_repeat",
+      "spatial_reuse",
+      "spatial_share",
+      "spatial_split",
+      "spatial_weights",
       "split_node",
       "toggle_connection",
       "tweak_refine_steps",
@@ -449,7 +471,8 @@
       "direct",
       "field",
       "grammar",
-      "routed"
+      "routed",
+      "spatial"
     ],
     "train": [
       "gradient",
@@ -506,8 +529,23 @@
     },
     {
       "access": "read-write",
-      "condition": "grammar strategy rebuilds after the live library key set changes",
+      "condition": "atomic publication of a complete grammar snapshot",
       "path": "<library_dir>/grammar/grammar.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "completed grammar snapshot identity and mining parameters",
+      "path": "<library_dir>/grammar/catalog.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "unfinished grammar cursor at a task or shutdown boundary",
+      "path": "<library_dir>/grammar/preparation.json"
+    },
+    {
+      "access": "read-write",
+      "condition": "cached immutable-entry motif evidence",
+      "path": "<library_dir>/grammar/evidence/<digest>.json"
     },
     {
       "access": "read-write",

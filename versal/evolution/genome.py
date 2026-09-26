@@ -351,6 +351,9 @@ def make_acyclic(genome: Genome) -> Genome:
     - REPAIR: one incrementally-grown adjacency + an early-exit BFS per candidate edge, instead of
       rebuilding the adjacency per edge (the old per-edge `would_create_cycle` calls).
     """
+    repair = getattr(genome, "repair", None)
+    if repair is not None:
+        return repair()
     try:
         topological_order(genome)
     except ValueError:
@@ -392,6 +395,11 @@ def make_acyclic(genome: Genome) -> Genome:
 
 def genome_to_dict(genome: Genome) -> dict[str, Any]:
     """Serialize a genome to a plain dict (topology + weights), reloadable by `genome_from_dict`."""
+    from versal.representation import codec_for
+
+    codec = codec_for(genome)
+    if codec is not None:
+        return codec.serialize(genome)
     payload: dict[str, Any] = {
         "nodes": [
             {
@@ -421,6 +429,11 @@ def genome_to_dict(genome: Genome) -> dict[str, Any]:
 
 def genome_from_dict(data: dict[str, Any]) -> Genome:
     """Rebuild a genome from the dict produced by `genome_to_dict`."""
+    from versal.representation import codec_for
+
+    codec = codec_for(data)
+    if codec is not None:
+        return codec.restore(data)
     nodes: dict[int, NodeGene] = {}
     for node in data["nodes"]:
         node_id = int(node["id"])

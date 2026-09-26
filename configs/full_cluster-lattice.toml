@@ -45,10 +45,7 @@ decompose_first_above = "adaptive"
     microbatch_size = 0
     adaptive_microbatch = true
 
-  [orchestrator.field]
-  train_sites = 16384
-  audit_sites = 65536
-  verify_top_k = 8
+  [orchestrator.spatial]
   pop_size = 128
 
 [library]

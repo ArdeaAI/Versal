@@ -49,6 +49,7 @@ class Attempt:
     selected_support_accuracy: float | None = None
     phase: str | None = None
     strategy_work: dict[str, dict[str, float]] = field(default_factory=dict)
+    strategy_status: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -105,6 +106,8 @@ class Attempt:
                 data[name] = value
         if self.strategy_work:
             data["strategy_work"] = self.strategy_work
+        if self.strategy_status:
+            data["strategy_status"] = self.strategy_status
         return data
 
     @classmethod
@@ -146,6 +149,7 @@ class Attempt:
             selected_support_accuracy=data.get("selected_support_accuracy"),
             phase=data.get("phase"),
             strategy_work=dict(data.get("strategy_work", {})),
+            strategy_status=dict(data.get("strategy_status", {})),
         )
 
 

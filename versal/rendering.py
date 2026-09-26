@@ -177,6 +177,7 @@ class RenderSpec:
     width: float = 1.0
     height: float = 1.0
     flow_label: str | None = None
+    recipe_label: str | None = None
 
     @property
     def node_count(self) -> int:
@@ -636,6 +637,13 @@ def _build_genome(
         anchors = [positions[stub_id] for stub_id in macro.output_node_ids if stub_id in positions]
         callouts.append((child, anchors))
     spec.width, spec.height, _centers = _attach_callouts(spec, callouts, host_width, host_height, depth + 1)
+    from versal.spatial import SpatialGenome
+
+    if isinstance(genome, SpatialGenome):
+        assert genome.contract is not None
+        copies = sum(max(0, high - low) for placement in genome.placements.values() for low, high in [placement.active(genome.contract)])
+        definitions = len(genome.hidden_ids)
+        spec.recipe_label = f"spatial · {definitions} definition{'s' if definitions != 1 else ''} · {copies:,} placements · cost {genome.complexity():,}"
     return _Built(spec=spec, output_nodes=output_nodes)
 
 
@@ -1240,6 +1248,8 @@ def _render_spec_png(out_path: Path, spec: RenderSpec, title: str, *, dpi: int =
         # Reserve physical space before measuring marker size. The heading/key belong to the
         # canvas, so equal-aspect padding cannot collapse them onto the network or one another.
         heading = textwrap.fill(title, width=max(24, int(fig_w * 72 / 4.8)))
+        if spec.recipe_label:
+            heading += "\n" + textwrap.fill(spec.recipe_label, width=max(24, int(fig_w * 72 / 4.8)))
         key = _potential_flow_key(spec)
         key_columns = min(len(key), 3 if fig_w < 6 else 5) or 1
         key_rows = math.ceil(len(key) / key_columns)

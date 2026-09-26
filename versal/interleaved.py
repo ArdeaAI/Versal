@@ -374,7 +374,7 @@ class InterleavedSearch:
         remaining = refine_limit if started_with_incumbent else budget
         used, refined = 0, 0
         best_report: StrategyResult | None = None
-        work = {name: {"generations": 0.0, "evaluations": 0.0, "optimizer_steps": 0.0, "seconds": 0.0} for name in sessions}
+        work = {name: {"generations": 0.0, "evaluations": 0.0, "optimizer_steps": 0.0, "seconds": 0.0, "preparation_steps": 0.0, "preparation_seconds": 0.0} for name in sessions}
         tabu = ExecutableTabuSession(
             SnapshotTabuStore(state.tabu),
             identity,
@@ -397,8 +397,13 @@ class InterleavedSearch:
             return ready
 
         while remaining > 0 and not runtime.should_stop() and not runtime.should_shutdown():
-            ready = [name for name in sessions if name not in dormant and owner.evolve_shares[name] > 0 and eligible(name)]
-            if not ready:
+            ready = []
+            for name in sessions:
+                if runtime.should_stop() or runtime.should_shutdown():
+                    break
+                if name not in dormant and owner.evolve_shares[name] > 0 and eligible(name):
+                    ready.append(name)
+            if not ready or runtime.should_stop() or runtime.should_shutdown():
                 break
             total_share = sum(owner.evolve_shares[name] for name in ready)
             for name in ready:
@@ -412,6 +417,16 @@ class InterleavedSearch:
             evaluations, steps = session.evaluations, session.optimizer_steps
             outcome = session.advance(runtime)
             elapsed = time.perf_counter() - before
+            work[selected]["seconds"] += elapsed
+            stages = getattr(owner, "_active_stages", None)
+            if stages is not None:
+                stages[selected] = round(stages.get(selected, 0.0) + elapsed, 3)
+            if outcome.preparation_steps:
+                remaining -= outcome.preparation_steps
+                work[selected]["preparation_steps"] += outcome.preparation_steps
+                work[selected]["preparation_seconds"] += elapsed
+                owner.display.stage_result(selected, "continue", "preparing learned structures", seconds=elapsed, depth=depth)
+                continue
             outcome = owner._cross_validate_result(outcome, task)
             owner._consider_parent_report_result(outcome, depth=depth)
             if outcome.has_report_candidate and (best_report is None or owner._report_candidate_value(outcome) > owner._report_candidate_value(best_report)):
@@ -428,10 +443,6 @@ class InterleavedSearch:
             work[selected]["generations"] += cost
             work[selected]["evaluations"] += session.evaluations - evaluations
             work[selected]["optimizer_steps"] += session.optimizer_steps - steps
-            work[selected]["seconds"] += elapsed
-            stages = getattr(owner, "_active_stages", None)
-            if stages is not None:
-                stages[selected] = round(stages.get(selected, 0.0) + elapsed, 3)
             previous = self.from_record(state.frontier[selected]) if selected in state.frontier else None
             accepted = owner._accepts_result(outcome)
             improves_incumbent = accepted and self.improves(outcome, incumbent)
@@ -470,6 +481,10 @@ class InterleavedSearch:
         for session in sessions.values():
             if isinstance(session, RoutedSession):
                 session.finish()
+        for session in sessions.values():
+            saver = getattr(session.strategy, "save_preparation", None)
+            if saver is not None:
+                saver(runtime)
         state.sessions = {name: session.state_dict() for name, session in sessions.items()}
         state.encounters += 1
         self._save(identity, state)
@@ -478,6 +493,24 @@ class InterleavedSearch:
         result.refinement_generations = refined
         result.phase = phase
         result.strategy_work = work
+        result.strategy_status = {
+            name: {
+                "status": "ran" if work[name]["generations"] else "preparing" if work[name]["preparation_steps"] else "skipped" if session.skip_reason else "not_reached",
+                "reason": session.skip_reason
+                or (
+                    "generation completed"
+                    if work[name]["generations"]
+                    else "grammar preparation in progress"
+                    if work[name]["preparation_steps"]
+                    else "stop requested"
+                    if runtime.should_shutdown()
+                    else "task deadline reached"
+                    if runtime.should_stop()
+                    else "shared budget exhausted before allocation"
+                ),
+            }
+            for name, session in sessions.items()
+        }
         result.strategy_metrics.update(tabu.metrics())
         for name, session in sessions.items():
             if session.skip_reason is not None:

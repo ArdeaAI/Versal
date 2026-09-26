@@ -9,6 +9,8 @@ from versal.trials.orchestrated_trial import OrchestratedTrial
 from versal.utils.config import Config
 from versal.utils.logging import Logger
 from versal.utils.pipelines import VALID_MACHINE_ENVS, Pipeline
+from versal.utils.shutdown import EscapeShutdown, ForcedShutdown
+from versal.utils.status import BOARD
 
 
 def require_orchestrator(config: dict[str, Any]) -> None:
@@ -98,17 +100,27 @@ def main() -> None:
         config.current["machine_env"] = args.machine
     if args.clearml is not None:
         config.current["clearml_run"] = args.clearml
-    configure_precision(config.current)
-    configure_assess_pool(config.current)
-    logger = Logger.get_logger()
+    from versal.evolution.evolver import close_assess_pools
 
-    pipe = Pipeline(config.current, load_data=False)
-    logger.debug("pipeline: %s", pipe.get_pipeline_info())
-    try:
-        pipe.add_trial(OrchestratedTrial)
-        pipe.run_task()
-    except LibraryIntegrityError as error:
-        raise SystemExit(str(error)) from None
+    with EscapeShutdown(lambda: BOARD.event("Stop requested · saving at the next safe boundary · Ctrl-C again forces exit")):
+        try:
+            configure_precision(config.current)
+            configure_assess_pool(config.current)
+            logger = Logger.get_logger()
+            pipe = Pipeline(config.current, load_data=False)
+            logger.debug("pipeline: %s", pipe.get_pipeline_info())
+            pipe.add_trial(OrchestratedTrial)
+            pipe.run_task()
+            close_assess_pools()
+        except ForcedShutdown:
+            close_assess_pools(force=True)
+            raise SystemExit(130) from None
+        except LibraryIntegrityError as error:
+            close_assess_pools(force=True)
+            raise SystemExit(str(error)) from None
+        except BaseException:
+            close_assess_pools(force=True)
+            raise
 
 
 if __name__ == "__main__":

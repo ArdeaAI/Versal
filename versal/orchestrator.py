@@ -513,7 +513,7 @@ class Orchestrator:
             reporter = strategies.get("field")
             args = (candidate, task, result.field_template)
         else:
-            reporter = strategies.get("direct")
+            reporter = strategies.get(getattr(candidate, "representation", "direct"))
             if reporter is None and result.strategy == "grammar":
                 reporter = getattr(strategies.get("grammar"), "direct", None)
             args = (candidate, task)
@@ -582,7 +582,7 @@ class Orchestrator:
         return lambda fold, seed, deadline: self._evaluate_genome_fold(genome, fold, seed, deadline)
 
     def _evaluate_genome_fold(self, genome: Genome, task: Task, seed: int, deadline: float | None) -> dict[str, float]:
-        strategy: Any = dict(self.strategies).get("direct")
+        strategy: Any = dict(self.strategies).get(getattr(genome, "representation", "direct"))
         if strategy is None:
             grammar = dict(self.strategies).get("grammar")
             strategy = getattr(grammar, "direct", None)
@@ -764,7 +764,7 @@ class Orchestrator:
         if self.decompose_first_above != "adaptive":
             runtime = self._runtime()
             for name, strategy in self.strategies:
-                if name != "field":
+                if name not in {"field", "spatial"}:
                     continue
                 preflight = getattr(strategy, "preflight", None)
                 if preflight is not None and preflight(task, runtime).eligible:
@@ -973,14 +973,22 @@ class Orchestrator:
                 refine_generations=refine_generations,
                 report_metric=hit.report_metric,
                 report_strategy="lookup",
-                report_representation=("field" if hit.key is not None and "field_template" in self.library.load(hit.key).payload else hit.entry_type),
+                report_representation=(
+                    "field"
+                    if hit.key is not None and "field_template" in self.library.load(hit.key).payload
+                    else (self.library.load(hit.key).payload.get("representation", hit.entry_type) if hit.key is not None else hit.entry_type)
+                ),
                 task_metrics=dict(hit.task_metrics),
                 support_accuracy=hit.support_accuracy,
                 query_accuracy=hit.query_accuracy,
                 support_status=hit.support_status,
                 query_status=hit.query_status,
                 strategy_metrics=dict(self._last_refine_strategy_metrics),
-                representation=("field" if hit.key is not None and "field_template" in self.library.load(hit.key).payload else hit.entry_type),
+                representation=(
+                    "field"
+                    if hit.key is not None and "field_template" in self.library.load(hit.key).payload
+                    else (self.library.load(hit.key).payload.get("representation", hit.entry_type) if hit.key is not None else hit.entry_type)
+                ),
             )
         )
         return hit
@@ -1030,7 +1038,11 @@ class Orchestrator:
         self.display.stage_started("refine")
         refine_started = time.perf_counter()
         entry = self.library.load(hit.key)
-        strategy_name = "field" if entry.entry_type == MODULE and "field_template" in entry.payload else ("direct" if entry.entry_type == MODULE else "composition")
+        strategy_name = (
+            "field"
+            if entry.entry_type == MODULE and "field_template" in entry.payload
+            else (entry.payload.get("representation", "direct") if entry.entry_type == MODULE else "composition")
+        )
         strategy = dict(self.strategies).get(strategy_name)
         if strategy is None:
             self.counters["refine_skipped_no_strategy"] += 1
@@ -1374,6 +1386,15 @@ class Orchestrator:
 
         contract = field_contract(task)
         candidates = self.library.query_field(contract, limit=self.quick_eval_top_k) if contract is not None else []
+        from versal.spatial import SpatialContract
+
+        try:
+            spatial_contract = SpatialContract.from_task(task)
+            candidates.extend(
+                entry for entry in self.library.query_spatial(spatial_contract) if SpatialContract.from_dict(entry.payload["spatial"]["contract"]) == spatial_contract
+            )
+        except ValueError:
+            pass
         exact = self.library.query(
             input_signature=io["inputs"][0]["signature"],
             input_width=io["inputs"][0]["width"],
@@ -1470,6 +1491,23 @@ class Orchestrator:
                 metrics.update({"query_accuracy": 0.0, "query_loss": float("inf"), "cross_resolution_reuse": 1.0})
                 if spec.encoded.query_input is not None and task.query:
                     metrics.update(evaluate_field_module(module, task, contract, split="query", deadline=getattr(self, "_solve_deadline", None)))
+                return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None)
+            if entry.entry_type == MODULE and entry.payload.get("representation") == "spatial":
+                from versal.spatial import SpatialContract, SpatialGenome, SpatialNet, evaluate_spatial
+
+                genome = SpatialGenome.from_payload(entry.payload)
+                if genome.contract != SpatialContract.from_task(task):
+                    return None  # a differently bound recipe is a seed, not this task's frozen executable
+                module = SpatialNet(
+                    genome,
+                    library_dir=str(self.library.root),
+                    max_inline_depth=self.loop.max_inline_depth,
+                    deadline=getattr(self, "_solve_deadline", None),
+                    _reference_stack=(entry.key,),
+                )
+                metrics = evaluate_spatial(module, task, split="support")
+                if spec.encoded.query_input is not None and task.query:
+                    metrics.update(evaluate_spatial(module, task, split="query"))
                 return AssessedComposition(comp=CompositionGenome(), metrics=metrics, fitness=0.0, net=None)
             if entry.entry_type == MODULE and self._entry_is_temporal(entry):
                 adapter = temporal_adapter(task, max_inline_depth=self.loop.max_inline_depth)
@@ -1738,7 +1776,7 @@ class Orchestrator:
         runtime.deadline = min(value for value in (runtime.deadline, probe_deadline) if value is not None)
         bounded_deadline = runtime.deadline
         runtime.deadline_exceeded = lambda: bounded_deadline is not None and time.perf_counter() >= bounded_deadline
-        for name in ("field", "direct"):
+        for name in ("field", "spatial", "direct"):
             strategy: Any = dict(self.strategies).get(name)
             if strategy is None:
                 continue
@@ -1847,6 +1885,7 @@ class Orchestrator:
             "rung": task.meta.rung,
             "depth": depth,
             "strategy": result.strategy,
+            "representation": result.representation,
             "accepted_metric": result.metric,
             "weight_robustness": result.champion_metrics.get("weight_robustness", 0.0),
             "behavior": _genome_behavior(result.champion_genome),
@@ -2219,6 +2258,7 @@ class Orchestrator:
             selected_support_accuracy=_finite_accuracy(result.champion_metrics, "support_accuracy"),
             phase=result.phase,
             strategy_work=result.strategy_work,
+            strategy_status=result.strategy_status,
         )
 
     def _solution_from_result(self, result: StrategyResult, key: str | None, *, report_result: StrategyResult | None = None) -> Solution:

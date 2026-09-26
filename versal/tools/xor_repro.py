@@ -52,7 +52,9 @@ def _checkpoint(orchestrator: Orchestrator) -> dict[str, Any]:
     }
 
 
-def run_seed(config: dict[str, Any], directory: Path, *, seed: int, encounters: int = 100, policy: str = "interleaved", resume: bool = False) -> dict[str, Any]:
+def run_seed(
+    config: dict[str, Any], directory: Path, *, seed: int, encounters: int = 100, policy: str = "interleaved", resume: bool = False, stop_at_minimum: bool = False
+) -> dict[str, Any]:
     """
     Run or resume one cold-library experiment and retain executable final evidence.
     """
@@ -74,7 +76,16 @@ def run_seed(config: dict[str, Any], directory: Path, *, seed: int, encounters: 
         digest.update(path.read_bytes())
     manifest = directory / "invocations.json"
     invocations = json.loads(manifest.read_text()) if manifest.exists() else []
-    invocations.append({"code_sha256": digest.hexdigest(), "python": platform.python_version(), "torch": torch.__version__, "resume": resume, "requested_encounters": encounters})
+    invocations.append(
+        {
+            "code_sha256": digest.hexdigest(),
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "resume": resume,
+            "requested_encounters": encounters,
+            "stop_at_minimum": stop_at_minimum,
+        }
+    )
     manifest.write_text(json.dumps(invocations, indent=2))
     (directory / "config.json").write_text(json.dumps(config, indent=2, default=str))
     torch.set_num_threads(1)
@@ -120,6 +131,8 @@ def run_seed(config: dict[str, Any], directory: Path, *, seed: int, encounters: 
         (directory / "trajectory.json").write_text(json.dumps(rows, indent=2))
         write_checkpoint(directory, _checkpoint(orchestrator))
         print(json.dumps({"seed": seed, "policy": policy, **{k: v for k, v in row.items() if k != "work"}}), flush=True)
+        if stop_at_minimum and row["support"] == 1.0 and row["complexity"] is not None and row["complexity"] <= 5:
+            break
     final = rows[-1]
     closure: dict[str, Any] = {}
     pending = [final["key"]] if final["key"] else []
@@ -191,10 +204,19 @@ def main() -> None:
     parser.add_argument("--encounters", type=int, default=100)
     parser.add_argument("--policy", choices=["interleaved", "ladder"], default="interleaved")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--stop-at-minimum", action="store_true", help="End a seed once a perfect support solution reaches complexity <= 5; query remains report-only.")
     args = parser.parse_args()
     config = Config(args.config).current
     summaries = [
-        run_seed(config, args.output / f"{args.policy}-seed{seed}", seed=int(seed), encounters=args.encounters, policy=args.policy, resume=args.resume)
+        run_seed(
+            config,
+            args.output / f"{args.policy}-seed{seed}",
+            seed=int(seed),
+            encounters=args.encounters,
+            policy=args.policy,
+            resume=args.resume,
+            stop_at_minimum=args.stop_at_minimum,
+        )
         for seed in args.seeds.split(",")
     ]
     print(json.dumps({"passed": all(summary["passed"] for summary in summaries), "seeds": len(summaries)}), flush=True)

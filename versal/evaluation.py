@@ -115,6 +115,9 @@ def output_features(encoded: EncodedSupport) -> int:
 
 def support_loss(module: torch.nn.Module, encoded: EncodedTask) -> torch.Tensor:
     """Differentiable loss on the support set, for the gradient train operator."""
+    custom_loss = getattr(module, "training_loss", None)
+    if custom_loss is not None:
+        return custom_loss(encoded)
     x, _descriptor = encoded.support_input
     target, mask, descriptor = encoded.support_target
     raw = as_logits(module(x), descriptor, target_positions(target))

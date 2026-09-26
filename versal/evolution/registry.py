@@ -57,7 +57,7 @@ def build_evolver(config: dict[str, Any]) -> "Evolver":
     """Assemble an `Evolver` from the nested `[evolution]`/`[substrate]`/`[fitness]` config tables."""
     # Local imports keep the operator modules (which import Registry from here) free of a cycle,
     # while still triggering their @register side effects.
-    from versal.evolution import crossover, evaluate, fitness, init, mutation, selection, speciation, train
+    from versal.evolution import crossover, evaluate, fitness, init, mutation, selection, spatial_ops, speciation, train  # noqa: F401
     from versal.evolution.evolver import Evolver
     from versal.reference_depth import configured_max_inline_depth
 

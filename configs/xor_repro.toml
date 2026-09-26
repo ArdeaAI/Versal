@@ -27,7 +27,7 @@ search_policy = "interleaved"
     # Batch small CPU candidates as well; population sizes and candidate update counts are unchanged.
     min_batch_nodes = 0
 
-  [orchestrator.field]
+  [orchestrator.spatial]
   assess_workers = 0
 
 [evolution]

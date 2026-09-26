@@ -50,6 +50,49 @@ def _build_field(config: dict[str, Any]) -> "FieldStrategy":
     )
 
 
+@EVOLVE_STRATEGY.register("spatial")
+def _build_spatial(config: dict[str, Any]) -> Any:
+    from versal.strategy_spatial import SpatialStrategy
+
+    table = config.get("orchestrator", {}).get("spatial", {}) or {}
+    evolution = {key: value for key, value in config.get("evolution", {}).items() if key != "loop"}
+    evolution.update(
+        pop_size=48,
+        assess_workers=0,
+        init={"kind": "spatial_minimal"},
+        crossover={"kind": "spatial"},
+        mutation={
+            "operators": [
+                "spatial_weights",
+                "spatial_add_node",
+                "spatial_connect",
+                "spatial_bind",
+                "spatial_repeat",
+                "spatial_group",
+                "spatial_split",
+                "spatial_share",
+                "spatial_prune",
+                "mutate_activation",
+                "mutate_aggregation",
+                "spatial_reuse",
+                "spatial_recurrent",
+                "tweak_refine_steps",
+            ]
+        },
+    )
+    for key in ("pop_size", "elitism", "assess_workers", "init", "crossover", "mutation", "train", "evaluate", "novelty", "halving_stages", "halving_keep"):
+        if key in table:
+            evolution[key] = table[key]
+    overlay = dict(config) | {"evolution": evolution, "library_dir": config.get("orchestrator", {}).get("library_dir", "library")}
+    return SpatialStrategy(
+        evolver=build_evolver(overlay),
+        blind_query=bool(config.get("orchestrator", {}).get("blind_query", False)),
+        chunk_size=max(1, int(table.get("chunk_size", 32768))),
+        max_expanded_edges=max(1, int(table.get("max_expanded_edges", 1_000_000))),
+        max_activation_cells=max(1, int(table.get("max_activation_cells", 8_000_000))),
+    )
+
+
 @EVOLVE_STRATEGY.register("direct")
 def _build_direct(config: dict[str, Any]) -> "DirectStrategy":
     overlay = dict(config)

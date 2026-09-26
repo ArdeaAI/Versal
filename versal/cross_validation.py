@@ -207,6 +207,11 @@ def fresh_genome_weights(genome: Genome, seed: int) -> Genome:
     fresh = genome.clone()
     fresh.connections = connections
     fresh.growth_hints = None
+    from versal.spatial import SpatialGenome
+
+    if isinstance(fresh, SpatialGenome):
+        # Fresh fitting must reset independent copy parameters as well as gene defaults.
+        fresh.parameters = {}
     return fresh
 
 

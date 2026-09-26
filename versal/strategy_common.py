@@ -82,6 +82,8 @@ class StrategyResult:
     phase: str | None = None
     strategy_work: dict[str, dict[str, float]] = field(default_factory=dict)
     refinement_generations: int = 0
+    preparation_steps: int = 0
+    strategy_status: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
     def has_report_candidate(self) -> bool:

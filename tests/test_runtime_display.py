@@ -13,7 +13,8 @@ from versal.utils.runtime_display import STAGES, RuntimeDisplay
 
 def _render_display(width: int = 100, *, verbose: bool = False) -> tuple[RuntimeDisplay, io.StringIO]:
     stream = io.StringIO()
-    console = Console(file=stream, force_terminal=True, color_system="standard", no_color=False, width=width)
+    # Rich's TERM=dumb fallback ignores an explicit width unless height is also set.
+    console = Console(file=stream, force_terminal=True, color_system="standard", no_color=False, width=width, height=25)
     return RuntimeDisplay(console, verbose=verbose), stream
 
 
@@ -150,7 +151,7 @@ def test_graceful_shutdown_panel_explains_escape_and_missing_evaluation() -> Non
     display.run_finished([], seconds=1.2, library_size=2, status="stopped")
 
     output = stream.getvalue()
-    assert "Escape requested a graceful stop" in output
+    assert "a graceful stop was requested" in output
     assert "run was stopped before held-out evaluation" in output
     assert "Run stopped gracefully" in output
 

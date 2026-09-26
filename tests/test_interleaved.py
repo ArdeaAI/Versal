@@ -439,6 +439,7 @@ def test_task_boundary_resume_matches_uninterrupted_search(tmp_path):
         for row in rows:
             for work in row["work"].values():
                 work.pop("seconds")
+                work.pop("preparation_seconds", None)
     assert continuous == resumed
     first = json.loads((tmp_path / "continuous" / "checkpoint.json").read_text())
     second = json.loads((tmp_path / "resumed" / "checkpoint.json").read_text())

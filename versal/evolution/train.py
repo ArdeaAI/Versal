@@ -579,6 +579,9 @@ def _gradient_batched_impl(
 
 def _writeback(genome: Genome, module: SubstrateModule) -> Genome:
     """Copy the module's tuned weights back onto the matching enabled connection genes."""
+    writer = getattr(module, "writeback", None)
+    if writer is not None:
+        return writer(genome)
     tuned = module.export_weights()
     child = genome.clone()
     child.connections = [
