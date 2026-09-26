@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from versal import main as main_module
+from versal.library import LibraryIntegrityError
 from versal.main import load_run_config, require_orchestrator
 from versal.utils.config import Config
 
@@ -22,6 +23,29 @@ def test_default_config_drives_the_orchestrated_trial():
     require_orchestrator(config.current)
     assert config.current["orchestrator"].get("evolve")
     assert config.current["config_path"] == str(Config.DEFAULT_CONFIG)
+
+
+@pytest.mark.parametrize("phase", ["startup", "running"])
+def test_library_integrity_failure_exits_with_recovery_message(monkeypatch: pytest.MonkeyPatch, phase: str) -> None:
+    message = "Library is incomplete; restore a complete backup or use --library-dir <new-directory>."
+
+    def fail(*_args) -> None:
+        raise LibraryIntegrityError(message)
+
+    pipeline = SimpleNamespace(
+        get_pipeline_info=lambda: "{}",
+        add_trial=fail if phase == "startup" else lambda *_args: None,
+        run_task=fail if phase == "running" else lambda: None,
+    )
+    monkeypatch.setattr(main_module, "Pipeline", lambda *_args, **_kwargs: pipeline)
+    monkeypatch.setattr(main_module, "configure_assess_pool", lambda _config: None)
+    monkeypatch.setattr(sys, "argv", ["app"])
+
+    with pytest.raises(SystemExit) as failure:
+        main_module.main()
+
+    assert str(failure.value) == message
+    assert failure.value.__suppress_context__
 
 
 def test_implicit_resume_uses_effective_run_snapshot(tmp_path):

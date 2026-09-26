@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from versal.library import LibraryIntegrityError
 from versal.trials.orchestrated_trial import OrchestratedTrial
 from versal.utils.config import Config
 from versal.utils.logging import Logger
@@ -103,8 +104,11 @@ def main() -> None:
 
     pipe = Pipeline(config.current, load_data=False)
     logger.debug("pipeline: %s", pipe.get_pipeline_info())
-    pipe.add_trial(OrchestratedTrial)
-    pipe.run_task()
+    try:
+        pipe.add_trial(OrchestratedTrial)
+        pipe.run_task()
+    except LibraryIntegrityError as error:
+        raise SystemExit(str(error)) from None
 
 
 if __name__ == "__main__":

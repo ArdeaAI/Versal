@@ -1,15 +1,28 @@
 """Module library: add/query/load, dedupe, structural signatures, graft, and the flat-loop mutation."""
 
+import json
 import random
+import shutil
 from pathlib import Path
 from typing import cast
 
+import pytest
 import torch
 
 from versal.dataset.icarus import Task, TaskKind, TaskMeta
 from versal.evolution.genome import ConnectionGene, Genome, InnovationTracker, NodeGene, NodeKind, genome_to_dict
 from versal.evolution.mutation import MutationContext, add_library_module
-from versal.library import INVALID_EXPANDED_COMPLEXITY, MODULE, LibraryEntry, ModuleLibrary, expanded_payload_complexity, graft, payload_shell_complexity, task_io
+from versal.library import (
+    INVALID_EXPANDED_COMPLEXITY,
+    MODULE,
+    LibraryEntry,
+    LibraryIntegrityError,
+    ModuleLibrary,
+    expanded_payload_complexity,
+    graft,
+    payload_shell_complexity,
+    task_io,
+)
 from versal.substrate import decode
 
 _IO = {"inputs": [{"signature": "BINARY|K", "width": 2}], "output": {"signature": "BINARY|K", "width": 1}}
@@ -41,6 +54,89 @@ def test_persistence_across_reopen(tmp_path: Path, solving_genome: Genome) -> No
     reopened = ModuleLibrary(root)
     assert reopened.keys() == [key]
     assert reopened.load(key).payload == genome_to_dict(solving_genome)
+
+
+def test_incomplete_library_reports_missing_payloads_without_rewriting(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    missing = _module_entry(library, solving_genome)
+    retained = _module_entry(library, linear_genome)
+    (root / "entries" / f"{missing}.json").unlink()
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    with pytest.raises(LibraryIntegrityError, match="1 of 2 indexed entry files are missing") as failure:
+        ModuleLibrary(root)
+
+    assert missing in str(failure.value)
+    assert "--library-dir" in str(failure.value)
+    assert {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+    assert (root / "entries" / f"{retained}.json").is_file()
+
+
+@pytest.mark.parametrize("reset", ["remove", "replace", "entries", "index"])
+@pytest.mark.parametrize("operation", ["add", "dedupe", "flush", "retire", "refine", "lifecycle", "gc"])
+def test_live_writer_cannot_resurrect_or_overwrite_reset_library(tmp_path: Path, solving_genome: Genome, linear_genome: Genome, reset: str, operation: str) -> None:
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    key = _module_entry(library, solving_genome)
+    library.load(key)  # payload survives in memory even when its file is deleted
+    library.bump_stats(key, attributed_fitness=1.0)
+    library.configure_lifecycle(library_patience_tasks=2)
+    if operation == "gc":
+        library.retire(key)
+
+    if reset == "remove":
+        shutil.rmtree(root)
+    elif reset == "replace":
+        root.rename(tmp_path / "old")
+        _module_entry(ModuleLibrary(root), linear_genome)
+    elif reset == "entries":
+        (root / "entries").rename(root / "old_entries")
+        (root / "entries").mkdir()
+    else:
+        (root / "index.json").unlink()
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    mutations = {
+        "add": lambda: _module_entry(library, linear_genome),
+        "dedupe": lambda: _module_entry(library, solving_genome),
+        "flush": library.flush_stats,
+        "retire": lambda: library.retire(key),
+        "refine": lambda: library.record_refinement(key, improved=True),
+        "lifecycle": library.finish_root_task,
+        "gc": library.collect_garbage,
+    }
+
+    with pytest.raises(LibraryIntegrityError, match="removed or replaced during this run"):
+        mutations[operation]()
+
+    assert {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+    if reset == "remove":
+        assert not root.exists()
+        fresh = ModuleLibrary(root)
+        assert len(fresh) == 0
+        new_key = _module_entry(fresh, linear_genome)
+        assert ModuleLibrary(root).keys() == [new_key]
+
+
+def test_interrupted_index_write_keeps_previous_index(tmp_path: Path, solving_genome: Genome, monkeypatch: pytest.MonkeyPatch) -> None:
+    from versal import library as library_module
+
+    root = tmp_path / "lib"
+    library = ModuleLibrary(root)
+    key = _module_entry(library, solving_genome)
+    original = (root / "index.json").read_bytes()
+
+    def fail_replace(*_args) -> None:
+        raise OSError("interrupted index publication")
+
+    monkeypatch.setattr(library_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted index publication"):
+        library.retire(key)
+
+    assert (root / "index.json").read_bytes() == original
+    assert json.loads(original)[0]["retired"] is False
+    assert ModuleLibrary(root).load(key).payload == genome_to_dict(solving_genome)
+    assert not list(root.glob(".*.tmp"))
 
 
 def test_query_filters_and_ranking(tmp_path: Path, solving_genome: Genome, linear_genome: Genome) -> None:

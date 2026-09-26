@@ -38,6 +38,7 @@ from versal.evolution.registry import Registry
 from versal.evolution.train import _writeback
 from versal.library import COMPOSITION, MODULE, graft, module_level
 from versal.strategy_common import StrategyResult, StrategyRuntime, _module_size_metrics, _restamp_composition, _restamp_genome, comp_size_metrics
+from versal.temporal import TemporalTaskAdapter
 
 SESSION_STRATEGY: Registry = Registry("strategy_session")
 
@@ -293,7 +294,9 @@ class DirectSession(StrategySession):
             )
             return
         original_init = evolver.init_op
-        grid = getattr(self.strategy, "_grid_shape", lambda _task: None)(self.task)
+        # Recurrent inputs represent features per time step, not cells across the whole sequence.
+        # Match DirectStrategy.__call__: spatial coordinates apply only to non-temporal adapters.
+        grid = None if isinstance(self.adapter, TemporalTaskAdapter) else getattr(self.strategy, "_grid_shape", lambda _task: None)(self.task)
         if grid is not None:
             from versal.evolution.init import stamp_input_coordinates
 

@@ -4,19 +4,24 @@ Policy, exact-task identity, and persistent population regressions.
 
 import copy
 import json
+import math
 import random
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import torch
 
 from tests.test_orchestrator import _orchestrator
+from versal.dataset.icarus import Axis, Field, Task, TaskKind, TaskMeta, ValueType
 from versal.evolution.genome import NodeGene, NodeKind
 from versal.interleaved import TaskSearchState
 from versal.library import MODULE, ModuleLibrary
 from versal.orchestrator import comp_task_spec
 from versal.strategy_common import StrategyResult
+from versal.strategy_direct import DirectStrategy
 from versal.strategy_sessions import SESSION_STRATEGY, DirectSession, StrategySession
+from versal.temporal import TemporalTaskAdapter
 from versal.topology import task_content_fingerprint
 
 
@@ -102,6 +107,87 @@ def test_direct_population_round_trip_preserves_rng_species_and_novelty(tmp_path
     restored = DirectSession(strategy, xor_task, spec, seed=7, saved=saved)
     restored.advance(runtime)
     assert restored.state_dict() == expected
+
+
+def _multichannel_temporal_task(*, steps: int = 8, time_first: bool = False, sequence_output: bool = False) -> Task:
+    """
+    Four features per step, including the channel/time layout used by pole tasks.
+    """
+    samples = torch.rand(8, 4, steps, generator=torch.Generator().manual_seed(17))
+    pairs: list[tuple[Field, Field]] = []
+    for sample in samples:
+        signal = sample.mean(dim=0)
+        source = Field(sample.T if time_first else sample, (Axis.TIME, Axis.CHANNEL) if time_first else (Axis.CHANNEL, Axis.TIME), ValueType.CONTINUOUS, None, (0.0, 1.0), None)
+        target = Field(signal if sequence_output else signal[-1:], (Axis.TIME,) if sequence_output else (Axis.CHANNEL,), ValueType.CONTINUOUS, None, (0.0, 1.0), None)
+        pairs.append((source, target))
+    return Task(TaskMeta(4, TaskKind.MAP, "multichannel_sequence", fixed_split=True), support=pairs[:6], query=pairs[6:])
+
+
+@pytest.mark.parametrize("steps", [1, 8])
+@pytest.mark.parametrize("time_first", [False, True])
+@pytest.mark.parametrize("sequence_output", [False, True])
+def test_multichannel_temporal_session_advances_and_resumes(tmp_path: Path, steps: int, time_first: bool, sequence_output: bool) -> None:
+    task = _multichannel_temporal_task(steps=steps, time_first=time_first, sequence_output=sequence_output)
+    orchestrator = _orchestrator(
+        tmp_path,
+        table=_policy(evolve=["direct"], direct={"pop_size": 4, "train": {"kind": "gradient", "steps": 2, "lr": 0.05, "writeback": True}}),
+    )
+    strategy = dict(orchestrator.strategies)["direct"]
+    assert isinstance(strategy, DirectStrategy)
+    original_init = strategy.evolver.init_op
+    runtime = orchestrator._runtime()
+    spec = comp_task_spec(task, include_query=False)
+    session = DirectSession(strategy, task, spec, seed=7)
+    session.advance(runtime)
+
+    assert strategy.evolver.init_op is original_init
+    assert isinstance(session.adapter, TemporalTaskAdapter)
+    assert session.adapter.n_inputs == 4
+    assert session.adapter.mode == ("all" if sequence_output else "last")
+    assert session.adapter.encoded.support_input[0].shape == (6, steps, 4)
+    assert session.adapter.encoded.query_input is session.adapter.encoded.query_target is None
+    assert session.state is not None
+    for member in session.state.population:
+        assert len(member.genome.input_ids) == 4
+        assert all(member.genome.nodes[node_id].coordinate is None for node_id in member.genome.input_ids)
+    saved = copy.deepcopy(session.state_dict())
+
+    result = session.advance(runtime)
+    assert result.champion_genome is not None
+    assert math.isfinite(result.champion_metrics["support_loss"])
+    module = session.adapter.decode(result.champion_genome)
+    assert module(session.adapter.encoded.support_input[0]).shape == (6, steps if sequence_output else 1)
+    restored = DirectSession(strategy, task, spec, seed=7, saved=saved)
+    restored.advance(runtime)
+    assert restored.state_dict() == session.state_dict()
+    assert strategy.evolver.init_op is original_init
+
+
+def test_shared_direct_strategy_restores_initializer_between_spatial_and_temporal_tasks(tmp_path: Path) -> None:
+    temporal = _multichannel_temporal_task()
+
+    def spatial_pairs(pairs: list[tuple[Field, Field]]) -> list[tuple[Field, Field]]:
+        return [(replace(source, data=source.data.unsqueeze(0), axes=(Axis.CHANNEL, Axis.HEIGHT, Axis.WIDTH)), target) for source, target in pairs]
+
+    spatial = replace(temporal, meta=replace(temporal.meta, rung=15, name="spectrogram"), support=spatial_pairs(temporal.support), query=spatial_pairs(temporal.query))
+    orchestrator = _orchestrator(
+        tmp_path,
+        table=_policy(evolve=["direct"], direct={"pop_size": 4, "train": {"kind": "gradient", "steps": 2, "lr": 0.05, "writeback": True}}),
+    )
+    strategy = dict(orchestrator.strategies)["direct"]
+    assert isinstance(strategy, DirectStrategy)
+    original_init = strategy.evolver.init_op
+    snapshots = []
+    for task in (spatial, temporal, spatial):
+        session = DirectSession(strategy, task, comp_task_spec(task, include_query=False), seed=7)
+        session.advance(orchestrator._runtime())
+        assert strategy.evolver.init_op is original_init
+        assert session.state is not None
+        for member in session.state.population:
+            coordinates = [member.genome.nodes[node_id].coordinate for node_id in member.genome.input_ids]
+            assert coordinates == ([(0.0, float(channel), float(step)) for channel in range(4) for step in range(8)] if task is spatial else [None] * 4)
+        snapshots.append(session.state_dict())
+    assert snapshots[0] == snapshots[2]
 
 
 def test_compact_native_parent_survives_population_selection(tmp_path, xor_task, solving_genome):

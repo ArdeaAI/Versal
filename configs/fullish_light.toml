@@ -12,11 +12,11 @@ experiment = "orchestrated_overmind_fullish_lite"
 machine = "MonadMetal"
 
 [schedule]
-tasks_per_rung = 100
-rungs = [1]
+tasks_per_rung = 3
+rungs = "all"
 
 [orchestrator]
-tasks = 100
+tasks = 54
 max_task_seconds = 1000
 max_total_task_seconds = 3600
 decompose_first_above = "adaptive"

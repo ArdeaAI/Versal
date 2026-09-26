@@ -18,6 +18,7 @@ the Icarus dataset.
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -37,6 +38,12 @@ INVALID_EXPANDED_COMPLEXITY = 10**12
 AdmissionPolicy = Callable[..., "AdmissionDecision"]
 
 LIBRARY_ADMISSION: Registry = Registry("library_admission")
+
+
+class LibraryIntegrityError(RuntimeError):
+    """
+    Persistent library state was removed or is incomplete.
+    """
 
 
 @dataclass(frozen=True)
@@ -326,13 +333,63 @@ class ModuleLibrary:
         self._lifecycle_enabled = False
         self._library_patience_tasks = 0
         self._task_epoch = 0
+        self._storage_dirs: dict[Path, tuple[int, int]] = {}
+        self._has_index = self._index_path.exists()
         if self._index_path.exists():
             self._index = {item["key"]: item for item in json.loads(self._index_path.read_text())}
+            missing = sorted(key for key in self._index if not (self._entries_dir / f"{key}.json").is_file())
+            if missing:
+                raise LibraryIntegrityError(
+                    f"Library at {self.root} is incomplete: {len(missing)} of {len(self._index)} indexed entry files are missing "
+                    f"(including {missing[0]}). Stop any runs using this library, then restore a complete backup or move the entire library "
+                    "directory aside and start a new run. For a fresh library without moving files, use --library-dir <new-directory>."
+                )
         if self._lifecycle_path.exists():
             try:
                 self._task_epoch = int(json.loads(self._lifecycle_path.read_text()).get("task_epoch", 0))
             except (OSError, ValueError, json.JSONDecodeError):
                 self._task_epoch = 0
+        self._remember_storage_dirs()
+
+    def _remember_storage_dirs(self) -> None:
+        for path in (self.root, self._entries_dir):
+            if path.is_dir():
+                stat = path.stat()
+                self._storage_dirs.setdefault(path, (stat.st_dev, stat.st_ino))
+
+    def _check_storage(self) -> None:
+        """
+        Refuse to resurrect cached state after its directory or index was removed.
+        """
+        changed = self._has_index and not self._index_path.is_file()
+        for path, identity in self._storage_dirs.items():
+            try:
+                stat = path.stat()
+                changed |= (stat.st_dev, stat.st_ino) != identity
+            except FileNotFoundError:
+                changed = True
+        if changed:
+            raise LibraryIntegrityError(
+                f"Library at {self.root} was removed or replaced during this run; refusing to write cached state back into it. "
+                "Stop all runs using this library before resetting its directory, then start a new run."
+            )
+
+    def _write_json(self, path: Path, value: Any) -> None:
+        """
+        Publish one complete record while guarding against a deleted live library.
+        """
+        self._check_storage()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._remember_storage_dirs()
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(json.dumps(value, indent=2))
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        if path == self._index_path:
+            self._has_index = True
 
     def __len__(self) -> int:
         return len(self._index)
@@ -354,8 +411,7 @@ class ModuleLibrary:
     def _write_index(self) -> None:
         # Scale watchpoint: a full index rewrite per admission is O(entries); fine at hundreds,
         # revisit (append-log or sqlite) when the library reaches thousands.
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._index_path.write_text(json.dumps(sorted(self._index.values(), key=lambda item: item["key"]), indent=2))
+        self._write_json(self._index_path, sorted(self._index.values(), key=lambda item: item["key"]))
 
     def add(
         self,
@@ -382,8 +438,7 @@ class ModuleLibrary:
             self._refresh_on_dedupe(key, provenance)
             return key
         entry = LibraryEntry(key=key, entry_type=entry_type, level=level, io=io, payload=payload, weights_frozen=weights_frozen, provenance=provenance)
-        self._entries_dir.mkdir(parents=True, exist_ok=True)
-        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_json(self._entries_dir / f"{key}.json", entry.to_dict())
         self._index[key] = {
             "key": key,
             "entry_type": entry_type,
@@ -424,7 +479,7 @@ class ModuleLibrary:
         history = entry.provenance.setdefault("readmissions", [])
         history.append({k: provenance.get(k) for k in ("task", "rung", "depth", "accepted_metric", "weight_robustness", "validation_status", "cv_pass_fraction")})
         del history[:-10]  # cap file growth
-        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_json(self._entries_dir / f"{key}.json", entry.to_dict())
         self._write_index()
 
     def retire(self, key: str, *, reason: str = "policy") -> None:
@@ -574,6 +629,7 @@ class ModuleLibrary:
         swept = sorted(key for key in self._index if key not in marked)
         if dry_run or not swept:
             return swept
+        self._check_storage()
         for key in swept:
             del self._index[key]
             self._macro_depth_cache.pop(key, None)
@@ -708,10 +764,7 @@ class ModuleLibrary:
         return sorted(retired)
 
     def _write_lifecycle(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self._lifecycle_path.with_name(f".{self._lifecycle_path.name}.tmp")
-        temporary.write_text(json.dumps({"schema_version": 1, "task_epoch": self._task_epoch}, indent=2) + "\n")
-        os.replace(temporary, self._lifecycle_path)
+        self._write_json(self._lifecycle_path, {"schema_version": 1, "task_epoch": self._task_epoch})
 
     def flush_stats(self) -> None:
         """Persist deferred `bump_stats` mutations: rewrite each dirty entry's file, then the index
@@ -725,7 +778,7 @@ class ModuleLibrary:
                 continue  # swept while dirty; nothing durable to update
             entry = self.load(key)
             entry.stats = summary.setdefault("stats", entry.stats)
-            (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+            self._write_json(self._entries_dir / f"{key}.json", entry.to_dict())
         self._dirty_stats.clear()
         self._write_index()
 
@@ -746,7 +799,7 @@ class ModuleLibrary:
         stats["refine_failures_since_gain"] = 0 if improved else int(stats.get("refine_failures_since_gain", 0)) + 1
         entry = self.load(key)
         entry.stats = stats
-        (self._entries_dir / f"{key}.json").write_text(json.dumps(entry.to_dict(), indent=2))
+        self._write_json(self._entries_dir / f"{key}.json", entry.to_dict())
         self._write_index()
 
     def seed_refine_stats(self, key: str, *, attempts: int, failures: int) -> None:
